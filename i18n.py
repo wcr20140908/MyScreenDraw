@@ -250,6 +250,13 @@ _BASE = {
     "text_input_title": ("输入文字", "Enter text", "Saisir le texte", "Escribir texto", "Text eingeben", "Введите текст", "텍스트 입력", "テキストを入力"),
     "text_input_label": ("文字内容：", "Text:", "Texte :", "Texto:", "Text:", "Текст:", "내용:", "内容:"),
 
+    # ---------- 文件 ----------
+    "file": ("文件", "File", "Fichier", "Archivo", "Datei", "Файл", "파일", "ファイル"),
+    "project_group": ("项目", "Project", "Projet", "Proyecto", "Projekt", "Проект", "프로젝트", "プロジェクト"),
+    "import_group": ("导入", "Import", "Importer", "Importar", "Import", "Импорт", "가져오기", "読み込み"),
+    "export_group": ("导出", "Export", "Exporter", "Exportar", "Export", "Экспорт", "내보내기", "書き出し"),
+    "save_project_as": ("另存为", "Save As", "Enregistrer sous", "Guardar como", "Speichern unter", "Сохранить как", "다른 이름으로 저장", "名前を付けて保存"),
+
     # ---------- 导入 / 导出 ----------
     "export": ("导出", "Export", "Exporter", "Exportar", "Exportieren", "Экспорт", "내보내기", "エクスポート"),
     "export_format": ("选择导出格式", "Choose export format", "Choisir le format", "Elegir formato", "Exportformat wählen", "Формат экспорта", "내보내기 형식", "形式を選択"),

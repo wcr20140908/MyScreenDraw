@@ -4470,10 +4470,8 @@ class ControlPanel(QWidget):
         self.btn_tools = QPushButton(tr("tools")); self.btn_tools.clicked.connect(self.handle_tools_click)
         self.toolbar_layout.addWidget(self.btn_tools)
 
-        project_row = QHBoxLayout(); project_row.setSpacing(2)
-        btn_open = QPushButton(tr("open")); btn_open.clicked.connect(self.open_project); project_row.addWidget(btn_open)
-        btn_save = QPushButton(tr("save")); btn_save.clicked.connect(self.save_project); project_row.addWidget(btn_save)
-        self.toolbar_layout.addLayout(project_row)
+        self.btn_file = QPushButton(tr("file")); self.btn_file.clicked.connect(self.handle_file_click)
+        self.toolbar_layout.addWidget(self.btn_file)
 
         # 撤销 / 重做 / 清屏
         btn_row = QHBoxLayout(); btn_row.setSpacing(2)
@@ -4560,14 +4558,14 @@ class ControlPanel(QWidget):
         self.tools_sub = QFrame(); self.tools_sub.setProperty("class", "Sub"); self.tools_sub_layout = QVBoxLayout(self.tools_sub)
         self.tools_sub_layout.setSpacing(4); self.setup_tools_sub(); self.menu_layout.addWidget(self.tools_sub); self.tools_sub.setVisible(False)
 
+        self.file_sub = QFrame(); self.file_sub.setProperty("class", "Sub"); self.file_sub_layout = QVBoxLayout(self.file_sub)
+        self.file_sub_layout.setSpacing(4); self.setup_file_sub(); self.menu_layout.addWidget(self.file_sub); self.file_sub.setVisible(False)
+
         self.aid_sub = QFrame(); self.aid_sub.setProperty("class", "Sub"); self.aid_sub_layout = QVBoxLayout(self.aid_sub)
         self.aid_sub_layout.setSpacing(4); self.setup_aid_sub(); self.menu_layout.addWidget(self.aid_sub); self.aid_sub.setVisible(False)
 
         self.magnifier_sub = QFrame(); self.magnifier_sub.setProperty("class", "Sub"); self.magnifier_sub_layout = QVBoxLayout(self.magnifier_sub)
         self.magnifier_sub_layout.setSpacing(4); self.setup_magnifier_sub(); self.menu_layout.addWidget(self.magnifier_sub); self.magnifier_sub.setVisible(False)
-
-        self.export_sub = QFrame(); self.export_sub.setProperty("class", "Sub"); self.export_sub_layout = QVBoxLayout(self.export_sub)
-        self.export_sub_layout.setSpacing(4); self.setup_export_sub(); self.menu_layout.addWidget(self.export_sub); self.export_sub.setVisible(False)
 
         # 计时器：先建引擎状态再建界面
         self.timer_mode = "DOWN"          # DOWN=倒计时 / UP=正计时
@@ -4939,13 +4937,50 @@ class ControlPanel(QWidget):
             (tr("timer"), self.handle_timer_click),
             (tr("magnifier"), self.handle_magnifier_click),
             (tr("spotlight"), self.handle_spotlight_click),
-            (tr("import_media"), self.import_media),
-            (tr("export"), self.handle_export_click),
         ]
         for label, handler in items:
             btn = QPushButton(label)
             btn.clicked.connect(handler)
             self.tools_sub_layout.addWidget(btn)
+
+    def setup_file_sub(self):
+        """Build one flat file panel; project/import/export remain distinct groups."""
+        self.file_sub_layout.addWidget(QLabel(tr("project_group")))
+        project_grid = QGridLayout(); project_grid.setSpacing(3)
+        self.btn_open_project = QPushButton(tr("open_project"))
+        self.btn_open_project.clicked.connect(self.open_project_from_file_panel)
+        self.btn_save_project = QPushButton(tr("save_project"))
+        self.btn_save_project.clicked.connect(self.save_project_from_file_panel)
+        self.btn_save_project_as = QPushButton(tr("save_project_as"))
+        self.btn_save_project_as.clicked.connect(self.save_project_as_from_file_panel)
+        project_grid.addWidget(self.btn_open_project, 0, 0)
+        project_grid.addWidget(self.btn_save_project, 0, 1)
+        project_grid.addWidget(self.btn_save_project_as, 1, 0, 1, 2)
+        self.file_sub_layout.addLayout(project_grid)
+
+        self.file_sub_layout.addWidget(QLabel(tr("import_group")))
+        self.btn_import_media = QPushButton(tr("import_media"))
+        self.btn_import_media.clicked.connect(self.import_media_from_file_panel)
+        self.file_sub_layout.addWidget(self.btn_import_media)
+
+        self.file_sub_layout.addWidget(QLabel(tr("export_group")))
+        export_grid = QGridLayout(); export_grid.setSpacing(3)
+        self.btn_export_png = QPushButton(tr("export_png"))
+        self.btn_export_pdf = QPushButton(tr("export_pdf"))
+        self.btn_export_svg = QPushButton(tr("export_svg"))
+        self.btn_export_eps = QPushButton(tr("export_eps"))
+        for button, fmt in (
+            (self.btn_export_png, "PNG"), (self.btn_export_pdf, "PDF"),
+            (self.btn_export_svg, "SVG"), (self.btn_export_eps, "EPS"),
+        ):
+            button.clicked.connect(lambda _=False, value=fmt: self.do_export(value))
+        export_grid.addWidget(self.btn_export_png, 0, 0)
+        export_grid.addWidget(self.btn_export_pdf, 0, 1)
+        export_grid.addWidget(self.btn_export_svg, 1, 0)
+        export_grid.addWidget(self.btn_export_eps, 1, 1)
+        self.file_sub_layout.addLayout(export_grid)
+        self.export_hint = QLabel(tr("export_hint"))
+        self.file_sub_layout.addWidget(self.export_hint)
 
     def setup_aid_sub(self):
         self.aid_sub_layout.addWidget(QLabel(tr("aids")))
@@ -4980,23 +5015,6 @@ class ControlPanel(QWidget):
         self.canvas.dash_chain = None
         self.btn_smart_toggle.setText(tr("smart_shapes_on") if enabled else tr("smart_shapes_off"))
         track_event("smart_shapes_toggled", enabled=enabled)
-
-    def setup_export_sub(self):
-        self.export_sub_layout.addWidget(QLabel(tr("export_format")))
-        btn_png = QPushButton(tr("export_png"))
-        btn_png.clicked.connect(lambda: self.do_export("PNG"))
-        self.export_sub_layout.addWidget(btn_png)
-        btn_pdf = QPushButton(tr("export_pdf"))
-        btn_pdf.clicked.connect(lambda: self.do_export("PDF"))
-        self.export_sub_layout.addWidget(btn_pdf)
-        btn_svg = QPushButton(tr("export_svg"))
-        btn_svg.clicked.connect(lambda: self.do_export("SVG"))
-        self.export_sub_layout.addWidget(btn_svg)
-        btn_eps = QPushButton(tr("export_eps"))
-        btn_eps.clicked.connect(lambda: self.do_export("EPS"))
-        self.export_sub_layout.addWidget(btn_eps)
-        self.export_hint = QLabel(tr("export_hint"))
-        self.export_sub_layout.addWidget(self.export_hint)
 
     # --- 计时器 ---
     def setup_timer_sub(self):
@@ -5181,8 +5199,8 @@ class ControlPanel(QWidget):
         self.refresh_ui()
         track_event("timer_panel_toggled", visible=self.timer_sub.isVisible())
 
-    def handle_export_click(self):
-        self.show_only_sub(None if self.export_sub.isVisible() else self.export_sub)
+    def handle_file_click(self):
+        self.show_only_sub(None if self.file_sub.isVisible() else self.file_sub)
         self.refresh_ui()
 
     def do_export(self, fmt):
@@ -5422,7 +5440,8 @@ class ControlPanel(QWidget):
 
     def all_subs(self):
         return (self.draw_sub, self.annotate_sub, self.eraser_sub, self.shape_sub, self.marker_sub,
-                self.laser_sub, self.tools_sub, self.aid_sub, self.magnifier_sub, self.export_sub, self.timer_sub)
+                self.laser_sub, self.tools_sub, self.file_sub, self.aid_sub,
+                self.magnifier_sub, self.timer_sub)
 
     def show_only_sub(self, target=None):
         """同一时间只展开一个子面板，并收起浮动的选中面板。
@@ -6075,7 +6094,7 @@ class ControlPanel(QWidget):
         "draw_sub": "btn_pen", "annotate_sub": "btn_pen", "marker_sub": "btn_pen",
         "laser_sub": "btn_pen", "eraser_sub": "btn_eraser", "shape_sub": "btn_shape",
         "tools_sub": "btn_tools", "aid_sub": "btn_tools", "magnifier_sub": "btn_tools",
-        "export_sub": "btn_tools", "timer_sub": "btn_tools",
+        "file_sub": "btn_file", "timer_sub": "btn_tools",
     }
 
     def sub_anchor_button(self, target):
@@ -6966,6 +6985,30 @@ class ControlPanel(QWidget):
         except (OSError, ValueError, TypeError) as exc:
             notify_user(self, tr("save_failed"), map_io_exception(exc, path), level="warning", exc=exc)
             return False
+
+    def open_project_from_file_panel(self):
+        self.show_only_sub(None)
+        return self.open_project()
+
+    def save_project_from_file_panel(self):
+        self.show_only_sub(None)
+        return self.save_project()
+
+    def save_project_as_from_file_panel(self):
+        self.show_only_sub(None)
+        return self.save_project_as()
+
+    def import_media_from_file_panel(self):
+        self.show_only_sub(None)
+        return self.import_media()
+
+    def save_project_as(self):
+        """Always choose a new destination; cancellation preserves the current project path."""
+        path, _ = QFileDialog.getSaveFileName(
+            self, tr("save_project_as"), "", tr("project_filter_save"))
+        if not path:
+            return False
+        return self.save_project(path)
 
     def open_project(self):
         path, _ = QFileDialog.getOpenFileName(self, tr("open_project"), "", tr("project_filter_open"))
