@@ -112,4 +112,4 @@ A：目前只支持单笔触控，暂不支持多指同时书写。
 > 技术栈：Python · PyQt6 · pynput · PyInstaller（仅构建期）
 
 ## 致谢
-感谢 [Linux.do](linux.do) 社区。
+感谢 [Linux.do](https://linux.do) 社区。
