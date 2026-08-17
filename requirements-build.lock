@@ -1,0 +1,14 @@
+# MyScreenDraw 构建期依赖（打包便携版 / CI 使用）
+#
+#     pip install -r requirements.lock -r requirements-build.lock
+#
+# 这些组件不随发行版分发其自身代码，仅用于生成可执行文件。
+# 生成环境：Windows 10 x64 / Python 3.11.9 / 2026-08-11
+
+pyinstaller==6.21.0
+pyinstaller-hooks-contrib==2026.6
+altgraph==0.17.5
+packaging==26.3
+pefile==2024.8.26
+pywin32-ctypes==0.2.3
+setuptools==65.5.0

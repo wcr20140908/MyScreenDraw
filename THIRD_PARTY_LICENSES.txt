@@ -1,0 +1,150 @@
+# 第三方组件与许可证 / Third-Party Licenses
+
+本文件列出 MyScreenDraw 直接依赖的第三方组件及其许可证。
+This file lists third-party components that MyScreenDraw depends on, and their licenses.
+
+MyScreenDraw 本体采用 **GPL-3.0-or-later**，详见根目录 `LICENSE`。
+MyScreenDraw itself is licensed under **GPL-3.0-or-later**; see `LICENSE` in the repository root.
+
+> 免责声明：本文件为工程整理，不构成法律意见。正式分发前请自行核对各组件许可证原文。
+> Disclaimer: this file is engineering documentation, not legal advice. Verify the upstream
+> license texts yourself before distributing.
+
+---
+
+## 1. 为什么本项目采用 GPL-3.0-or-later
+
+MyScreenDraw 的图形界面构建在 **PyQt6** 之上。PyQt6 由 Riverbank Computing 以
+**GPL v3 或商业许可证** 双轨提供，它**不是** LGPL。
+
+因此：
+
+- 若以 GPL 版 PyQt6 构建并分发本程序，本程序必须以 **GPL 兼容** 的方式分发；
+- 若希望以闭源或与 GPL 不兼容的许可证分发，则需要向 Riverbank Computing 购买
+  **商业 PyQt 许可证**，并可能同时需要商业 Qt 许可证。
+
+本项目选择前者：以 **GPL-3.0-or-later** 开源。这也与同类教育软件
+（OpenBoard 为 GPL-3.0、Xournal++ 为 GPL-2.0）保持一致。
+
+参考：
+
+- PyQt 许可证 FAQ：https://www.riverbankcomputing.com/commercial/license-faq
+- Qt 开源许可义务：https://www.qt.io/licensing/open-source-lgpl-obligations
+
+---
+
+## 2. 运行时依赖（随发行版分发）
+
+### 2.1 PyQt6
+
+| 项目 | 内容 |
+| --- | --- |
+| 用途 | 全部图形界面、绘图、PDF/SVG 输出 |
+| 许可证 | GPL v3 或商业许可证（双许可） |
+| 版权方 | Riverbank Computing Limited |
+| 主页 | https://www.riverbankcomputing.com/software/pyqt/ |
+| 许可证说明 | https://www.riverbankcomputing.com/commercial/license-faq |
+
+本项目按 **GPL v3** 条款使用 PyQt6。
+
+### 2.2 PyQt6-Qt6（Qt 运行库）
+
+| 项目 | 内容 |
+| --- | --- |
+| 用途 | PyQt6 绑定的底层 Qt 6 二进制库 |
+| 许可证 | 主要为 LGPL v3；部分模块为 GPL；内含若干第三方组件各自的许可证 |
+| 版权方 | The Qt Company 及 Qt 项目贡献者 |
+| 主页 | https://www.qt.io/ |
+| 许可证说明 | https://www.qt.io/licensing/open-source-lgpl-obligations |
+
+由于本程序整体以 GPL-3.0-or-later 分发，Qt 的 LGPL 与 GPL 条款均可满足。
+
+**LGPL 义务提示**：随二进制分发时，应保证使用者能够获取相应 LGPL 组件的源码，
+并能够替换该组件后重新链接。本项目通过以下方式满足：
+
+1. 完整源码在 GitHub 公开；
+2. 发行包中的 Qt 动态库可由使用者自行替换；
+3. 本文件提供各组件上游地址。
+
+### 2.3 PyQt6-sip
+
+| 项目 | 内容 |
+| --- | --- |
+| 用途 | PyQt6 的 C++/Python 绑定运行时 |
+| 许可证 | 参见 Riverbank Computing SIP 许可条款（GPL v3 或商业） |
+| 主页 | https://www.riverbankcomputing.com/software/sip/ |
+
+### 2.4 pynput
+
+| 项目 | 内容 |
+| --- | --- |
+| 用途 | 全局键盘热键监听（F12 等） |
+| 许可证 | **LGPL-3.0** |
+| 版权方 | Moses Palmér |
+| 仓库 | https://github.com/moses-palmer/pynput |
+
+pynput 为 LGPL-3.0，与本项目的 GPL-3.0-or-later 兼容。
+
+### 2.5 pywin32 / pywin32-ctypes / six（由 pynput、PyInstaller 间接引入）
+
+| 组件 | 许可证 | 主页 |
+| --- | --- | --- |
+| pywin32 | PSF 风格许可证（BSD 类） | https://github.com/mhammond/pywin32 |
+| pywin32-ctypes | BSD-3-Clause | https://github.com/enthought/pywin32-ctypes |
+| six | MIT | https://github.com/benjaminp/six |
+
+---
+
+## 3. 构建期依赖（不随发行版分发其自身代码）
+
+### 3.1 PyInstaller
+
+| 项目 | 内容 |
+| --- | --- |
+| 用途 | 将程序打包为 Windows 便携版可执行文件 |
+| 许可证 | GPL v2（含 bootloader 例外条款），部分文件为 Apache-2.0 |
+| 主页 | https://pyinstaller.org/ |
+| 许可证说明 | https://pyinstaller.org/en/stable/license.html |
+
+PyInstaller 的例外条款允许使用它打包并分发应用，且**不要求**被打包的应用采用
+PyInstaller 的许可证，也不要求在应用中致谢 PyInstaller。本项目采用 GPL-3.0-or-later
+是出于 PyQt6 的要求，而非 PyInstaller 的要求。
+
+### 3.2 其他构建期组件
+
+| 组件 | 许可证 | 主页 |
+| --- | --- | --- |
+| pyinstaller-hooks-contrib | GPL-2.0 with exception / Apache-2.0 | https://github.com/pyinstaller/pyinstaller-hooks-contrib |
+| altgraph | MIT | https://github.com/ronaldoussoren/altgraph |
+| pefile | MIT | https://github.com/erocarrera/pefile |
+| packaging | Apache-2.0 / BSD-2-Clause | https://github.com/pypa/packaging |
+| setuptools | MIT | https://github.com/pypa/setuptools |
+
+---
+
+## 4. 本项目自身代码
+
+`main.py`、`display_utils.py`、`persistence.py`、`calculator.py`、`i18n.py`、
+`version.py`、`tests/` 及构建脚本均为本项目原创代码，未从其他项目复制受限代码。
+代码来源审计结果见 `docs/provenance-audit.md`。
+
+字体、图标说明：
+
+- 界面图标（如旋转键）由程序运行时用 `QPainter` 绘制，不含第三方图标资源；
+- 未内置任何字体文件，界面字体使用系统自带字体（如 Microsoft YaHei / Segoe UI）；
+- 代码中使用的少量 Unicode 符号（▲▼×⋯↺⠿🌈）来自 Unicode 标准，不构成第三方素材。
+
+---
+
+## 5. 快速核对表
+
+| 组件 | 是否随发行版分发 | 许可证 | 与 GPL-3.0-or-later 兼容 |
+| --- | --- | --- | --- |
+| PyQt6 | 是 | GPL v3 / 商业 | 是（按 GPL v3 使用） |
+| Qt 6 运行库 | 是 | LGPL v3 / GPL | 是 |
+| PyQt6-sip | 是 | GPL v3 / 商业 | 是 |
+| pynput | 是 | LGPL-3.0 | 是 |
+| pywin32 系列 | 是 | BSD 类 | 是 |
+| six | 是 | MIT | 是 |
+| PyInstaller | 否（仅构建期） | GPL-2.0 + 例外 | 不适用 |
+| 其余构建期组件 | 否 | MIT / Apache-2.0 等 | 不适用 |

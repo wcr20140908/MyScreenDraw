@@ -1,0 +1,24 @@
+# MyScreenDraw —— 精确锁定的运行时依赖
+#
+# 本文件用于可复现构建（CI 与发行版打包必须使用它）：
+#     pip install -r requirements.lock
+#
+# 日常开发若只需宽松范围，使用 requirements.txt。
+# 更新本文件：升级依赖并跑通测试后，执行
+#     pip freeze > requirements.lock
+# 然后删掉与本项目无关的条目，只保留下列直接与间接依赖。
+#
+# 生成环境：Windows 10 x64 / Python 3.11.9 / 2026-08-11
+# 各组件许可证见 THIRD_PARTY_LICENSES.txt
+
+# --- 直接依赖 ---
+PyQt6==6.11.0
+pynput==1.8.2
+
+# --- PyQt6 传递依赖（版本必须与 PyQt6 匹配，否则导入即失败）---
+PyQt6-Qt6==6.11.0
+PyQt6_sip==13.11.1
+
+# --- pynput 在 Windows 上的传递依赖 ---
+pywin32==312
+six==1.17.0

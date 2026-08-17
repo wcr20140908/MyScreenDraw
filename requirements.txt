@@ -1,0 +1,12 @@
+# MyScreenDraw 运行时依赖（宽松范围，便于日常开发）
+# 精确复现构建请使用 requirements.lock：
+#     pip install -r requirements.lock
+#
+# 说明：
+#   PyQt6  — 图形界面、绘图、PDF/SVG 导出（GPL v3 或商业许可，见 THIRD_PARTY_LICENSES.txt）
+#   pynput — 全局热键监听（F12 退出）
+#
+# 注意：PyQt6 6.4 起提供 QtPdf / QtSvg 模块，本项目的 PDF 导入与 SVG 导出依赖它们。
+
+PyQt6>=6.6,<7
+pynput>=1.7,<2
