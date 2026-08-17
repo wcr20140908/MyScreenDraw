@@ -567,13 +567,18 @@ def page_signature(page):
 def page_has_content(page):
     return bool(page.get("segments") or page.get("texts") or page.get("shapes") or page.get("images"))
 
-def install_chinese_translations(app):
+def install_qt_translations(app):
+    """Install Qt's standard-dialog translations for the app's active language."""
     translator = QTranslator(app)
     translations_path = QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)
-    locale = QLocale.system()
-    language = locale.name()
-    if translator.load(language, "qtbase", "_", translations_path):
+    # Qt uses a region-qualified filename for Simplified Chinese; the other seven
+    # supported languages use their application language code directly.
+    language = "zh_CN" if CURRENT == "zh" else CURRENT
+    filename = f"qtbase_{language}.qm"
+    if translator.load(filename, translations_path):
         app.installTranslator(translator)
+        # A translator is removed when its Python wrapper is collected. Retain it
+        # for the whole QApplication lifetime so dialogs created later stay localized.
         app.qtbase_translator = translator
         track_event("translation_loaded", source=translations_path, locale=language)
     else:
@@ -7846,7 +7851,7 @@ if __name__ == "__main__":
         sys.exit(0)
     app.setApplicationName(tr("app"))
     app.setOrganizationName("MyScreenDraw")
-    install_chinese_translations(app)
+    install_qt_translations(app)
     # 窗口创建是启动时唯一的「无界面可依赖」步骤：失败就弹友好错误并退出，
     # 不裸崩。Qt 虚函数/构造异常在 PyQt6 下会终结进程，必须在这里拦下。
     try:
