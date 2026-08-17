@@ -110,3 +110,6 @@ A：目前只支持单笔触控，暂不支持多指同时书写。
 **GPL-3.0-or-later**，详见 [LICENSE](LICENSE)。第三方组件及其许可证见 [THIRD_PARTY_LICENSES.txt](THIRD_PARTY_LICENSES.txt)。
 
 > 技术栈：Python · PyQt6 · pynput · PyInstaller（仅构建期）
+
+## 致谢
+感谢 linux.do 社区。
