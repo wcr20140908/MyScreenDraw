@@ -2,6 +2,11 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # 版本号：见 version.py（唯一来源，代码里统一用 APP_VERSION）
 # 更新日志：
+# v5.1.0：统一文件工作流 + 导入稳定性
+# 1. 打开/保存/另存为/导入/导出统一到分组“文件”面板
+# 2. 大图在解码器内预缩放；PDF 逐页增量导入并以单次撤销提交
+# 3. 修复 EPS RGB colorimage 与 Qt 行对齐填充
+#
 # v5.0.0：首个公开稳定版
 # 1. 版本号统一为 5.0.0（version.py / README / SECURITY / 审计文档同步）
 # 2. 国际化完成：补全 i18n theme key（修复测试套件失败）；计算器错误/溢出文案、
