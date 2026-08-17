@@ -123,7 +123,8 @@ import logging
 import ast
 from datetime import datetime
 from persistence import (atomic_write_json, cleanup_temp_files, normalize_project_data, make_project_data,
-                         ensure_file_size, PROJECT_KIND, AUTOSAVE_KIND, MAX_ABS_COORD)
+                         ensure_file_size, PROJECT_KIND, AUTOSAVE_KIND, MAX_ABS_COORD,
+                         MAX_IMAGES_PER_PAGE)
 from calculator import evaluate as safe_calculate, CalculatorError
 from display_utils import (clamp_rect, choose_screen, clamp_ruler_width, pixels_per_mm_from_dpi, sane_dpi,
                            valid_pixels_per_mm, screen_key, normalize_calibrations,
@@ -342,6 +343,21 @@ def _coerce_float(value, default):
     except (TypeError, ValueError):
         return default
     return number if math.isfinite(number) else default
+
+
+def _bounded_image_size(width, height, max_side, max_pixels):
+    """Return a positive QSize bounded by both the longest side and pixel count."""
+    try:
+        width = int(math.ceil(float(width)))
+        height = int(math.ceil(float(height)))
+        max_side = int(max_side)
+        max_pixels = int(max_pixels)
+    except (TypeError, ValueError, OverflowError):
+        return QSize()
+    if width <= 0 or height <= 0 or max_side <= 0 or max_pixels <= 0:
+        return QSize()
+    scale = min(1.0, max_side / max(width, height), math.sqrt(max_pixels / (width * height)))
+    return QSize(max(1, int(width * scale)), max(1, int(height * scale)))
 
 
 def decode_image_pixels(base64_data):
@@ -7545,7 +7561,9 @@ class ControlPanel(QWidget):
 
     # --- 图片 / PDF 导入（图片以 PNG→base64 内嵌进项目文件，.msd 自包含） ---
     MAX_IMPORT_BYTES = 64 * 1024 * 1024   # 单文件上限，与项目文件上限一致
-    MAX_IMPORT_PIXELS = 2560              # 图片最长边上限，超限等比缩图
+    MAX_IMPORT_PIXELS = 2560              # 图片最长边上限，超限在解码前等比缩图
+    MAX_IMAGE_PIXELS = 8_000_000          # 单张解码像素硬上限（约 32 MiB RGBA）
+    MAX_PDF_TOTAL_PIXELS = 32_000_000     # 当前页图片总驻留像素上限（约 128 MiB RGBA）
     MAX_PDF_PAGES = 50                    # PDF 最多导入前 N 页
     PDF_EXPORT_DPI = 120                  # PDF 页面渲染分辨率（dpi）
     MAX_ROSTER_NAMES = 5000               # 点名名单行数上限
@@ -7553,14 +7571,12 @@ class ControlPanel(QWidget):
     def import_media(self):
         self.timer.stop()
         try:
+            options = QFileDialog.Option.DontUseNativeDialog
             path, _ = QFileDialog.getOpenFileName(
-                self, tr("import_media"), "", tr("import_media_filter"))
-        finally:
-            self.timer.start(self.HEARTBEAT_MS)
-        if not path:
-            return
-        self.canvas._cancel_smart_recognition(drop_pending=True)  # 导入前放弃未触发的延迟识别
-        try:
+                self, tr("import_media"), "", tr("import_media_filter"), options=options)
+            if not path:
+                return
+            self.canvas._cancel_smart_recognition(drop_pending=True)  # 导入前放弃未触发的延迟识别
             size = os.path.getsize(path)
             if size > self.MAX_IMPORT_BYTES:
                 raise ValueError(trf("err_file_too_large", path=path, limit="64 MiB"))
@@ -7581,29 +7597,58 @@ class ControlPanel(QWidget):
                 notify_user(self, tr("import_done"),
                             trf("import_image_summary", name=os.path.basename(path)),
                             level="information")
-        except (OSError, ValueError) as exc:
-            notify_user(self, tr("import_failed"), map_io_exception(exc, path), level="warning", exc=exc)
+        except (OSError, ValueError, RuntimeError, MemoryError) as exc:
+            notify_user(self, tr("import_failed"), map_io_exception(exc, locals().get("path", "")),
+                        level="warning", exc=exc)
+        finally:
+            self.timer.start(self.HEARTBEAT_MS)
+            self.heartbeat_refresh()
 
     def import_image_file(self, path):
-        """解码一张图片并插入画布；返回新 image item 或 None。"""
+        """有界解码一张图片并插入画布；返回新 image item 或 None。"""
         reader = QImageReader(path)
         reader.setAutoTransform(True)     # 尊重 EXIF 旋转方向
+        source_size = reader.size()
+        if not source_size.isValid():
+            return None
+        target = _bounded_image_size(
+            source_size.width(), source_size.height(),
+            self.MAX_IMPORT_PIXELS, self.MAX_IMAGE_PIXELS,
+        )
+        if target.isEmpty():
+            return None
+        if target != source_size:
+            # QImageReader 在解码器内降采样，避免先分配巨幅原图再缩小导致主线程假死/OOM。
+            reader.setScaledSize(target)
         image = reader.read()
         if image.isNull():
             return None
-        longest = max(image.width(), image.height())
-        if longest > self.MAX_IMPORT_PIXELS:
-            # 超长边缩图：控制内嵌 base64 体积与撤销快照内存
-            image = image.scaled(self.MAX_IMPORT_PIXELS, self.MAX_IMPORT_PIXELS,
-                                 Qt.AspectRatioMode.KeepAspectRatio,
+        target = _bounded_image_size(
+            image.width(), image.height(), self.MAX_IMPORT_PIXELS, self.MAX_IMAGE_PIXELS,
+        )
+        if target.isEmpty():
+            return None
+        if image.size() != target:
+            # 某些插件会忽略 setScaledSize；解码后再守一次边界，绝不把超限图放进撤销栈。
+            image = image.scaled(target, Qt.AspectRatioMode.KeepAspectRatio,
                                  Qt.TransformationMode.SmoothTransformation)
         return self.insert_image_pixmap(QPixmap.fromImage(image))
 
-    def insert_image_pixmap(self, pixmap, pos=None):
-        """把一张位图插入画布中心（或指定位置），自动选中并标记内容变更。"""
+    def insert_image_pixmap(self, pixmap, pos=None, *, record_undo=True, finalize=True):
+        """插入一张位图；批量调用可延迟撤销、页面保存和 UI 刷新。"""
         cv = self.canvas
         if cv is None or pixmap is None or pixmap.isNull():
             return None
+        if len(cv.image_items) >= MAX_IMAGES_PER_PAGE:
+            raise ValueError(tr("import_failed"))
+        incoming_pixels = pixmap.width() * pixmap.height()
+        resident_pixels = sum(
+            max(0, item["pixmap"].width() * item["pixmap"].height())
+            for item in cv.image_items
+            if item.get("pixmap") is not None and not item["pixmap"].isNull()
+        )
+        if incoming_pixels <= 0 or resident_pixels + incoming_pixels > self.MAX_PDF_TOTAL_PIXELS:
+            raise ValueError(tr("import_failed"))
         if pos is None:
             pos = QPointF(cv.width() / 2.0, cv.height() / 2.0)
         item = {
@@ -7613,51 +7658,132 @@ class ControlPanel(QWidget):
             "rotation": 0.0,
             "pixmap": pixmap,
         }
-        cv.push_undo()
+        if record_undo:
+            cv.push_undo()
         cv.image_items.append(item)
         cv.selected_ids = {item["id"]}
-        if cv.whiteboard_mode:
-            cv.save_current_page()
-        self.sync_selection_controls()
-        self.position_selection_panel(cv.selection_bounds())
-        cv.mark_content_changed()
+        if finalize:
+            if cv.whiteboard_mode:
+                cv.save_current_page()
+            self.sync_selection_controls()
+            self.position_selection_panel(cv.selection_bounds())
+            cv.mark_content_changed()
         return item
 
     def import_pdf(self, path):
-        """用 QPdfDocument 逐页渲染并插入；返回成功插入的页数。"""
+        """逐页有界渲染并批量插入 PDF，不把整本文件同时驻留在内存。"""
         try:
             from PyQt6.QtPdf import QPdfDocument
         except ImportError:
             notify_user(self, tr("import_failed"), tr("import_pdf_unsupported"), level="warning")
             return 0
-        document = QPdfDocument()
+        document = QPdfDocument(None)
         error = document.load(path)
         if error != QPdfDocument.Error.None_:
+            try:
+                document.close()
+            except (AttributeError, RuntimeError):
+                pass
             raise ValueError(str(error) or tr("import_failed"))
         total = document.pageCount()
-        pages = min(total, self.MAX_PDF_PAGES)
+        pages = min(total, self.MAX_PDF_PAGES, MAX_IMAGES_PER_PAGE - len(self.canvas.image_items))
         if total > self.MAX_PDF_PAGES:
             notify_user(self, tr("import_done"),
                         trf("import_pdf_pages_limited", count=self.MAX_PDF_PAGES), level="information")
         if pages <= 0:
+            try:
+                document.close()
+            except (AttributeError, RuntimeError):
+                pass
             return 0
-        # 先全部渲染、再一次插入：避免中途失败留下半批图片
-        pixmaps = []
-        for index in range(pages):
-            point_size = document.pagePointSize(index)
-            if point_size.width() <= 0 or point_size.height() <= 0:
-                continue
-            scale = self.PDF_EXPORT_DPI / 72.0
-            width = max(1, int(point_size.width() * scale))
-            height = max(1, int(point_size.height() * scale))
-            image = document.render(index, QSize(width, height))
-            if not image.isNull():
-                pixmaps.append(QPixmap.fromImage(image))
+
+        cv = self.canvas
+        before = cv.capture_page()
+        old_selected = set(cv.selected_ids)
+        old_undo_depth = len(cv.undo_stack)
+        old_redo_stack = list(cv.redo_stack)
+        old_undo_key = cv.last_undo_key
+        autosave_timer = getattr(self, "autosave_timer", None)
+        was_autosaving = bool(autosave_timer and autosave_timer.isActive())
+        if was_autosaving:
+            autosave_timer.stop()
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         inserted = 0
-        for pix in pixmaps:
-            if self.insert_image_pixmap(pix) is not None:
+        batch_started = False
+        resident_pixels = sum(
+            max(0, item["pixmap"].width() * item["pixmap"].height())
+            for item in cv.image_items if item.get("pixmap") is not None and not item["pixmap"].isNull()
+        )
+        try:
+            for index in range(pages):
+                point_size = document.pagePointSize(index)
+                if point_size.width() <= 0 or point_size.height() <= 0:
+                    continue
+                scale = self.PDF_EXPORT_DPI / 72.0
+                source_width = max(1, int(point_size.width() * scale))
+                source_height = max(1, int(point_size.height() * scale))
+                remaining_pixels = self.MAX_PDF_TOTAL_PIXELS - resident_pixels
+                target = _bounded_image_size(
+                    source_width, source_height, self.MAX_IMPORT_PIXELS,
+                    remaining_pixels,
+                )
+                if target.isEmpty():
+                    break
+                image = document.render(index, target)
+                if image.isNull():
+                    continue
+                pixmap = QPixmap.fromImage(image)
+                if pixmap.isNull():
+                    continue
+                actual_pixels = pixmap.width() * pixmap.height()
+                if actual_pixels <= 0 or actual_pixels > remaining_pixels:
+                    continue
+                if not batch_started:
+                    # `before` 已在批次开始时捕获；直接提交它，避免 push_undo()
+                    # 对含大量图片的当前页再做一次相同的完整克隆。
+                    cv.commit_undo(before)
+                    batch_started = True
+                item = self.insert_image_pixmap(
+                    pixmap, record_undo=False, finalize=False)
+                if item is None:
+                    continue
                 inserted += 1
-        return inserted
+                resident_pixels += actual_pixels
+                # Let Qt repaint the wait cursor and canvas without admitting a
+                # second user action into the half-built batch.
+                QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+            if inserted:
+                if cv.whiteboard_mode:
+                    cv.save_current_page()
+                self.sync_selection_controls()
+                self.position_selection_panel(cv.selection_bounds())
+                cv.mark_content_changed()
+            elif batch_started:
+                cv.undo_stack = cv.undo_stack[:old_undo_depth]
+                cv.redo_stack = old_redo_stack
+                cv.last_undo_key = old_undo_key
+            return inserted
+        except Exception:
+            if batch_started:
+                cv.load_page(before)
+                cv.selected_ids = old_selected
+                if cv.whiteboard_mode:
+                    cv.save_current_page()
+                cv.undo_stack = cv.undo_stack[:old_undo_depth]
+                cv.redo_stack = old_redo_stack
+                cv.last_undo_key = old_undo_key
+                self.sync_selection_controls()
+                self.position_selection_panel(cv.selection_bounds())
+                cv.panel.update_history_ui() if cv.panel else None
+            raise
+        finally:
+            try:
+                document.close()
+            except (AttributeError, RuntimeError):
+                pass
+            QApplication.restoreOverrideCursor()
+            if was_autosaving:
+                autosave_timer.start(AUTOSAVE_INTERVAL * 1000)
 
 if __name__ == "__main__":
     ensure_directories()
