@@ -3,6 +3,7 @@
 """Project persistence helpers shared by autosave and user project files."""
 from __future__ import annotations
 
+import gzip
 import json
 import math
 import os
@@ -66,6 +67,45 @@ def atomic_write_json(path: str, data: Any, *, indent: int = 2) -> None:
         except OSError:
             pass
         raise
+
+
+def atomic_write_json_gz(path: str, data: Any, *, compresslevel: int = 6) -> None:
+    """Same durability as atomic_write_json, but gzip-compressed.
+
+    Autosave payloads are extremely repetitive -- one object per line segment, each
+    carrying its own pen description and a 36-char UUID -- so gzip shrinks them by
+    an order of magnitude. No indent: pretty-printing only adds bytes that then
+    have to be compressed away again.
+
+    mtime=0 keeps the gzip header byte-identical for identical content, so callers
+    can compare files without the embedded timestamp making every write look new.
+    """
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    os.makedirs(directory, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix="." + os.path.basename(path) + ".", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "wb") as raw:
+            with gzip.GzipFile(fileobj=raw, mode="wb", compresslevel=compresslevel, mtime=0) as gz:
+                payload = json.dumps(data, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+                gz.write(payload.encode("utf-8"))
+            raw.flush()
+            os.fsync(raw.fileno())
+        os.replace(temporary, path)
+    except Exception:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+
+
+def read_json_maybe_gz(path: str) -> Any:
+    """Load a .json or .json.gz payload. Autosaves written before 5.2.2 are plain."""
+    if path.endswith(".gz"):
+        with gzip.open(path, "rt", encoding="utf-8") as handle:
+            return json.load(handle)
+    with open(path, encoding="utf-8") as handle:
+        return json.load(handle)
 
 
 def cleanup_temp_files(directory: str) -> int:
