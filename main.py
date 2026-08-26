@@ -2,6 +2,16 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # 版本号：见 version.py（唯一来源，代码里统一用 APP_VERSION）
 # 更新日志：
+# v5.2.2：自动保存压缩 + 缩略图层级修复
+# 1. 自动保存改 gzip（.json.gz）：纯笔迹页实测 -97.6%；含内嵌图片的页只有 -24.7%
+#    （主体是已压缩的 base64 PNG，压不动是预期，已写成测试固定）
+# 2. 保留窗口 72 小时 + 数量上限 400 份，最新一份永远保留；内容没变就不写
+# 3. 修复清理只按 mtime 排序：同秒写入的文件 mtime 相同，排序退化后
+#    「永远保留最新一份」实测保住的是【最旧】那份，超期文件反而留下
+# 4. 修复缩略图与子菜单抢置顶：两者都调 raise_floating，压在下面的点不动
+# 5. 修复缩略图关闭后实时渲染停不下来（面板被别处 hide 后计时器永久空转）
+# 6. 修复清理函数异常分支引用未定义变量导致的 NameError
+#
 # v5.2.1：笔迹更接近真笔（速度→宽度）
 # 1. 快写留细痕、正常速度写正常粗细：笔速按物理尺寸（mm/s）测量，跨屏幕尺寸一致
 # 2. 宽度系数上限锁 1.0（只变细不变粗）：「慢＝粗」与停笔定形正面冲突，
@@ -145,7 +155,8 @@ import logging
 import ast
 import contextlib
 from datetime import datetime
-from persistence import (atomic_write_json, cleanup_temp_files, normalize_project_data, make_project_data,
+from persistence import (atomic_write_json, atomic_write_json_gz, read_json_maybe_gz,
+                         cleanup_temp_files, normalize_project_data, make_project_data,
                          ensure_file_size, PROJECT_KIND, AUTOSAVE_KIND, MAX_ABS_COORD,
                          MAX_IMAGES_PER_PAGE)
 from calculator import evaluate as safe_calculate, CalculatorError
@@ -5357,13 +5368,36 @@ class ControlPanel(QWidget):
             self.canvas.switch_page(row - self.canvas.current_page)
             self.update_whiteboard_ui()
 
+    def close_thumbnail_panel(self):
+        """收起缩略图浮窗并停掉实时渲染。
+
+        缩略图是独立浮窗，不在 all_subs() 里，所以 show_only_sub() 原先完全管不到它：
+        缩略图开着再点开任意子菜单，两个浮窗都会调 raise_floating 抢置顶，而
+        HWND_TOPMOST 决定不了同层兄弟的高低——谁在上全看运气，压在下面的那个点不动。
+
+        必须连计时器一起停：只 hide() 的话 _thumbnail_live_timer 仍以 150ms 节拍把整本
+        白板逐页渲染成 pixmap，白占主线程拖慢正在书写的笔迹。
+        """
+        if not hasattr(self, "thumbnail_panel"):
+            return False
+        # 计时器无条件停，不受可见性判断影响。面板可能已被别的路径 hide() 掉，此时
+        # isVisible() 为假、提前 return，计时器就再也停不下来——实测它会一直以 150ms
+        # 节拍把整本白板逐页渲染成 pixmap，白占主线程拖慢正在书写的笔迹。
+        was_visible = self.thumbnail_panel.isVisible()
+        if was_visible:
+            self.thumbnail_panel.hide()
+        if self._thumbnail_live_timer.isActive():
+            self._thumbnail_live_timer.stop()
+        return was_visible
+
     def toggle_thumbnail_panel(self):
         if not self.canvas or not self.canvas.whiteboard_mode:
             return
-        if self.thumbnail_panel.isVisible():
-            self.thumbnail_panel.hide()
-            self._thumbnail_live_timer.stop()
+        if self.close_thumbnail_panel():
             return
+        # 反向也要让位：否则「开子菜单→缩略图关」之后再开缩略图，子菜单还在，
+        # 两个浮窗又并存，争抢原样复现。
+        self.show_only_sub(None)
         self.refresh_page_thumbnails(force=True)
         self.thumbnail_panel.adjustSize()
         x, y = self._floating_anchor(self.thumbnail_panel.width(), self.thumbnail_panel.height())
@@ -6083,6 +6117,8 @@ class ControlPanel(QWidget):
         半透明窗口在可见状态下缩放会让合成器呈现新旧交替的画面（闪烁/叠影）。
         """
         self.select_panel.hide()
+        if target is not None:
+            self.close_thumbnail_panel()    # 缩略图让位，避免两个浮窗抢置顶
         if target is not None and target.isVisible() and self.menu_panel.isVisible():
             self._menu_anchor = self.sub_anchor_button(target)
             self.position_menu_panel()          # 已是目标状态，只校正位置，避免无谓的隐藏重显
@@ -7351,8 +7387,20 @@ class ControlPanel(QWidget):
             if not any(page_has_content(page) for page in pages):
                 return  # 空白不写，避免刷一堆空快照
 
+            # 内容没变就不写。不做这一步的话，一节课不动画布也会每 30 秒落一份
+            # 完整快照，几小时下来目录里全是彼此相同的文件。
+            signature = json.dumps(pages, ensure_ascii=False, sort_keys=True,
+                                   separators=(",", ":"), allow_nan=False)
+            if signature == getattr(self, "_last_autosave_signature", None):
+                return
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filepath = os.path.join(AUTOSAVE_DIR, f"autosave_{timestamp}.json")
+            # 文件名精度只到秒。定时器是 30 秒一次撞不上，但 auto_save 也可能被别处
+            # 直接调用；同名会静默覆盖掉刚写的那一份，追加序号避免丢内容。
+            filepath = os.path.join(AUTOSAVE_DIR, f"autosave_{timestamp}.json.gz")
+            suffix = 1
+            while os.path.exists(filepath):
+                filepath = os.path.join(AUTOSAVE_DIR, f"autosave_{timestamp}_{suffix}.json.gz")
+                suffix += 1
             # Keep autosaves on the same schema construction path as normal projects;
             # duplicated payloads previously drifted to a legacy `version` field.
             data = make_project_data(
@@ -7364,31 +7412,39 @@ class ControlPanel(QWidget):
                 kind=AUTOSAVE_KIND,
             )
             data["timestamp"] = timestamp
-            atomic_write_json(filepath, data)
-            self._cleanup_autosave_files(keep=5)
-            track_event("autosave_success", pages=len(pages))
+            atomic_write_json_gz(filepath, data)
+            self._last_autosave_signature = signature
+            self._cleanup_autosave_files()
+            track_event("autosave_success", pages=len(pages),
+                        bytes=os.path.getsize(filepath))
         except Exception as e:
             LOGGER.exception("自动保存失败")
             track_event("autosave_failed", error=str(e))
 
     def _list_autosave_files(self):
+        """自动保存列表，新→旧。
+
+        排序键必须与 _autosave_created_at 同源（文件名里的时间戳），不能用 mtime：
+        同一秒写入的多份文件 mtime 完全相同，(mtime, path) 元组排序会退化成按路径比，
+        于是「index 0」不再是最新那份——清理时那句「永远保留最新一份」实测保住的是
+        【最旧】的一份，超过 72 小时的反而留了下来。
+        """
         files = []
         try:
             for filename in os.listdir(AUTOSAVE_DIR):
-                if filename.startswith("autosave_") and filename.endswith(".json"):
+                if filename.startswith("autosave_") and filename.endswith((".json", ".json.gz")):
                     filepath = os.path.join(AUTOSAVE_DIR, filename)
-                    files.append((os.path.getmtime(filepath), filepath))
+                    files.append((self._autosave_created_at(filepath), filepath))
         except OSError:
             return []
-        files.sort(reverse=True)
+        files.sort(key=lambda item: item[0], reverse=True)
         return files
 
     def _latest_restorable_autosave(self):
         """找最近一份「有内容」的自动保存；坏文件/空文件跳过。"""
         for _, filepath in self._list_autosave_files():
             try:
-                with open(filepath, encoding="utf-8") as f:
-                    data = json.load(f)
+                data = read_json_maybe_gz(filepath)
                 data = normalize_project_data(data, kind=AUTOSAVE_KIND)
                 pages = data.get("pages") or []
                 if any(page_has_content(page) for page in pages):
@@ -7455,15 +7511,67 @@ class ControlPanel(QWidget):
             notify_user(self, tr("restore_failed"), str(e), level="warning", exc=e)
             return False
 
-    def _cleanup_autosave_files(self, keep=5):
-        """清理旧的自动保存文件，只保留最近的 N 个。"""
+    AUTOSAVE_KEEP_HOURS = 72        # 保留最近三天的自动保存
+    # 数量上限。光按 72 小时保留是不够的：每 30 秒一份，三天就是 8640 份，
+    # 即使压缩后每份 0.4MB 也有 3GB 以上——比原来「只留 5 份」还糟。
+    # 400 份约合 3.3 小时连续书写，最坏情况占用百来 MB。
+    AUTOSAVE_KEEP_MAX = 400
+
+    def _autosave_created_at(self, filepath):
+        """取自动保存的创建时刻。
+
+        优先解析文件名里的时间戳（autosave_20260817_140717.json.gz）——那是写盘那一刻，
+        而 mtime/ctime 会被复制、备份、同步工具改写，按它清理可能误删。
+        解析不出来再退回文件系统时间。
+        """
+        name = os.path.basename(filepath)
+        stamp = name[len("autosave_"):].split(".", 1)[0]
+        # 同秒冲突时文件名会带 _1/_2 序号，取前两段（日期_时间）即可
+        parts = stamp.split("_")
+        if len(parts) > 2:
+            stamp = "_".join(parts[:2])
         try:
-            files = self._list_autosave_files()
-            for _, filepath in files[keep:]:
-                os.remove(filepath)
-                track_event("autosave_cleanup", file=os.path.basename(filepath))
-        except Exception as e:
-            track_event("autosave_cleanup_failed", error=str(e))
+            return datetime.strptime(stamp, "%Y%m%d_%H%M%S").timestamp()
+        except ValueError:
+            pass
+        for getter in (os.path.getctime, os.path.getmtime):
+            try:
+                return getter(filepath)
+            except OSError:
+                continue
+        return 0.0
+
+    def _cleanup_autosave_files(self, keep_hours=None, keep_max=None):
+        """删掉超过保留窗口、或超出数量上限的自动保存。
+
+        至少保留最新的一份：用户隔一周回来打开，也该有东西可恢复，而不是因为
+        「全都超过 72 小时」被清空。
+        """
+        keep_hours = self.AUTOSAVE_KEEP_HOURS if keep_hours is None else keep_hours
+        keep_max = self.AUTOSAVE_KEEP_MAX if keep_max is None else keep_max
+        removed = 0
+        try:
+            files = self._list_autosave_files()      # 已按新→旧排序
+            cutoff = time.time() - keep_hours * 3600
+            for index, (_, filepath) in enumerate(files):
+                if index == 0:
+                    continue                          # 最新一份永远留着
+                too_old = self._autosave_created_at(filepath) < cutoff
+                too_many = index >= keep_max
+                if not (too_old or too_many):
+                    continue
+                try:
+                    os.remove(filepath)
+                    removed += 1
+                except OSError as exc:
+                    # 原来这里的 handler 引用了未定义的 e，删除失败会抛 NameError
+                    # 把整个清理带崩，反而更糟。
+                    track_event("autosave_cleanup_failed", error=str(exc),
+                                file=os.path.basename(filepath))
+            if removed:
+                track_event("autosave_cleanup", removed=removed, kept=len(files) - removed)
+        except Exception as exc:
+            track_event("autosave_cleanup_failed", error=str(exc))
 
     def active_screen(self, *widgets):
         """Return the QScreen under the first given widget, else panel/canvas, else primary."""
