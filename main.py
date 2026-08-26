@@ -6928,6 +6928,7 @@ class ControlPanel(QWidget):
             "magnifier_size": int(cv.magnifier_size),
             "board_style": cv.board_style,
             "smart_shapes": bool(cv.smart_shapes_enabled),
+            "smart_multitouch": bool(cv.smart_multitouch_enabled),
             "timer_mode": self.timer_mode,
             "timer_target": int(self.timer_target),
             "panel_x": int(self.x()),
@@ -7152,6 +7153,10 @@ class ControlPanel(QWidget):
                 self.btn_smart_toggle.blockSignals(False)
                 cv.smart_shapes_enabled = smart
                 self.btn_smart_toggle.setText(tr("smart_shapes_on") if smart else tr("smart_shapes_off"))
+            # 多指书写开关目前没有界面入口，只从配置读取；缺省保持开启。
+            multitouch = settings.get("smart_multitouch")
+            if isinstance(multitouch, bool):
+                cv.smart_multitouch_enabled = multitouch
             if settings.get("timer_mode") in ("UP", "DOWN"):
                 self.timer_mode = settings["timer_mode"]
             target = settings.get("timer_target")
