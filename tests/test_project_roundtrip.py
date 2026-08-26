@@ -35,14 +35,17 @@ class NormalizeProjectDataTests(unittest.TestCase):
     def test_autosave_kind_uses_the_normalized_project_shape(self):
         data = persistence.make_project_data(
             pages=[self.BLANK], current_page=0, whiteboard_mode=True,
-            board_style="WHITE", app_version="v5.1.1",
+            board_style="WHITE", app_version="v9.9.9",
             kind=persistence.AUTOSAVE_KIND,
         )
+        # The literal is deliberately not the current version: this pins that
+        # app_version passes through untouched, whatever it says. Using the real
+        # version made the test need a bump on every release for no reason.
         self.assertEqual(data["kind"], persistence.AUTOSAVE_KIND)
-        self.assertEqual(data["app_version"], "v5.1.1")
+        self.assertEqual(data["app_version"], "v9.9.9")
         self.assertNotIn("version", data)
         normalized = persistence.normalize_project_data(data, kind=persistence.AUTOSAVE_KIND)
-        self.assertEqual(normalized["app_version"], "v5.1.1")
+        self.assertEqual(normalized["app_version"], "v9.9.9")
 class ProtractorBaselineTests(unittest.TestCase):
     def test_tolerance_band_reads_the_near_baseline_not_the_far_one(self):
         # y just inside the +1e-6 tolerance must still read as the left baseline (0°),
