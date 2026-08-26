@@ -516,6 +516,76 @@ class SynthesizedMouseFilterTests(MultitouchTestCase):
             [FakePoint(1, self.State.Pressed, 100, 100)]))
 
 
+class MultitouchSettingTests(unittest.TestCase):
+    """多指开关必须进配置：它是误触严重时唯一的退路，重启就丢等于没有。"""
+
+    @classmethod
+    def setUpClass(cls):
+        from PyQt6.QtWidgets import QApplication
+
+        cls.app = QApplication.instance() or QApplication([])
+        import main
+
+        cls.main = main
+        try:
+            cls.panel = main.ControlPanel()
+            cls.canvas = main.DrawingCanvas(cls.panel)
+            cls.panel.canvas = cls.canvas
+        except Exception as exc:       # pragma: no cover - no display / no input hook
+            raise unittest.SkipTest(f"cannot build ControlPanel: {exc}")
+
+    @classmethod
+    def tearDownClass(cls):
+        for name in ("listener", "timer", "autosave_timer", "_thumbnail_live_timer"):
+            try:
+                getattr(getattr(cls, "panel", None), name).stop()
+            except Exception:
+                pass
+
+    def test_the_toggle_is_persisted(self):
+        self.canvas.smart_multitouch_enabled = False
+        self.assertIs(self.panel.collect_settings().get("smart_multitouch"), False)
+        self.canvas.smart_multitouch_enabled = True
+        self.assertIs(self.panel.collect_settings().get("smart_multitouch"), True)
+
+    def load_config(self, payload):
+        """把 payload 当成 config.json 让 load_settings() 读一遍。
+
+        load_settings 直接读 CONFIG_FILE，没有可注入的接缝，所以只能写真文件。
+        必须把 CONFIG_FILE 改到临时目录——否则测试会覆盖用户自己的配置。
+        """
+        import json
+        import tempfile
+
+        original = self.main.CONFIG_FILE
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            self.main.CONFIG_FILE = str(path)
+            try:
+                self.panel.load_settings()
+            finally:
+                self.main.CONFIG_FILE = original
+
+    def test_a_missing_key_leaves_the_default_alone(self):
+        """旧版本写的 config.json 没有这个键，不能因此把多指关掉。"""
+        self.canvas.smart_multitouch_enabled = True
+        self.load_config({"pen_width": 5})
+        self.assertTrue(self.canvas.smart_multitouch_enabled,
+                        "缺键必须保持默认开启，不能被当成 False")
+
+    def test_a_saved_false_survives_a_reload(self):
+        self.canvas.smart_multitouch_enabled = True
+        self.load_config({"smart_multitouch": False})
+        self.assertFalse(self.canvas.smart_multitouch_enabled)
+        self.canvas.smart_multitouch_enabled = True
+
+    def test_a_saved_true_survives_a_reload(self):
+        self.canvas.smart_multitouch_enabled = False
+        self.load_config({"smart_multitouch": True})
+        self.assertTrue(self.canvas.smart_multitouch_enabled)
+
+
 class MousePathRegressionTests(MultitouchTestCase):
     """单指/鼠标路径不能被多指改造影响。"""
 
