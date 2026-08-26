@@ -11,7 +11,7 @@ MyScreenDraw is a fullscreen annotation / whiteboard / math-teaching tool built 
 - **Random name picker, timer, presentation spotlight, calculator** — a whole lesson without switching apps
 - **Fully offline**: no network, no uploads, no account — suitable for classrooms and restricted environments
 
-Current version **v5.2.2**. The UI follows the system language in 8 languages: English, 中文, Français, Español, Deutsch, Русский, 한국어, 日本語.
+Current version **v5.3.0**. The UI follows the system language in 8 languages: English, 中文, Français, Español, Deutsch, Русский, 한국어, 日本語.
 
 > Product screenshots are not included in the public release yet; the current local captures contain development-environment details and must not be committed to GitHub.
 
@@ -48,7 +48,8 @@ Current version **v5.2.2**. The UI follows the system language in 8 languages: E
 - **Random name picker**: import a txt/csv list; the drawn name is projected fullscreen in large type
 - **Timer**: count up / count down; beeps and flashes red when finished
 - **Magnifier**, **presentation spotlight** (dims the screen, bright region follows the mouse)
-- Calculator, text input
+- Calculator
+- Text and formulas: drag out a box, type multiple lines, change colour/width/rotation; the structured formula editor covers fractions, super/subscripts, roots, sums and integrals — tap a slot to type into it. Letters and digits come from the Windows touch keyboard; a symbol panel folds by category above it
 
 ### Import / export
 - Import images or PDFs (embedded into the project file as base64 — **single self-contained file**, easy to share and back up)
