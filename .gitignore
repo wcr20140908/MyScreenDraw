@@ -45,6 +45,9 @@ data/events.jsonl*
 data/config.json
 data/roster.json
 data/autosave/
+# 兜底：自动保存目前写进 data/autosave/（上一行已挡住），这条防的是将来写盘路径
+# 改动后板书内容直接落在 data/ 下而无人察觉——那是用户的课堂内容，不能进仓库。
+data/autosave_*.json
 
 # 导出文件
 exports/
