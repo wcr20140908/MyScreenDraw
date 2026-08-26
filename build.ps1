@@ -15,8 +15,19 @@ foreach ($path in @("build", "dist")) {
     }
 }
 
-python -m unittest discover -s tests
-if ($LASTEXITCODE -ne 0) {
+# Offscreen is mandatory here, not a convenience: the suite constructs DrawingCanvas
+# (which calls showFullScreen in __init__), so running it on the real platform throws
+# fullscreen windows across the user's desktop for the whole run. The touch-injection
+# tier is worse -- it hijacks the screen by design and must never start unasked.
+$previousPlatform = $env:QT_QPA_PLATFORM
+$env:QT_QPA_PLATFORM = "offscreen"
+try {
+    python -m unittest discover -s tests
+    $testsExit = $LASTEXITCODE
+} finally {
+    $env:QT_QPA_PLATFORM = $previousPlatform
+}
+if ($testsExit -ne 0) {
     throw "Tests failed; refusing to build a release package"
 }
 python -m PyInstaller --noconfirm --clean MyScreenDraw.spec
