@@ -2,6 +2,13 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # 版本号：见 version.py（唯一来源，代码里统一用 APP_VERSION）
 # 更新日志：
+# v5.2.1：笔迹更接近真笔（速度→宽度）
+# 1. 快写留细痕、正常速度写正常粗细：笔速按物理尺寸（mm/s）测量，跨屏幕尺寸一致
+# 2. 宽度系数上限锁 1.0（只变细不变粗）：「慢＝粗」与停笔定形正面冲突，
+#    停笔时手抖会被读成极慢、在用户盯着进度环的那一点涨出墨疙瘩
+# 3. 相邻段宽度限幅，避免线条呈串珠状；每指一份速度状态，两指互不干扰
+# 4. 修复：多指开关未写入配置，重启即复位（v5.2.0 漏项）
+#
 # v5.2.0：多指同时书写
 # 1. 触控大屏上两名学生可各写一笔：每个接触点一份笔画上下文（_pointer_scope）
 # 2. 停笔定形改为每指一个独立计时器，A 指定形不影响 B 指正在写的笔画
@@ -1562,6 +1569,15 @@ class DrawingCanvas(QMainWindow):
         self.smart_shapes_enabled = True
         # 多指同时书写：触控大屏上两名学生可以各写一笔。关掉则退回单指（主接触点）
         self.smart_multitouch_enabled = True
+        # 速度→宽度：快写变细，模拟真笔。关掉则恢复 5.2.0 的恒定宽度
+        self.speed_width_enabled = True
+        self._speed_mm_s = None
+        self._speed_at = None
+        self._speed_anchor = None
+        self._last_seg_width = None
+        # 屏幕像素/毫米缓存。取值开销不小，且【不能放在落笔路径上】——原因见
+        # refresh_speed_scale()。仅在校准变更和配置读回时刷新。
+        self._speed_px_per_mm = pixels_per_mm_from_dpi(96.0)
         # 智能识别的触发方式：笔按着不动停在图形末端 SMART_HOLD_MS 毫秒才定形（抬笔不触发）
         self.pending_smart = None
         self._smart_recognize_timer = None   # 停笔计时器（周期触发，兼作进度环节拍）
@@ -2388,6 +2404,36 @@ class DrawingCanvas(QMainWindow):
     SMART_HOLD_TICK_MS = 33         # 进度环刷新节拍
     HOLD_RING_RADIUS = 18.0
 
+    # --- 速度→宽度：真笔快写只留一道浅痕 ---
+    # 阈值按物理尺寸（mm/s）而不是像素，否则同一手速在 75 寸大屏和笔记本屏上差好几倍。
+    SPEED_REF_MM_S = 150.0        # 参考手速：约等于正常板书速度，此处宽度系数为 1.0
+    SPEED_WIDTH_MIN = 0.55        # 快写最细（占笔宽的比例）
+    # 上限锁在 1.0：只变细，不变粗。
+    #
+    # 原本设 1.30 想让慢写显粗（真笔慢写墨会渗开）。但「慢＝粗」和停笔定形正面
+    # 打架：停笔那 650ms 用户被迫按住不动盯着进度环，手的生理抖动（实测 1~2px）
+    # 被读成「极慢」，笔尖当场涨成墨疙瘩——12px 笔宽实测涨到 16px，正糊在用户盯
+    # 着的那一点上。
+    #
+    # 试过按位移阈值和锚点净位移去区分「抖」和「慢写」，都不成：±2px 抖动的对角
+    # 位移约 2.83px，而认真慢写一步才 3px，两者间隔太窄，靠位移量分不开。真正能
+    # 分开的是方向一致性（慢写朝一个方向、抖动反复折返），但那是另一个量级的复杂度，
+    # 而且阈值只能在真机上对着真人的手调——我这里调出来的数几乎肯定不对。
+    #
+    # 所以放弃「慢写变粗」这一半。快写变细本来就是真实笔迹里更显眼的那一半，
+    # 而上限锁 1.0 让墨疙瘩这类 bug 在结构上不可能出现，不依赖任何阈值调对。
+    SPEED_WIDTH_MAX = 1.0
+    SPEED_EMA_ALPHA = 0.3         # 逐事件速度抖得厉害，指数平滑后再用
+    SPEED_WIDTH_STEP = 0.18       # 相邻段宽度最大变化比例，防止线条一节粗一节细像串珠
+    # 位移小于此值视为「笔尖没动」，不更新速度。必须取得很小：0.8mm 在 96dpi 屏上
+    # 约合 3px，那是【认真慢写】的正常步长，会把慢写整个吞掉（实测 speed 恒为 None）。
+    # 真正的停笔抖动在 1px 上下，0.15mm 只挡得住这个。
+    SPEED_STILL_MM = 0.15
+    # 测速锚点容差（像素）。手按住不动时的生理抖动实测 1~2px，且在原地来回——
+    # 相对锚点的净位移一直很小；慢写则会持续离开锚点。用这个区分「抖」和「慢」，
+    # 与智能识别开关无关（_hold_active 只在识别开启时才为真）。
+    SPEED_ANCHOR_SLOP_PX = 2.5
+
     # --- 多指书写：per-pointer 上下文换入换出 ---
     # 这 11 个字段描述「某一根手指正在画的那一笔」，必须每指一份。
     # 其余状态（all_segments / shape_items / draw_state / pen_color …）是全页共享的，
@@ -2406,6 +2452,11 @@ class DrawingCanvas(QMainWindow):
         # 这一笔是否走「按笔入栈」的增量撤销。_begin_stroke 置 True；
         # 直接摆状态的旧式调用（测试里有）保持 False，走原来的整页快照分支。
         "_stroke_uses_delta": False,
+        # 速度→宽度：每指一份，否则两根手指的速度会互相污染。
+        "_speed_mm_s": None,      # 平滑后的笔速（mm/s）；None 表示这一笔还没测到
+        "_speed_at": None,        # 上一次测速的时刻
+        "_speed_anchor": None,    # 测速锚点：手抖在它附近来回，慢写会持续离开它
+        "_last_seg_width": None,  # 上一段的宽度，用于限制相邻段的宽度跳变
     }
 
     def _new_pointer_slot(self):
@@ -2584,6 +2635,11 @@ class DrawingCanvas(QMainWindow):
         self.current_stroke_widths = []
         self.current_stroke_points = [QPointF(pos)]
         self._stroke_uses_delta = True
+        # 速度状态属于「这一笔」：不重置会让新笔沿用上一笔的末速，起笔粗细随机。
+        self._speed_mm_s = None
+        self._speed_at = None
+        self._speed_anchor = None
+        self._last_seg_width = None
         if self._active_pointer is None:
             self._mouse_stroke_since = time.perf_counter()
 
@@ -3464,6 +3520,78 @@ class DrawingCanvas(QMainWindow):
         color.setAlpha(max(10, min(255, self.marker_alpha)))
         return QPen(color, max(1, self.marker_width), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
 
+    def refresh_speed_scale(self):
+        """刷新屏幕像素/毫米缓存。校准过的直尺值优先，否则按 DPI 估算。
+
+        【不要放在落笔路径上】。current_screen_calibration() 要查屏幕对象、算
+        screen_key、查校准字典——把它放进 _begin_stroke 之后，触控注入测试里那个
+        「合成鼠标笔画」竞态的复现率从 1/8 升到 5/8：落笔多出来的这点开销足以让
+        Windows 补发的鼠标消息更容易抢在触控帧之前到达。
+
+        改为只在屏幕/校准真的变了的时候调用。一笔之内屏幕不会换，缓存值足够。
+        """
+        try:
+            _key, px_per_mm, _calibrated = self.current_screen_calibration()
+            if px_per_mm and px_per_mm > 0.1:
+                self._speed_px_per_mm = float(px_per_mm)
+        except Exception:
+            pass        # 取不到就沿用上一次的值，速度映射降级但不影响落墨
+
+    def _track_stroke_speed(self, pos):
+        """更新这一笔的平滑笔速（mm/s）。
+
+        「慢＝粗」和停笔定形会正面打架：停笔那 650ms 里用户被迫按住不动盯着进度环，
+        而手的生理抖动（实测 1~2px）会被读成「极慢」，把笔尖涨成一个墨疙瘩——12px
+        笔宽实测涨到 16px，正好糊在用户盯着的那个点上。
+
+        判据用【相对锚点的净位移】而不是逐事件位移：手抖是在原地来回，离锚点一直
+        很近；慢写会持续离开锚点。这样与智能识别开关无关——_hold_active 只在识别
+        开启时才为真，而用户在识别关掉时照样会按住不动。
+        """
+        now = time.perf_counter()
+        anchor = self._speed_anchor
+        if anchor is None:
+            # 这一笔的第一个采样：立锚点、记时刻，还没有速度可算
+            self._speed_anchor = QPointF(pos)
+            self._speed_at = now
+            return
+        travelled = math.hypot(pos.x() - anchor.x(), pos.y() - anchor.y())
+        if travelled < self.SPEED_ANCHOR_SLOP_PX:
+            return          # 在锚点附近抖动：冻住速度，别把宽度吹起来
+        previous_at = self._speed_at
+        self._speed_anchor = QPointF(pos)
+        self._speed_at = now
+        if previous_at is None:
+            return
+        elapsed = now - previous_at
+        distance_mm = travelled / self._speed_px_per_mm
+        if elapsed <= 1e-4 or distance_mm < self.SPEED_STILL_MM:
+            return
+        sample = distance_mm / elapsed
+        if self._speed_mm_s is None:
+            self._speed_mm_s = sample
+        else:
+            a = self.SPEED_EMA_ALPHA
+            self._speed_mm_s = a * sample + (1.0 - a) * self._speed_mm_s
+
+    def _speed_width_factor(self):
+        """笔速→宽度系数。速度越快越细，与真笔一致。"""
+        speed = self._speed_mm_s
+        if speed is None:
+            return 1.0          # 还没测到速度，按参考手速走
+        factor = self.SPEED_REF_MM_S / max(1.0, speed)
+        return max(self.SPEED_WIDTH_MIN, min(self.SPEED_WIDTH_MAX, factor))
+
+    def _damp_width(self, width):
+        """限制相邻段的宽度跳变，避免线条呈串珠状。"""
+        previous = self._last_seg_width
+        if previous is not None:
+            step = max(1.0, previous * self.SPEED_WIDTH_STEP)
+            width = max(previous - step, min(previous + step, width))
+        width = max(1, int(round(width)))
+        self._last_seg_width = float(width)
+        return width
+
     def add_smooth_segments(self, pos):
         if self.last_point is None:
             self.last_point = pos
@@ -3473,6 +3601,9 @@ class DrawingCanvas(QMainWindow):
         dx = pos.x() - self.last_point.x()
         dy = pos.y() - self.last_point.y()
         distance = math.hypot(dx, dy)
+        # 每个输入事件测一次速：同一事件内插值出的各小段共享同一笔速。
+        if not is_marker:
+            self._track_stroke_speed(pos)
         spacing = base_width * (0.3 if is_marker else 0.6)
         steps = max(1, int(distance / max(2, spacing)))
         previous = self.last_point
@@ -3487,7 +3618,8 @@ class DrawingCanvas(QMainWindow):
                 else:
                     taper = min(1.0, max(0.35, len(self.current_stroke_widths) / 10))
                     pressure = max(0.08, min(1.0, self.current_pressure))
-                    width = max(1, int(round(self.pen_width * taper * pressure)))
+                    speed = self._speed_width_factor() if self.speed_width_enabled else 1.0
+                    width = self._damp_width(self.pen_width * taper * pressure * speed)
                     pen = QPen(self.pen_color, width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
                 line = QLine(previous.x(), previous.y(), point.x(), point.y())
                 self.all_segments.append({"line": line, "pen": pen, "id": self.current_stroke_id, "marker": is_marker})
@@ -6184,6 +6316,7 @@ class ControlPanel(QWidget):
         }
         self.canvas.ruler_calibrations[current_key] = record
         self.canvas.ruler_calibration = record
+        self.canvas.refresh_speed_scale()    # 速度映射按物理尺寸算，校准变了要跟上
         self.update_ruler_calibration_label()
         self.canvas.update()
         self.save_settings()
@@ -6929,6 +7062,7 @@ class ControlPanel(QWidget):
             "board_style": cv.board_style,
             "smart_shapes": bool(cv.smart_shapes_enabled),
             "smart_multitouch": bool(cv.smart_multitouch_enabled),
+            "speed_width": bool(cv.speed_width_enabled),
             "timer_mode": self.timer_mode,
             "timer_target": int(self.timer_target),
             "panel_x": int(self.x()),
@@ -7157,6 +7291,10 @@ class ControlPanel(QWidget):
             multitouch = settings.get("smart_multitouch")
             if isinstance(multitouch, bool):
                 cv.smart_multitouch_enabled = multitouch
+            # 速度→宽度同样只从配置读取，缺省保持开启
+            speed_width = settings.get("speed_width")
+            if isinstance(speed_width, bool):
+                cv.speed_width_enabled = speed_width
             if settings.get("timer_mode") in ("UP", "DOWN"):
                 self.timer_mode = settings["timer_mode"]
             target = settings.get("timer_target")
@@ -7183,6 +7321,7 @@ class ControlPanel(QWidget):
                     "logical_dpi": 96.0,
                     "geometry": [],
                 }
+            cv.refresh_speed_scale()     # 读回校准后刷新速度映射的物理尺度
             self.update_ruler_calibration_label()
             self.restore_tool(settings.get("draw_state", "PEN"))
             # 方向要在读回位置之前恢复：横竖版尺寸不同，restore_position 得按最终尺寸钳制
