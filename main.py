@@ -2,6 +2,18 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # 版本号：见 version.py（唯一来源，代码里统一用 APP_VERSION）
 # 更新日志：
+# v5.3.0：文本框重做 + 结构化公式编辑器
+# 1. 修复停笔定形「光环转完却纹丝不动」：进度环出现前先判可行性，明显不可能成形
+#    （开放曲线等）立刻收手，一圈都不画，之后按住多久都保持原样静止
+# 2. 文本框改为拖拽定框 + 多行 + 可改色/粗细；旧文件无新字段仍按内容自适应
+# 3. 结构化公式编辑器（formula.py）：树而非 LaTeX 字符串，点哪个格子就在哪输入，
+#    支持分数/上下标/根号/求和/积分并可嵌套；排版引擎不依赖 Qt，几何可精确断言
+# 4. 字母数字交给系统触摸键盘（TabTip，走 ITipInvocation），自己只加符号面板，
+#    按类型折叠、展开在键盘上方并按键盘实际矩形避让
+# 5. 根号用 QPainterPath 自绘：字体 √ 高度固定且无 MATH 表，自绘才能随内容伸长
+#    且保持矢量（SVG/EPS 导出不退化）
+# 6. 本版不做 Markdown
+#
 # v5.2.2：自动保存压缩 + 缩略图层级修复
 # 1. 自动保存改 gzip（.json.gz）：纯笔迹页实测 -97.6%；含内嵌图片的页只有 -24.7%
 #    （主体是已压缩的 base64 PNG，压不动是预期，已写成测试固定）
@@ -154,6 +166,7 @@ import base64
 import logging
 import ast
 import contextlib
+import copy
 from datetime import datetime
 from persistence import (atomic_write_json, atomic_write_json_gz, read_json_maybe_gz,
                          cleanup_temp_files, normalize_project_data, make_project_data,
@@ -165,6 +178,8 @@ from display_utils import (clamp_rect, choose_screen, clamp_ruler_width, pixels_
                            protractor_angle_degrees, ruler_geometry as physical_ruler_geometry,
                            ruler_mm_from_local_x)
 from version import APP_VERSION
+import formula
+import touch_keyboard
 from i18n import tr, trf, CURRENT
 import eps_export
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QLabel, QPushButton,
@@ -479,7 +494,7 @@ def serialize_page(page):
             "marker": bool(seg.get("marker", False)),
         })
     for item in page.get("texts", []):
-        serialized["texts"].append({
+        entry = {
             "id": str(item["id"]),
             "text": item["text"],
             "pos": [item["pos"].x(), item["pos"].y()],
@@ -488,7 +503,16 @@ def serialize_page(page):
             "size": item["size"],
             "scale": item["scale"],
             "rotation": item["rotation"],
-        })
+        }
+        # box / formula 只在真的有值时写出，让没用到新功能的页面产出与 5.2 一致的
+        # JSON——升级后打开旧项目再保存，不会凭空多出字段。
+        box = item.get("box")
+        if box:
+            entry["box"] = [float(box[0]), float(box[1])]
+        tree = item.get("formula")
+        if tree:
+            entry["formula"] = tree
+        serialized["texts"].append(entry)
     for item in page.get("shapes", []):
         shape_data = {
             "id": str(item["id"]),
@@ -538,7 +562,7 @@ def deserialize_page(data):
         })
     for item in data.get("texts", []):
         pos = item.get("pos", [0, 0])
-        page["texts"].append({
+        entry = {
             "id": _parse_id(item.get("id", uuid.uuid4())),
             "text": item.get("text", ""),
             "pos": QPointF(_coerce_bounded_float(pos[0], 0.0), _coerce_bounded_float(pos[1], 0.0)),
@@ -547,7 +571,16 @@ def deserialize_page(data):
             "size": _coerce_int(item.get("size", 24), 24, minimum=1),
             "scale": _coerce_float(item.get("scale", 1.0), 1.0),
             "rotation": _coerce_float(item.get("rotation", 0.0), 0.0),
-        })
+        }
+        raw_box = item.get("box")
+        if isinstance(raw_box, (list, tuple)) and len(raw_box) >= 2:
+            entry["box"] = [_coerce_bounded_float(raw_box[0], 0.0),
+                            _coerce_bounded_float(raw_box[1], 0.0)]
+        # normalize 是全函数：外部文件里的乱数据会被丢掉而不是抛异常
+        tree = formula.normalize(item.get("formula"))
+        if tree:
+            entry["formula"] = tree
+        page["texts"].append(entry)
     for item in data.get("shapes", []):
         kind = item.get("kind", "rect")
         shape = {
@@ -862,7 +895,13 @@ class StrokeShapeRecognizer:
             return None
 
     @classmethod
-    def _recognize(cls, raw_points):
+    def _prepare(cls, raw_points):
+        """去重并算出长度/对角线；太短太小的笔迹在这里就否掉。
+
+        抽出来是为了让 recognize 和 can_form_shape 共用同一套早期否决——两边各写
+        一份的话，阈值一改就会漂移，UI 会出现「光环转完了但不变形」或者反过来
+        「明明能识别却不给光环」。
+        """
         pts = []
         for p in raw_points:
             xy = (float(p[0]), float(p[1]))
@@ -876,11 +915,42 @@ class StrokeShapeRecognizer:
         diag = math.hypot(max(xs) - min(xs), max(ys) - min(ys))
         if length < 40 or diag < 18:
             return None
+        return pts, length, diag
+
+    @classmethod
+    def _is_open_stroke(cls, pts, length, diag):
+        """首尾离得太远 → 没闭合，既不是直线也不可能是多边形/圆。"""
+        gap = cls._dist(pts[0], pts[-1])
+        return gap > max(22.0, 0.12 * length) or gap > 0.55 * diag
+
+    @classmethod
+    def can_form_shape(cls, raw_points):
+        """这笔【有没有可能】变成标准图形？保守判断：只在确定不可能时返回 False。
+
+        用途是让「停笔定形」在明显不可能的笔迹上立刻放弃，而不是转满 650ms 光环、
+        到点了却纹丝不动——写字时每一笔都是开放曲线，那圈光环纯属干扰。
+
+        注意这不是完整识别：闭合的笔迹这里一律返回 True，因为它还要过重采样、
+        拐角检测、多边形/圆拟合和残差校验，那些便宜不了，只能照常等满时间。
+        """
+        prepared = cls._prepare(raw_points)
+        if prepared is None:
+            return False
+        pts, length, diag = prepared
+        if cls._try_line(pts):
+            return True
+        return not cls._is_open_stroke(pts, length, diag)
+
+    @classmethod
+    def _recognize(cls, raw_points):
+        prepared = cls._prepare(raw_points)
+        if prepared is None:
+            return None
+        pts, length, diag = prepared
         line = cls._try_line(pts)
         if line:
             return line
-        gap = cls._dist(pts[0], pts[-1])
-        if gap > max(22.0, 0.12 * length) or gap > 0.55 * diag:
+        if cls._is_open_stroke(pts, length, diag):
             return None                      # 既不是直线也没闭合 → 保留笔迹
         loop = cls._resample_closed(pts, cls.RESAMPLE_N)
         if loop is None:
@@ -1572,6 +1642,11 @@ class DrawingCanvas(QMainWindow):
         self.transform_start_angle = None
         self.move_originals = None
         self.text_font_size = 24
+        # 文本框拖拽定框（TEXT 工具）；editing_text_id 指向正在编辑的那一框
+        self.text_drag_start = None
+        self.text_drag_rect = None
+        self.editing_text_id = None
+        self.editing_slot = None        # 结构化公式里当前插入点所在的槽路径
         self.last_point = None
         self.current_stroke_id = None
         self.current_stroke_widths = []
@@ -1596,6 +1671,7 @@ class DrawingCanvas(QMainWindow):
         self._hold_since = 0.0
         self._hold_active = False            # 笔是否按下且处于停笔判定中
         self._hold_progress = 0.0            # 0~1，笔尖进度环
+        self._hold_can_form = None           # 本次停笔是否可能成形（None=未判）
         self._stroke_uses_delta = False      # 当前这一笔是否按笔入栈
         # --- 多指书写：每根手指一份笔画上下文 ---
         # 鼠标/主指沿用上面那些字段本身（单指路径与 v5.1 逐字节一致）；
@@ -1686,14 +1762,16 @@ class DrawingCanvas(QMainWindow):
         return QRectF(QPointF(min_x, min_y), QPointF(max_x, max_y)).adjusted(-8, -8, 8, 8)
 
     def text_bounds(self, item):
-        font = QFont("Microsoft YaHei", item["size"])
-        metrics = QFontMetricsF(font)
-        rect = metrics.boundingRect(item["text"]).adjusted(-6, -6, 6, 6)
+        """文本框的屏幕包围盒。
+
+        橡皮命中判定、选择框、四种导出全部依赖它，所以它必须与 draw_text_item 用
+        同一个矩形来源（text_local_rect），否则会出现「看得见但擦不掉」这类错位。
+        """
         transform = QTransform()
         transform.translate(item["pos"].x(), item["pos"].y())
-        transform.rotate(item["rotation"])
-        transform.scale(item["scale"], item["scale"])
-        return transform.mapRect(rect)
+        transform.rotate(item.get("rotation", 0.0))
+        transform.scale(item.get("scale", 1.0), item.get("scale", 1.0))
+        return transform.mapRect(self.text_local_rect(item))
 
     def shape_bounds(self, item):
         kind = item.get("kind", "rect")
@@ -1886,18 +1964,40 @@ class DrawingCanvas(QMainWindow):
     def clone_segments(self):
         return [{"line": QLine(seg["line"]), "pen": QPen(seg["pen"]), "id": seg["id"], "marker": seg.get("marker", False)} for seg in self.all_segments]
 
+    @staticmethod
+    def clone_text_item(item):
+        """复制一个文本对象。
+
+        只有这一处知道文本的字段表。clone_text_items 和 load_page 原先各自逐字段
+        构造 dict，新增字段时必须两边都记得改——漏一处就会「保存后再打开，框大小
+        和公式全没了」，而且不报错。
+
+        公式树必须深拷贝：撤销快照与实时对象共享同一棵树的话，编辑公式会就地改掉
+        历史快照，撤销回去看到的还是改后的内容。
+        """
+        clone = {
+            "id": item["id"],
+            "text": item.get("text", ""),
+            "pos": QPointF(item["pos"]),
+            "color": QColor(item["color"]),
+            "width": item.get("width", 1),
+            "size": item.get("size", 24),
+            "scale": item.get("scale", 1.0),
+            "rotation": item.get("rotation", 0.0),
+        }
+        if item.get("bold"):
+            clone["bold"] = True
+        box = item.get("box")
+        if box:
+            clone["box"] = [float(box[0]), float(box[1])]
+        tree = item.get("formula")
+        if tree:
+            clone["formula"] = copy.deepcopy(tree)
+        return clone
+
     def clone_text_items(self):
         return [
-            {
-                "id": item["id"],
-                "text": item["text"],
-                "pos": QPointF(item["pos"]),
-                "color": QColor(item["color"]),
-                "width": item["width"],
-                "size": item["size"],
-                "scale": item["scale"],
-                "rotation": item["rotation"],
-            }
+            self.clone_text_item(item)
             for item in self.text_items
         ]
 
@@ -1986,16 +2086,7 @@ class DrawingCanvas(QMainWindow):
     def load_page(self, page):
         self.all_segments = [{"line": QLine(seg["line"]), "pen": QPen(seg["pen"]), "id": seg["id"], "marker": seg.get("marker", False)} for seg in page.get("segments", [])]
         self.text_items = [
-            {
-                "id": item["id"],
-                "text": item["text"],
-                "pos": QPointF(item["pos"]),
-                "color": QColor(item["color"]),
-                "width": item["width"],
-                "size": item["size"],
-                "scale": item["scale"],
-                "rotation": item["rotation"],
-            }
+            self.clone_text_item(item)
             for item in page.get("texts", [])
         ]
         self.shape_items = [self.clone_shape(item) for item in page.get("shapes", [])]
@@ -2249,10 +2340,80 @@ class DrawingCanvas(QMainWindow):
         track_event("selection_changed", count=len(self.selected_ids))
         self.update()
 
-    def create_text_item(self, pos):
-        text, ok = QInputDialog.getText(self, tr("text_input_title"), tr("text_input_label"))
-        if not ok or not text:
-            return
+    def text_at(self, pos):
+        """命中最上层的文本框，没有则 None。顺序与绘制相反，先试后画的。"""
+        point = QPointF(pos)
+        for item in reversed(self.text_items):
+            if self.text_bounds(item).contains(point):
+                return item
+        return None
+
+    def finish_text_box(self, rect):
+        """拖拽结束：建一个空文本框并进入编辑。
+
+        太小的拖拽（其实是点击）按最小尺寸给一个框，而不是什么都不做——触屏上
+        很难拖出精确矩形，一点就没反应会让人以为工具坏了。
+        """
+        if rect is None:
+            return None
+        rect = QRectF(rect).normalized()
+        width = max(self.TEXT_MIN_W, rect.width())
+        height = max(self.TEXT_MIN_H, rect.height())
+        item = self.create_text_item(rect.topLeft(), box=(width, height))
+        if item is not None:
+            self.begin_text_edit(item)
+        return item
+
+    def begin_text_edit(self, item):
+        """进入编辑态：插入点落在公式的第一个空槽，或纯文本末尾。"""
+        self.editing_text_id = item["id"]
+        self.selected_ids = {item["id"]}
+        tree = item.get("formula")
+        self.editing_slot = self._first_empty_slot(tree) if tree else None
+        if self.panel:
+            self.panel.open_text_input(item)
+            self.panel.sync_selection_controls()
+            self.panel.position_selection_panel(self.selection_bounds())
+        self.update()
+
+    @staticmethod
+    def _first_empty_slot(tree, path=()):
+        """找第一个空槽，作为新建公式后的默认插入点。"""
+        for index, node in enumerate(tree or []):
+            for name in formula.SLOTS.get(node.get("k"), ()):
+                child = node.get(name) or []
+                here = path + (index, name)
+                if not child:
+                    return here
+                found = DrawingCanvas._first_empty_slot(child, here)
+                if found is not None:
+                    return found
+        return None
+
+    def editing_text_item(self):
+        if self.editing_text_id is None:
+            return None
+        return next((t for t in self.text_items if t["id"] == self.editing_text_id), None)
+
+    def end_text_edit(self, *, discard_empty=True):
+        """离开编辑态。空框默认删掉，避免画布上留一堆看不见的空盒子。"""
+        item = self.editing_text_item()
+        self.editing_text_id = None
+        self.editing_slot = None
+        if item is not None and discard_empty and not str(item.get("text", "")).strip() \
+                and not item.get("formula"):
+            self.text_items = [t for t in self.text_items if t["id"] != item["id"]]
+            self.selected_ids.discard(item["id"])
+            self.mark_content_changed()
+        if self.whiteboard_mode:
+            self.save_current_page()
+        if self.panel:
+            self.panel.close_text_input()
+            self.panel.sync_selection_controls()
+            self.panel.position_selection_panel(self.selection_bounds())
+        self.update()
+
+    def create_text_item(self, pos, box=None, text=""):
         item_id = uuid.uuid4()
         item = {
             "id": item_id,
@@ -2264,6 +2425,8 @@ class DrawingCanvas(QMainWindow):
             "scale": 1.0,
             "rotation": 0.0,
         }
+        if box:
+            item["box"] = [float(box[0]), float(box[1])]
         # 文本在「按下即成」流程里：mousePressEvent 已在 3313 行存了 pending_undo = capture_page()
         # （无文本的整页），松开时 mouseReleaseEvent 的 snapshot_differs 守卫会把它 commit 进
         # undo 栈——这与 add_shape_item（finish_shape_item）依赖同一套 pending_undo 机制一致。
@@ -2276,7 +2439,124 @@ class DrawingCanvas(QMainWindow):
         if self.panel:
             self.panel.sync_selection_controls()
             self.panel.position_selection_panel(self.selection_bounds())
-        track_event("text_created", length=len(text))
+        track_event("text_created", length=len(text), boxed=bool(box))
+        self.update()
+        return item
+
+    # --- 编辑态下的内容变更 ---
+    def text_insert(self, chars):
+        """往当前插入点写字符。公式模式下写进当前槽，否则追加到纯文本。"""
+        item = self.editing_text_item()
+        if item is None or not chars:
+            return False
+        if item.get("formula") is not None and self.editing_slot is not None:
+            slot = formula.get_slot(item["formula"], self.editing_slot)
+            if slot is None:
+                self.editing_slot = self._first_empty_slot(item["formula"])
+                slot = formula.get_slot(item["formula"], self.editing_slot) \
+                    if self.editing_slot else None
+            if slot is None:
+                return False
+            # 连续输入合并进同一个文本节点，避免每个字符一个节点把树撑爆
+            if slot and slot[-1].get("k") == "t":
+                slot[-1]["v"] += chars
+            else:
+                slot.append(formula.new_node("t", chars))
+        else:
+            item["text"] = str(item.get("text", "")) + chars
+        self._after_text_change(item)
+        return True
+
+    def text_backspace(self):
+        item = self.editing_text_item()
+        if item is None:
+            return False
+        if item.get("formula") is not None and self.editing_slot is not None:
+            slot = formula.get_slot(item["formula"], self.editing_slot)
+            if not slot:
+                return False
+            tail = slot[-1]
+            if tail.get("k") == "t" and len(tail.get("v", "")) > 1:
+                tail["v"] = tail["v"][:-1]
+            else:
+                slot.pop()
+        else:
+            text = str(item.get("text", ""))
+            if not text:
+                return False
+            item["text"] = text[:-1]
+        self._after_text_change(item)
+        return True
+
+    def text_newline(self):
+        item = self.editing_text_item()
+        if item is None or item.get("formula") is not None:
+            return False        # 公式里换行没有意义
+        item["text"] = str(item.get("text", "")) + "\n"
+        self._after_text_change(item)
+        return True
+
+    def text_insert_structure(self, kind):
+        """插入一个结构节点（分数/根号/上下标/求和/积分）并把插入点移进它的第一个槽。"""
+        item = self.editing_text_item()
+        if item is None:
+            return False
+        if item.get("formula") is None:
+            # 首次插入结构：把已有纯文本搬进公式树，不丢用户已经打的字
+            existing = str(item.get("text", ""))
+            item["formula"] = [formula.new_node("t", existing)] if existing else []
+            item["text"] = ""
+            self.editing_slot = None
+        tree = item["formula"]
+        target = formula.get_slot(tree, self.editing_slot) if self.editing_slot else tree
+        if target is None:
+            target = tree
+            self.editing_slot = None
+        try:
+            node = formula.new_node(kind)
+        except ValueError:
+            return False
+        target.append(node)
+        index = len(target) - 1
+        first_slot = formula.SLOTS[kind][0]
+        base = self.editing_slot or ()
+        self.editing_slot = base + (index, first_slot)
+        self._after_text_change(item)
+        return True
+
+    def set_editing_slot_at(self, pos):
+        """点击画布上的公式：把插入点移到被点中的那个格子。"""
+        item = self.editing_text_item()
+        if item is None or not item.get("formula"):
+            return False
+        box = self.formula_box(item)
+        if box is None:
+            return False
+        rect = self.text_local_rect(item)
+        # 把画布坐标逆变换回文本框的局部坐标系
+        transform = QTransform()
+        transform.translate(item["pos"].x(), item["pos"].y())
+        transform.rotate(item.get("rotation", 0.0))
+        transform.scale(item.get("scale", 1.0), item.get("scale", 1.0))
+        inverse, ok = transform.inverted()
+        if not ok:
+            return False
+        local = inverse.map(QPointF(pos))
+        x = local.x() - (rect.left() + self.TEXT_PAD)
+        y = local.y() - (rect.top() + self.TEXT_PAD + box.ascent)
+        found = formula.hit_slot(box, x, y)
+        if found is None:
+            return False
+        self.editing_slot = found
+        self.update()
+        return True
+
+    def _after_text_change(self, item):
+        self.mark_content_changed()
+        if self.whiteboard_mode:
+            self.save_current_page()
+        if self.panel:
+            self.panel.position_selection_panel(self.selection_bounds())
         self.update()
 
     def make_shape_item(self, rect):
@@ -2460,6 +2740,9 @@ class DrawingCanvas(QMainWindow):
         "_hold_since": 0.0,
         "_hold_active": False,
         "_hold_progress": 0.0,
+        # 本次停笔的可行性判定：None 未判、True 有可能、False 确定不可能。
+        # 每次「笔真的动过之后重新停下」都会重置，因为笔迹变了结论可能就变了。
+        "_hold_can_form": None,
         # 这一笔是否走「按笔入栈」的增量撤销。_begin_stroke 置 True；
         # 直接摆状态的旧式调用（测试里有）保持 False，走原来的整页快照分支。
         "_stroke_uses_delta": False,
@@ -2550,6 +2833,7 @@ class DrawingCanvas(QMainWindow):
         self._hold_anchor = QPointF(pos)
         self._hold_since = time.perf_counter()
         self._hold_active = True
+        self._hold_can_form = None      # 笔迹变了，可行性重新判
         self._hold_timer().start()
 
     def _track_smart_hold(self, pos):
@@ -2598,6 +2882,18 @@ class DrawingCanvas(QMainWindow):
                 or self.draw_state != "PEN" or not self.smart_shapes_enabled):
             self._cancel_smart_recognition()
             return
+        # 先判「这笔有没有可能成形」，判定一次、结果留到本次停笔结束。
+        # 放在进度环出现之前：写字时每一笔都是开放曲线，不可能成形，那就一圈光环
+        # 都不该画——原先的行为是照常转满 650ms，到点了笔迹纹丝不动，用户只看到
+        # 一个毫无作用的等待动画。
+        if self._hold_can_form is None:
+            self._hold_can_form = StrokeShapeRecognizer.can_form_shape(
+                [(p.x(), p.y()) for p in self.current_stroke_points])
+            if not self._hold_can_form:
+                # drop_pending=False：这一笔仍在书写中，不能丢掉待提交的撤销快照
+                self._cancel_smart_recognition(drop_pending=False)
+                track_event("smart_hold_skipped", reason="cannot_form_shape")
+                return
         held_ms = (time.perf_counter() - self._hold_since) * 1000.0
         if held_ms >= self.SMART_HOLD_MS:
             self._commit_hold_recognition()
@@ -3694,16 +3990,209 @@ class DrawingCanvas(QMainWindow):
         for item in (self.shape_items if shapes is None else shapes):
             self.draw_shape_item(painter, item)
         for item in (self.text_items if texts is None else texts):
+            self.draw_text_item(painter, item)
+
+    # --- 文本 / 公式渲染 ---
+    TEXT_PAD = 6.0              # 文本框内边距
+    TEXT_MIN_W = 60.0           # 拖拽定框的最小尺寸；再小就装不下一个字
+    TEXT_MIN_H = 36.0
+
+    @staticmethod
+    def text_font(item):
+        font = QFont("Microsoft YaHei", max(1, int(item.get("size", 24))))
+        font.setBold(bool(item.get("bold", False)))
+        return font
+
+    def text_lines(self, item):
+        return str(item.get("text", "")).split("\n")
+
+    def _formula_metrics(self, item):
+        """给 formula.layout 用的度量适配器。
+
+        formula.py 刻意不依赖 Qt，排版只通过这个接口拿字宽和升降部——这样几何
+        计算能用假度量做精确断言，而不是「看起来差不多」。
+        """
+        base_font = self.text_font(item)
+
+        class _Metrics:
+            @staticmethod
+            def _font(size):
+                font = QFont(base_font)
+                font.setPointSizeF(max(1.0, float(size)))
+                return font
+
+            def advance(self, text, size):
+                return QFontMetricsF(self._font(size)).horizontalAdvance(text)
+
+            def ascent(self, size):
+                return QFontMetricsF(self._font(size)).ascent()
+
+            def descent(self, size):
+                return QFontMetricsF(self._font(size)).descent()
+
+        return _Metrics()
+
+    def formula_box(self, item):
+        """排好版的公式盒；没有公式则返回 None。"""
+        tree = item.get("formula")
+        if not tree:
+            return None
+        return formula.layout(tree, float(max(1, item.get("size", 24))),
+                              self._formula_metrics(item))
+
+    def text_content_size(self, item):
+        """内容自身需要的尺寸（不含边距，未经 scale/rotation）。"""
+        box = self.formula_box(item)
+        if box is not None:
+            return box.w, box.height
+        metrics = QFontMetricsF(self.text_font(item))
+        lines = self.text_lines(item)
+        width = max((metrics.horizontalAdvance(line) for line in lines), default=0.0)
+        height = metrics.lineSpacing() * max(1, len(lines))
+        return width, height
+
+    def text_local_rect(self, item):
+        """文本框在自身局部坐标系里的矩形（未经 scale/rotation）。
+
+        拖拽定过框的用 box；没有的（旧文件、旧版本写的）按内容自适应，
+        这样 5.3.0 之前保存的项目打开后位置和大小都不变。
+        """
+        stored = item.get("box")
+        if stored:
+            width = max(self.TEXT_MIN_W, float(stored[0]))
+            height = max(self.TEXT_MIN_H, float(stored[1]))
+            return QRectF(0.0, 0.0, width, height)
+        width, height = self.text_content_size(item)
+        return QRectF(0.0, 0.0, width + self.TEXT_PAD * 2, height + self.TEXT_PAD * 2)
+
+    def draw_text_item(self, painter, item, editing=False):
+        painter.save()
+        painter.translate(item["pos"])
+        painter.rotate(item.get("rotation", 0.0))
+        painter.scale(item.get("scale", 1.0), item.get("scale", 1.0))
+        rect = self.text_local_rect(item)
+        color = QColor(item["color"])
+        width = max(1, int(item.get("width", 1)))
+        if editing:
+            # 编辑中画一个虚框，让用户看清这一框的范围；导出和常态渲染都不画。
+            guide = QPen(QColor(color.red(), color.green(), color.blue(), 110),
+                         1.0, Qt.PenStyle.DashLine)
+            painter.setPen(guide)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(rect)
+        painter.setPen(QPen(color, width))
+        painter.setFont(self.text_font(item))
+        box = self.formula_box(item)
+        if box is not None:
             painter.save()
-            painter.translate(item["pos"])
-            painter.rotate(item["rotation"])
-            painter.scale(item["scale"], item["scale"])
-            font = QFont("Microsoft YaHei", item["size"])
-            font.setBold(item.get("bold", False))
-            painter.setFont(font)
-            painter.setPen(QPen(item["color"], max(1, item["width"])))
-            painter.drawText(QPointF(0, 0), item["text"])
+            painter.translate(rect.left() + self.TEXT_PAD,
+                              rect.top() + self.TEXT_PAD + box.ascent)
+            self._draw_formula_box(painter, box, item, editing=editing)
             painter.restore()
+        else:
+            metrics = QFontMetricsF(self.text_font(item))
+            y = rect.top() + self.TEXT_PAD + metrics.ascent()
+            for line in self.text_lines(item):
+                painter.drawText(QPointF(rect.left() + self.TEXT_PAD, y), line)
+                y += metrics.lineSpacing()
+        painter.restore()
+
+    def _draw_formula_box(self, painter, box, item, editing=False, active_slot=None):
+        """递归画一个排好版的公式盒。painter 原点在这个盒的基线左端。"""
+        if box.kind == "empty":
+            if editing:
+                # 空槽只在编辑时显示，画成一个可点的浅色方框；否则导出会出现空盒子
+                pen = QPen(QColor(140, 150, 160, 170), 1.0, Qt.PenStyle.DotLine)
+                painter.save()
+                painter.setPen(pen)
+                painter.setBrush(QColor(140, 150, 160, 28))
+                painter.drawRect(QRectF(0.0, -box.ascent, box.w, box.height))
+                painter.restore()
+        if box.kind == "t" and box.text:
+            painter.save()
+            font = QFont(self.text_font(item))
+            font.setPointSizeF(max(1.0, box.size))
+            painter.setFont(font)
+            painter.drawText(QPointF(0.0, 0.0), box.text)
+            painter.restore()
+        if box.glyph is not None:
+            symbol, glyph_size, gx, gy = box.glyph
+            if symbol == "sqrt":
+                self._draw_radical(painter, box)
+            else:
+                painter.save()
+                font = QFont(self.text_font(item))
+                font.setPointSizeF(max(1.0, glyph_size))
+                painter.setFont(font)
+                painter.drawText(QPointF(gx, gy), symbol)
+                painter.restore()
+        if box.bar is not None and box.kind != "sqrt":
+            bx, by, bw, thickness = box.bar
+            painter.save()
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(item["color"]))
+            painter.drawRect(QRectF(bx, by, bw, thickness))
+            painter.restore()
+        for dx, dy, child in box.children:
+            painter.save()
+            painter.translate(dx, dy)
+            self._draw_formula_box(painter, child, item, editing=editing,
+                                   active_slot=active_slot)
+            painter.restore()
+
+    def _draw_active_slot(self, painter, item):
+        """高亮当前插入点所在的格子——「点哪个格子就在哪输入」必须看得见在哪。"""
+        if self.editing_slot is None or not item.get("formula"):
+            return
+        box = self.formula_box(item)
+        if box is None:
+            return
+        target = None
+        for path, x, y, w, h in formula.slot_rects(box):
+            if path == self.editing_slot:
+                target = QRectF(x, y, w, h)
+                break
+        if target is None:
+            return
+        rect = self.text_local_rect(item)
+        painter.save()
+        painter.translate(item["pos"])
+        painter.rotate(item.get("rotation", 0.0))
+        painter.scale(item.get("scale", 1.0), item.get("scale", 1.0))
+        painter.translate(rect.left() + self.TEXT_PAD,
+                          rect.top() + self.TEXT_PAD + box.ascent)
+        accent = QColor(self.pen_color)
+        painter.setPen(QPen(accent, 1.6))
+        painter.setBrush(QColor(accent.red(), accent.green(), accent.blue(), 40))
+        painter.drawRect(target.adjusted(-1.5, -1.5, 1.5, 1.5))
+        painter.restore()
+
+    def _draw_radical(self, painter, box):
+        """根号：钩部 + 上横线用 QPainterPath 画，不靠字体的 √ 字形。
+
+        字体里的 √ 是固定高度的，套在高内容（比如分数）上会明显不够长；而
+        Microsoft YaHei 没有 OpenType MATH 表，取不到可拉伸变体。自己画则任意
+        高度都贴合，且是矢量的——SVG/EPS 导出仍保持矢量。
+        """
+        bar_x, bar_y, bar_w, thickness = box.bar
+        top = bar_y
+        bottom = box.descent
+        lead = bar_x
+        path = QPainterPath()
+        path.moveTo(0.0, -box.ascent * 0.45)
+        path.lineTo(lead * 0.34, -box.ascent * 0.30)
+        path.lineTo(lead * 0.60, bottom)
+        path.lineTo(lead, top + thickness / 2.0)
+        path.lineTo(lead + bar_w, top + thickness / 2.0)
+        painter.save()
+        pen = QPen(painter.pen())
+        pen.setWidthF(max(1.0, thickness))
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.MiterJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(path)
+        painter.restore()
 
     def render_page_pixmap(self, page, size):
         """把一页页面数据渲染为缩略图或导出图，兼容 JSON 和运行时页面。"""
@@ -4350,6 +4839,18 @@ class DrawingCanvas(QMainWindow):
                 preview["color"] = QColor(self.pen_color)
                 preview["width"] = max(1, self.pen_width)
                 self.draw_shape_item(painter, preview)
+            if self.text_drag_rect is not None:
+                # 拖拽定框的预览：虚线矩形，跟 SHAPE 的实时预览同一套交互语言
+                painter.save()
+                painter.setPen(QPen(QColor(self.pen_color), 1.0, Qt.PenStyle.DashLine))
+                painter.setBrush(QColor(120, 140, 170, 30))
+                painter.drawRect(self.text_drag_rect)
+                painter.restore()
+            editing = self.editing_text_item()
+            if editing is not None:
+                # 编辑中的框重画一遍带虚框和空槽提示；常态渲染与导出都不含这些辅助图元
+                self.draw_text_item(painter, editing, editing=True)
+                self._draw_active_slot(painter, editing)
             if self.draw_state == "SHAPE" and self.pending_points:
                 preview = self.build_point_shape(self.shape_type, self.pending_points + [QPointF(self.mouse_pos)])
                 if preview:
@@ -4505,7 +5006,21 @@ class DrawingCanvas(QMainWindow):
                     self.selection_start = pos
                     self.selection_rect = QRectF(QPointF(pos), QPointF(pos))
         elif self.draw_state == "TEXT":
-            self.create_text_item(pos)
+            editing = self.editing_text_item()
+            if editing is not None and self.text_bounds(editing).contains(QPointF(pos)):
+                # 正在编辑这一框：点击是「把插入点移到这个格子」，不是新建
+                if not self.set_editing_slot_at(pos):
+                    self.editing_slot = None
+                return
+            hit = self.text_at(pos)
+            if editing is not None and (hit is None or hit["id"] != editing["id"]):
+                self.end_text_edit()        # 点到别处：先收束当前这一框
+            if hit is not None:
+                self.begin_text_edit(hit)
+            else:
+                self.selected_ids.clear()
+                self.text_drag_start = QPointF(pos)
+                self.text_drag_rect = QRectF(QPointF(pos), QPointF(pos))
         elif self.draw_state == "SHAPE":
             self.selected_ids.clear()
             if self.shape_type in self.POINT_SHAPES:
@@ -4608,6 +5123,9 @@ class DrawingCanvas(QMainWindow):
                 self._track_smart_hold(pos)
         elif self.is_drawing_mode and self.draw_state == "SHAPE" and (event.buttons() & Qt.MouseButton.LeftButton) and self.shape_start:
             self.preview_shape = self.make_shape_item(QRectF(QPointF(self.shape_start), QPointF(pos)))
+        elif (self.is_drawing_mode and self.draw_state == "TEXT"
+                and (event.buttons() & Qt.MouseButton.LeftButton) and self.text_drag_start is not None):
+            self.text_drag_rect = QRectF(self.text_drag_start, QPointF(pos)).normalized()
         elif self.is_drawing_mode and self.draw_state == "ERASER" and (event.buttons() & Qt.MouseButton.LeftButton):
             self.execute_erase_path(pos)
         self.update()
@@ -4698,6 +5216,10 @@ class DrawingCanvas(QMainWindow):
             self.finish_shape_item(self.preview_shape["rect"])
             self.preview_shape = None
             self.shape_start = None
+        if self.draw_state == "TEXT" and self.text_drag_start is not None:
+            self.finish_text_box(self.text_drag_rect)
+            self.text_drag_start = None
+            self.text_drag_rect = None
         # 抬笔＝明确表示「就要这条手绘」，此处不做任何识别，只把停笔计时收掉。
         # 想要标准图形的话，画完最后一点后把笔停在原地别抬即可（见 _tick_smart_hold）。
         self._cancel_smart_recognition(drop_pending=True)
@@ -5256,6 +5778,10 @@ class ControlPanel(QWidget):
         # 计算器 / 点名 独立浮窗
         self.calc_panel = None
         self.roster_panel = None
+        # 文字/公式输入面板：懒建，第一次编辑文本时才构造
+        self.text_panel = None
+        self._open_symbol_group = None
+        self._symbol_group_buttons = {}
         self._calc_expr = "0"
         self._calc_display = None
 
@@ -5323,7 +5849,8 @@ class ControlPanel(QWidget):
         # 子菜单浮窗/选中面板/迷你计时器是独立顶层窗口，主面板的样式表覆盖不到，需各自下发
         for floating in (getattr(self, "menu_panel", None), getattr(self, "select_panel", None),
                          getattr(self, "mini_timer", None), getattr(self, "calc_panel", None),
-                         getattr(self, "roster_panel", None), getattr(self, "thumbnail_panel", None)):
+                         getattr(self, "roster_panel", None), getattr(self, "thumbnail_panel", None),
+                         getattr(self, "text_panel", None)):
             if floating is not None:
                 floating.setStyleSheet(self.styleSheet())
         if hasattr(self, "btn_clear"):
@@ -6159,6 +6686,10 @@ class ControlPanel(QWidget):
             self.set_active_tool(button)
             return
         self.canvas._cancel_smart_recognition(drop_pending=True)  # 切工具：取消上一笔的延迟识别
+        if self.canvas.editing_text_id is not None:
+            # 切走工具就收束文字编辑，并收掉输入面板和系统键盘——否则键盘会留在
+            # 屏幕上挡住板书，而画布已经不接受文字输入了。
+            self.canvas.end_text_edit()
         prev = self.canvas.draw_state
         # 离开任意工具时的统一善后：不再有「橡皮特殊分支提前 return」跳过这些清理，
         # 这样从橡皮切到任意绘图工具时，旧工具残留状态（放大镜冻结帧 / 聚光灯叠加 /
@@ -6907,6 +7438,7 @@ class ControlPanel(QWidget):
                 getattr(self, "thumbnail_panel", None),
                 getattr(self, "calc_panel", None),
                 getattr(self, "roster_panel", None),
+                getattr(self, "text_panel", None),
             ) if w is not None
         ]
         try:
@@ -7608,6 +8140,7 @@ class ControlPanel(QWidget):
         calc_visible = bool(self.calc_panel and self.calc_panel.isVisible())
         roster_visible = bool(self.roster_panel and self.roster_panel.isVisible())
         thumb_visible = bool(getattr(self, "thumbnail_panel", None) and self.thumbnail_panel.isVisible())
+        text_visible = bool(getattr(self, "text_panel", None) and self.text_panel.isVisible())
         proj_visible = bool(self._name_projection is not None and self._name_projection.isVisible())
         try:
             # 抓屏期间 timer_clock 仍在跑，禁止它把迷你计时器拉回画面；
@@ -7629,6 +8162,8 @@ class ControlPanel(QWidget):
                 self.roster_panel.hide()
             if thumb_visible:
                 self.thumbnail_panel.hide()
+            if text_visible:
+                self.text_panel.hide()
             if proj_visible:
                 self._name_projection.hide()
             QApplication.processEvents()
@@ -7697,6 +8232,8 @@ class ControlPanel(QWidget):
                 # 抓屏隐藏缩略图期间，实时定时器的一拍会看到 panel 不可见并自停；
                 # 恢复面板时必须同步复活，否则之后落墨缩略图不再更新。
                 self._thumbnail_live_timer.start()
+            if text_visible:
+                self.text_panel.show()
             if proj_visible:
                 self._name_projection.show()
                 force_topmost(self._name_projection.winId())
@@ -7712,6 +8249,7 @@ class ControlPanel(QWidget):
                 (self.calc_panel, calc_visible),
                 (self.roster_panel, roster_visible),
                 (getattr(self, "thumbnail_panel", None), thumb_visible),
+                (getattr(self, "text_panel", None), text_visible),
             ):
                 if was_visible:
                     self.raise_floating(restored)
@@ -8002,6 +8540,162 @@ class ControlPanel(QWidget):
         win.mouseMoveEvent = move
         win.mouseReleaseEvent = release
         return win, layout
+
+    # --- 文字 / 公式输入面板 ---
+    SYMBOL_BTN = 46             # 符号按钮边长；不小于 TOUCH_MIN_BUTTON 才点得准
+    SYMBOL_COLUMNS = 12
+
+    def open_text_input(self, item):
+        """打开输入面板并调起系统触摸键盘。
+
+        字母数字交给系统键盘（TabTip 自带输入法、8 国语言、手写、emoji，自己重做
+        只会更差），这里只提供它没有的那部分：数学符号和公式结构。
+        """
+        if getattr(self, "text_panel", None) is None:
+            self._build_text_panel()
+        self._text_panel_sync()
+        self.text_panel.adjustSize()
+        self._position_text_panel()
+        self.text_panel.show()
+        self.raise_floating(self.text_panel)
+        if touch_keyboard.available():
+            touch_keyboard.show()
+            # 键盘弹出有延迟，稍后按它的实际位置再让一次位
+            QTimer.singleShot(700, self._position_text_panel)
+        elif hasattr(self, "text_hint_label"):
+            self.text_hint_label.setText(tr("text_keyboard_missing"))
+        self.heartbeat_refresh()
+        track_event("text_editor_opened", has_formula=bool(item.get("formula")))
+
+    def close_text_input(self):
+        panel = getattr(self, "text_panel", None)
+        if panel is not None and panel.isVisible():
+            panel.hide()
+        touch_keyboard.hide()
+
+    def _build_text_panel(self):
+        self.text_panel, layout = self._make_tool_window(tr("text_editor_title"))
+        self.text_hint_label = QLabel("")
+        self.text_hint_label.setWordWrap(True)
+        layout.addWidget(self.text_hint_label)
+
+        # 分组折叠条：一行按钮，点开在其上方展开该组的符号
+        group_row = QHBoxLayout()
+        group_row.setSpacing(3)
+        self._symbol_group_buttons = {}
+        for key in formula.group_keys():
+            btn = QPushButton(tr(formula.group_label(key)))
+            btn.setCheckable(True)
+            btn.setMinimumHeight(TOUCH_MIN_BUTTON)
+            btn.clicked.connect(lambda _=False, k=key: self._toggle_symbol_group(k))
+            group_row.addWidget(btn)
+            self._symbol_group_buttons[key] = btn
+
+        # 符号网格容器：展开的组画在这里，位置在分组条【上方】，
+        # 这样手指从下往上点开组、符号就出现在指尖附近，不会被手挡住。
+        self.symbol_grid_host = QWidget()
+        self.symbol_grid_layout = QGridLayout(self.symbol_grid_host)
+        self.symbol_grid_layout.setSpacing(3)
+        self.symbol_grid_layout.setContentsMargins(0, 0, 0, 0)
+        self.symbol_grid_host.setVisible(False)
+        layout.addWidget(self.symbol_grid_host)
+        layout.addLayout(group_row)
+
+        # 编辑操作：退格 / 换行 / 完成。字母数字由系统键盘负责。
+        action_row = QHBoxLayout()
+        action_row.setSpacing(3)
+        for label_key, handler in (("text_backspace", self._text_backspace),
+                                   ("text_newline", self._text_newline),
+                                   ("text_keyboard", self._text_show_keyboard),
+                                   ("text_done", self._text_done)):
+            btn = QPushButton(tr(label_key))
+            btn.setMinimumHeight(TOUCH_MIN_BUTTON)
+            btn.clicked.connect(handler)
+            action_row.addWidget(btn)
+        layout.addLayout(action_row)
+        self._open_symbol_group = None
+
+    def _text_panel_sync(self):
+        if hasattr(self, "text_hint_label"):
+            self.text_hint_label.setText("")
+
+    def _position_text_panel(self):
+        """把面板放在系统键盘上方；键盘没起来就贴屏幕下沿。
+
+        必须避开键盘矩形：叠在键盘上的话，符号按钮会被键盘盖住点不到。
+        """
+        panel = getattr(self, "text_panel", None)
+        if panel is None or not panel.isVisible():
+            return
+        screen = self.screen_geometry(panel) or QApplication.primaryScreen().availableGeometry()
+        panel.adjustSize()
+        width, height = panel.width(), panel.height()
+        x = screen.center().x() - width // 2
+        keyboard = touch_keyboard.keyboard_rect()
+        if keyboard:
+            _kx, ky, _kw, _kh = keyboard
+            y = ky - height - 8
+        else:
+            y = screen.bottom() - height - 12
+        x, y = clamp_rect(x, max(screen.top() + 4, y), width, height,
+                          (screen.left(), screen.top(), screen.width(), screen.height()))
+        panel.move(x, y)
+
+    def _toggle_symbol_group(self, key):
+        """同一时间只展开一组——全铺开在触屏上是一片小按钮，必然误触。"""
+        if self._open_symbol_group == key:
+            self._open_symbol_group = None
+        else:
+            self._open_symbol_group = key
+        for group_key, btn in self._symbol_group_buttons.items():
+            btn.setChecked(group_key == self._open_symbol_group)
+        while self.symbol_grid_layout.count():
+            child = self.symbol_grid_layout.takeAt(0)
+            widget = child.widget()
+            if widget is not None:
+                widget.deleteLater()
+        if self._open_symbol_group is None:
+            self.symbol_grid_host.setVisible(False)
+        else:
+            for index, entry in enumerate(formula.group_entries(self._open_symbol_group)):
+                btn = QPushButton(formula.entry_label(entry))
+                btn.setFixedSize(self.SYMBOL_BTN, self.SYMBOL_BTN)
+                btn.clicked.connect(lambda _=False, e=entry: self._symbol_pressed(e))
+                self.symbol_grid_layout.addWidget(btn, index // self.SYMBOL_COLUMNS,
+                                                  index % self.SYMBOL_COLUMNS)
+            self.symbol_grid_host.setVisible(True)
+        self.text_panel.adjustSize()
+        self._position_text_panel()
+        self.raise_floating(self.text_panel)
+
+    def _symbol_pressed(self, entry):
+        if not self.canvas:
+            return
+        kind = formula.structure_kind(entry)
+        if kind is not None:
+            self.canvas.text_insert_structure(kind)
+            track_event("formula_structure_inserted", kind=kind)
+        else:
+            self.canvas.text_insert(entry)
+        self.position_selection_panel(self.canvas.selection_bounds())
+
+    def _text_backspace(self):
+        if self.canvas:
+            self.canvas.text_backspace()
+
+    def _text_newline(self):
+        if self.canvas:
+            self.canvas.text_newline()
+
+    def _text_show_keyboard(self):
+        if touch_keyboard.show():
+            QTimer.singleShot(700, self._position_text_panel)
+        elif hasattr(self, "text_hint_label"):
+            self.text_hint_label.setText(tr("text_keyboard_missing"))
+
+    def _text_done(self):
+        if self.canvas:
+            self.canvas.end_text_edit()
 
     def open_calculator(self):
         self.show_only_sub(None)

@@ -9,8 +9,8 @@ ROOT = Path(__file__).resolve().parents[1]
 class ReleaseMetadataTests(unittest.TestCase):
     def test_version_is_stable_release(self):
         from version import VERSION, APP_VERSION
-        self.assertEqual(VERSION, "5.2.2")
-        self.assertEqual(APP_VERSION, "v5.2.2")
+        self.assertEqual(VERSION, "5.3.0")
+        self.assertEqual(APP_VERSION, "v5.3.0")
 
     def test_no_beta_references_remain_in_release_sources(self):
         paths = [
@@ -20,7 +20,7 @@ class ReleaseMetadataTests(unittest.TestCase):
         ]
         for path in paths:
             with self.subTest(path=path):
-                self.assertNotIn("5.2.2-" + "beta", path.read_text(encoding="utf-8"))
+                self.assertNotIn("5.3.0-" + "beta", path.read_text(encoding="utf-8"))
 
     def test_documentation_links_resolve(self):
         markdown_paths = list(ROOT.glob("*.md")) + list((ROOT / "docs").glob("*.md"))
