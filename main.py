@@ -2,6 +2,13 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # 版本号：见 version.py（唯一来源，代码里统一用 APP_VERSION）
 # 更新日志：
+# v5.2.0：多指同时书写
+# 1. 触控大屏上两名学生可各写一笔：每个接触点一份笔画上下文（_pointer_scope）
+# 2. 停笔定形改为每指一个独立计时器，A 指定形不影响 B 指正在写的笔画
+# 3. 撤销改为「按 stroke 完成时间入栈」：撤最后完成的一笔，与哪根手指先落笔无关
+#    （整页快照无法表达「只撤这一笔」，笔画因此改用增量条目，其余操作仍用快照）
+# 4. 单指/鼠标路径保持原样：只有真的出现第二根手指时才接管
+#
 # v5.1.1：Qt 标准对话框国际化修复
 # 1. 文件选择器与自定义颜色选择器正确加载 8 国 qtbase 翻译
 #
@@ -129,6 +136,7 @@ import csv
 import base64
 import logging
 import ast
+import contextlib
 from datetime import datetime
 from persistence import (atomic_write_json, cleanup_temp_files, normalize_project_data, make_project_data,
                          ensure_file_size, PROJECT_KIND, AUTOSAVE_KIND, MAX_ABS_COORD,
@@ -146,10 +154,11 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QLabel, QPushButton,
                              QInputDialog, QMessageBox, QMenu, QFileDialog, QLineEdit, QListWidget,
                              QAbstractItemView, QSizePolicy, QListWidgetItem, QDialog, QDoubleSpinBox,
                              QScroller, QToolTip)
-from PyQt6.QtCore import (Qt, QPoint, QPointF, QRectF, QTimer, QTranslator, QLibraryInfo, QLine, pyqtSignal, QLocale,
+from PyQt6.QtCore import (Qt, QPoint, QPointF, QRectF, QTimer, QTranslator, QLibraryInfo, QLine, pyqtSignal, QLocale, QEvent,
                           QSizeF, QMarginsF, QEventLoop, QSize, QUrl, QBuffer, QIODevice)
 from PyQt6.QtGui import (QPainter, QPen, QColor, QFont, QPainterPath, QFontMetricsF, QTransform, QPolygonF,
-                         QPixmap, QPdfWriter, QPageSize, QCursor, QGuiApplication, QIcon, QImage, QImageReader)
+                         QPixmap, QPdfWriter, QPageSize, QCursor, QGuiApplication, QIcon, QImage, QImageReader,
+                         QEventPoint, QInputDevice)
 from pynput import keyboard
 
 APP_DIR = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
@@ -1551,6 +1560,8 @@ class DrawingCanvas(QMainWindow):
         self.current_stroke_points = []
         # 批注笔常驻智能识别：随手画自动转标准图形，可在批注设置里关闭
         self.smart_shapes_enabled = True
+        # 多指同时书写：触控大屏上两名学生可以各写一笔。关掉则退回单指（主接触点）
+        self.smart_multitouch_enabled = True
         # 智能识别的触发方式：笔按着不动停在图形末端 SMART_HOLD_MS 毫秒才定形（抬笔不触发）
         self.pending_smart = None
         self._smart_recognize_timer = None   # 停笔计时器（周期触发，兼作进度环节拍）
@@ -1558,6 +1569,19 @@ class DrawingCanvas(QMainWindow):
         self._hold_since = 0.0
         self._hold_active = False            # 笔是否按下且处于停笔判定中
         self._hold_progress = 0.0            # 0~1，笔尖进度环
+        self._stroke_uses_delta = False      # 当前这一笔是否按笔入栈
+        # --- 多指书写：每根手指一份笔画上下文 ---
+        # 鼠标/主指沿用上面那些字段本身（单指路径与 v5.1 逐字节一致）；
+        # 第二根及以后的手指各占 _pointer_slots 里的一格，处理某指时用
+        # _pointer_scope() 把该格换进这些字段，处理完换回去。这样所有既有的
+        # 落墨/停笔/识别代码不用改就能作用在「当前这根手指」上。
+        self._pointer_slots = {}             # contact id -> 该指的 per-pointer 字段
+        self._pointer_timers = {}            # contact id -> 该指独立的停笔计时器
+        self._active_pointer = None          # 正在处理的 contact id；None 表示鼠标/主指
+        self._touch_owns_input = False       # 多指已接管：忽略 Windows 补发的合成鼠标事件
+        self._touch_sequence_since = None    # 本次触控序列开始的时刻（判断鼠标笔属于谁）
+        self._mouse_stroke_since = None      # 鼠标路径当前这一笔的起笔时刻
+        self.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, True)
         # 虚线连击链（连续共线短直线合并为虚线）
         self.dash_chain = None
         self.pen_color = QColor("#ff4757")
@@ -2006,19 +2030,98 @@ class DrawingCanvas(QMainWindow):
         # ponytail: QLine/QPen/uuid 的 == 不稳定，用序列化指纹比内容
         return page_signature(snapshot) != page_signature(self.capture_page())
 
+    # --- 按笔入栈的增量撤销条目（多指书写用） ---
+    # 整页快照无法表达「只撤掉这一笔」：A 指落笔后 B 指落笔，此刻的整页快照里
+    # 已经含有 A 的半截墨，拿它做撤销会把 A 没画完的部分一起抹掉。所以笔画改成
+    # 记录增量——「删掉 id 为 X 的那些线段」——一笔完成时入栈一条，撤销就撤最后
+    # 完成的那一笔，与哪根手指先落笔无关。其余操作（改色、变换、擦除、换页）
+    # 继续用整页快照，两种条目共存于同一个栈里，靠 _is_delta 区分。
+    DELTA_MARK = "__msd_delta__"
+
+    @staticmethod
+    def _is_delta(entry):
+        return isinstance(entry, dict) and DrawingCanvas.DELTA_MARK in entry
+
+    def _stroke_delta(self, stroke_id, segments):
+        return {self.DELTA_MARK: "stroke_add", "stroke_id": stroke_id,
+                "segments": [{"line": QLine(s["line"]), "pen": QPen(s["pen"]),
+                              "id": s["id"], "marker": s.get("marker", False)}
+                             for s in segments]}
+
+    def _revert_delta(self, entry):
+        """撤销一条增量条目。
+
+        故意不走 apply_snapshot：那会清掉当前笔画瞬态和停笔计时，
+        而此刻可能有另一根手指正画在半途，不能动它的状态。
+        """
+        kind = entry[self.DELTA_MARK]
+        if kind == "stroke_add":
+            stroke_id = entry["stroke_id"]
+            self.all_segments = [s for s in self.all_segments if s["id"] != stroke_id]
+        elif kind == "shape_swap":
+            shape_id = entry["shape_id"]
+            self.shape_items = [i for i in self.shape_items if i["id"] != shape_id]
+            self.all_segments.extend({"line": QLine(s["line"]), "pen": QPen(s["pen"]),
+                                      "id": s["id"], "marker": s.get("marker", False)}
+                                     for s in entry["segments"])
+        self._after_delta_change()
+
+    def _reapply_delta(self, entry):
+        kind = entry[self.DELTA_MARK]
+        if kind == "stroke_add":
+            self.all_segments.extend({"line": QLine(s["line"]), "pen": QPen(s["pen"]),
+                                      "id": s["id"], "marker": s.get("marker", False)}
+                                     for s in entry["segments"])
+        elif kind == "shape_swap":
+            stroke_id = entry["stroke_id"]
+            self.all_segments = [s for s in self.all_segments if s["id"] != stroke_id]
+            self.shape_items.append(self.clone_shape(entry["shape"]))
+        self._after_delta_change()
+
+    def _after_delta_change(self):
+        self.dash_chain = None       # 线段增删后虚线连击链失效
+        alive = ({s["id"] for s in self.all_segments} | {t["id"] for t in self.text_items}
+                 | {s["id"] for s in self.shape_items} | {i["id"] for i in self.image_items})
+        self.selected_ids &= alive
+        self.mark_content_changed()
+        if self.whiteboard_mode:
+            self.save_current_page()
+        if self.panel:
+            self.panel.sync_selection_controls()
+            self.panel.position_selection_panel(self.selection_bounds())
+            self.panel.update_history_ui()
+        self.update()
+
+    def commit_stroke_delta(self, stroke_id, segments):
+        """一笔画完时入栈。segments 为空（点一下没动）则不占撤销步骤。"""
+        if not segments:
+            return False
+        self.commit_undo(self._stroke_delta(stroke_id, segments))
+        return True
+
     def undo(self):
         if not self.undo_stack:
             return False
-        self.redo_stack.append(self.capture_page())
-        self.apply_snapshot(self.undo_stack.pop())
+        entry = self.undo_stack.pop()
+        if self._is_delta(entry):
+            self.redo_stack.append(entry)      # 增量条目可反向重放，无需整页快照
+            self._revert_delta(entry)
+        else:
+            self.redo_stack.append(self.capture_page())
+            self.apply_snapshot(entry)
         track_event("undo", depth=len(self.undo_stack))
         return True
 
     def redo(self):
         if not self.redo_stack:
             return False
-        self.undo_stack.append(self.capture_page())
-        self.apply_snapshot(self.redo_stack.pop())
+        entry = self.redo_stack.pop()
+        if self._is_delta(entry):
+            self.undo_stack.append(entry)
+            self._reapply_delta(entry)
+        else:
+            self.undo_stack.append(self.capture_page())
+            self.apply_snapshot(entry)
         track_event("redo", depth=len(self.redo_stack))
         return True
 
@@ -2285,12 +2388,93 @@ class DrawingCanvas(QMainWindow):
     SMART_HOLD_TICK_MS = 33         # 进度环刷新节拍
     HOLD_RING_RADIUS = 18.0
 
+    # --- 多指书写：per-pointer 上下文换入换出 ---
+    # 这 11 个字段描述「某一根手指正在画的那一笔」，必须每指一份。
+    # 其余状态（all_segments / shape_items / draw_state / pen_color …）是全页共享的，
+    # 绝不能进这张表——把 all_segments 当成 per-pointer 会让后落笔的手指覆盖先落笔的墨。
+    _POINTER_FIELDS = {
+        "last_point": None,
+        "current_stroke_id": None,
+        "current_stroke_points": list,
+        "current_stroke_widths": list,
+        "current_pressure": 1.0,
+        "pending_smart": None,
+        "_hold_anchor": None,
+        "_hold_since": 0.0,
+        "_hold_active": False,
+        "_hold_progress": 0.0,
+        # 这一笔是否走「按笔入栈」的增量撤销。_begin_stroke 置 True；
+        # 直接摆状态的旧式调用（测试里有）保持 False，走原来的整页快照分支。
+        "_stroke_uses_delta": False,
+    }
+
+    def _new_pointer_slot(self):
+        return {name: (default() if callable(default) else default)
+                for name, default in self._POINTER_FIELDS.items()}
+
+    @contextlib.contextmanager
+    def _pointer_scope(self, key):
+        """把 key 这根手指的笔画上下文换进实例字段，退出时换回去。
+
+        key 为 None 表示鼠标/主指——它本来就住在这些字段里，直接放行，
+        单指路径因此与多指改造前完全一致（零额外开销、零行为差异）。
+        """
+        if key is None:
+            previous, self._active_pointer = self._active_pointer, None
+            try:
+                yield
+            finally:
+                self._active_pointer = previous
+        else:
+            slot = self._pointer_slots.setdefault(key, self._new_pointer_slot())
+            saved = {name: getattr(self, name) for name in self._POINTER_FIELDS}
+            for name in self._POINTER_FIELDS:
+                setattr(self, name, slot[name])
+            previous, self._active_pointer = self._active_pointer, key
+            try:
+                yield
+            finally:
+                # 先把这根手指的最新状态收回它自己那一格，再恢复主指字段。
+                # 顺序反了会把主指的值写进手指的格子里。
+                live = self._pointer_slots.get(key)
+                if live is not None:
+                    for name in self._POINTER_FIELDS:
+                        live[name] = getattr(self, name)
+                for name, value in saved.items():
+                    setattr(self, name, value)
+                self._active_pointer = previous
+
     def _hold_timer(self):
-        if self._smart_recognize_timer is None:
-            self._smart_recognize_timer = QTimer(self)
-            self._smart_recognize_timer.setInterval(self.SMART_HOLD_TICK_MS)
-            self._smart_recognize_timer.timeout.connect(self._tick_smart_hold)
-        return self._smart_recognize_timer
+        """当前手指专属的停笔计时器。
+
+        每指一个独立计时器是「决策二」的实现要点：A 指停笔定形不能打断
+        B 指的停笔判定，共用一个计时器做不到这件事。
+        """
+        key = self._active_pointer
+        if key is None:
+            if self._smart_recognize_timer is None:
+                self._smart_recognize_timer = QTimer(self)
+                self._smart_recognize_timer.setInterval(self.SMART_HOLD_TICK_MS)
+                self._smart_recognize_timer.timeout.connect(self._tick_smart_hold)
+            return self._smart_recognize_timer
+        timer = self._pointer_timers.get(key)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setInterval(self.SMART_HOLD_TICK_MS)
+            # 计时器回调必须回到这根手指的上下文里，否则会去检查主指的笔画状态
+            timer.timeout.connect(lambda k=key: self._tick_pointer_hold(k))
+            self._pointer_timers[key] = timer
+        return timer
+
+    def _tick_pointer_hold(self, key):
+        if key not in self._pointer_slots:
+            timer = self._pointer_timers.pop(key, None)
+            if timer is not None:
+                timer.stop()
+                timer.deleteLater()
+            return
+        with self._pointer_scope(key):
+            self._tick_smart_hold()
 
     def _start_smart_hold(self, pos):
         """（重新）开始停笔计时：落笔时、以及每次笔尖真的移动之后。"""
@@ -2318,9 +2502,16 @@ class DrawingCanvas(QMainWindow):
             self._start_smart_hold(pos)
 
     def _cancel_smart_recognition(self, *, drop_pending=True):
-        """停掉停笔计时并抹掉进度环（抬笔 / 切工具 / 翻页 / 撤销清屏都会调用）。"""
-        if self._smart_recognize_timer is not None and self._smart_recognize_timer.isActive():
-            self._smart_recognize_timer.stop()
+        """停掉停笔计时并抹掉进度环（抬笔 / 切工具 / 翻页 / 撤销清屏都会调用）。
+
+        在某根手指的上下文里调用只影响那根手指；在上下文之外调用（切工具、
+        翻页、撤销）则连所有手指的停笔计时一并收掉——否则切成橡皮之后，
+        还按在屏上的手指会在 650ms 后把笔迹定形成图形。
+        """
+        timer = self._pointer_timers.get(self._active_pointer) if self._active_pointer is not None \
+            else self._smart_recognize_timer
+        if timer is not None and timer.isActive():
+            timer.stop()
         self._hold_active = False
         self._hold_anchor = None
         if self._hold_progress:
@@ -2328,6 +2519,17 @@ class DrawingCanvas(QMainWindow):
             self.update()
         if drop_pending:
             self.pending_smart = None
+        if self._active_pointer is None:
+            for key in list(self._pointer_slots):
+                slot = self._pointer_slots[key]
+                pointer_timer = self._pointer_timers.get(key)
+                if pointer_timer is not None and pointer_timer.isActive():
+                    pointer_timer.stop()
+                slot["_hold_active"] = False
+                slot["_hold_anchor"] = None
+                slot["_hold_progress"] = 0.0
+                if drop_pending:
+                    slot["pending_smart"] = None
 
     def _tick_smart_hold(self):
         if (not self._hold_active or self._hold_anchor is None or self.current_stroke_id is None
@@ -2372,21 +2574,47 @@ class DrawingCanvas(QMainWindow):
         self.update()
 
     def _begin_stroke(self, pos, snapshot=False):
-        """开始新的一笔。snapshot=True 用于「没抬笔就接着画」的续笔，补一份撤销快照。"""
+        """开始新的一笔。
+
+        撤销改成按笔入栈之后不再需要 snapshot 参数（续笔自己就是独立的一条
+        增量条目），保留形参只为兼容既有调用点。
+        """
         self.last_point = pos
         self.current_stroke_id = uuid.uuid4()
         self.current_stroke_widths = []
         self.current_stroke_points = [QPointF(pos)]
-        if snapshot and self.pending_undo is None:
-            self.pending_undo = self.capture_page()
+        self._stroke_uses_delta = True
+        if self._active_pointer is None:
+            self._mouse_stroke_since = time.perf_counter()
 
-    def draw_hold_ring(self, painter):
+    def _finish_pointer_stroke(self):
+        """一笔结束（抬笔/抬指）时按完成时间入栈。
+
+        返回 True 表示这一笔已由增量条目接管，调用方不必再提交 pending_undo。
+        """
+        if not self._stroke_uses_delta:
+            return False
+        stroke_id = self.current_stroke_id
+        self._stroke_uses_delta = False
+        self.pending_undo = None       # 落笔前的整页快照作废，改由增量条目描述这一笔
+        if stroke_id is None:
+            return True                # 已被停笔定形收束，撤销条目在那时就入栈了
+        self.commit_stroke_delta(stroke_id, [s for s in self.all_segments if s["id"] == stroke_id])
+        # 这一笔到此结束。留着旧 id 会让「接管时丢弃合成鼠标笔」误判到已画完的笔迹上。
+        self.current_stroke_id = None
+        self._mouse_stroke_since = None
+        return True
+
+    def draw_hold_ring(self, painter, center=None, progress=None):
         """笔尖停留进度环：转满一圈这一笔就定形。
 
         没有这个反馈的话，「停笔变形」在触控大屏上就是一次无法预判的突变；
         有了它，用户能看着它决定「继续停住定形」还是「动一下保留手绘」。
         """
-        center = self._hold_anchor
+        if center is None:
+            center = self._hold_anchor
+        if progress is None:
+            progress = self._hold_progress
         if center is None:
             return
         radius = self.HOLD_RING_RADIUS
@@ -2398,8 +2626,20 @@ class DrawingCanvas(QMainWindow):
         arc_pen = QPen(QColor(self.pen_color), 3.0)
         arc_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         painter.setPen(arc_pen)
-        painter.drawArc(box, 90 * 16, int(-360 * 16 * max(0.0, min(1.0, self._hold_progress))))
+        painter.drawArc(box, 90 * 16, int(-360 * 16 * max(0.0, min(1.0, progress))))
         painter.restore()
+
+    def draw_hold_rings(self, painter):
+        """主指 + 每根手指各画一个进度环：谁停住了谁的笔尖亮圈。"""
+        if self._hold_progress > 0.0:
+            self.draw_hold_ring(painter)
+        for slot in self._pointer_slots.values():
+            if slot["_hold_progress"] > 0.0:
+                self.draw_hold_ring(painter, slot["_hold_anchor"], slot["_hold_progress"])
+
+    def any_hold_in_progress(self):
+        return self._hold_progress > 0.0 or any(
+            slot["_hold_progress"] > 0.0 for slot in self._pointer_slots.values())
 
     def finish_smart_stroke(self, stroke_id=None, points=None):
         """按给定笔迹识别并替换为标准图形（否则原样保留）。
@@ -2431,12 +2671,24 @@ class DrawingCanvas(QMainWindow):
             track_event("smart_build_failed", shape_type=spec.get("type"), error=str(exc))
             self.dash_chain = None
             return
-        if self.pending_undo is not None:
-            # 能走到这里说明这一笔已经落进 all_segments，必然不同于落笔前快照；
-            # 再做 page_signature 双序列化只会在笔仍按着时冻结主线程。
-            self.commit_undo(self.pending_undo)            # 第二步：落笔之前
+        raw_segments = [s for s in self.all_segments if s["id"] == stroke_id]
+        if self._stroke_uses_delta:
+            # 按笔入栈：先记「加了这一笔手绘」，再记「把它换成了图形」。
+            # 两条都只描述本指这一笔，另一根手指画到半途也不受影响。
             self.pending_undo = None
-        self.commit_undo(self.capture_page())            # 第一步：带原笔迹
+            self.commit_stroke_delta(stroke_id, raw_segments)       # 第二步：回到落笔之前
+            self.commit_undo({self.DELTA_MARK: "shape_swap", "stroke_id": stroke_id,
+                              "segments": [{"line": QLine(s["line"]), "pen": QPen(s["pen"]),
+                                            "id": s["id"], "marker": s.get("marker", False)}
+                                           for s in raw_segments],
+                              "shape_id": item["id"], "shape": self.clone_shape(item)})
+        else:
+            if self.pending_undo is not None:
+                # 能走到这里说明这一笔已经落进 all_segments，必然不同于落笔前快照；
+                # 再做 page_signature 双序列化只会在笔仍按着时冻结主线程。
+                self.commit_undo(self.pending_undo)            # 第二步：落笔之前
+                self.pending_undo = None
+            self.commit_undo(self.capture_page())            # 第一步：带原笔迹
         self.all_segments = [s for s in self.all_segments if s["id"] != stroke_id]
         self.add_shape_item(item, select=False)
         if spec["type"] == "LINE":
@@ -3995,8 +4247,8 @@ class DrawingCanvas(QMainWindow):
                 painter.setPen(QPen(QColor(255, 255, 255, 160), 1))
                 painter.setBrush(preview_color)
                 painter.drawEllipse(self.mouse_pos, r, r)
-            if self._hold_progress > 0.0:
-                self.draw_hold_ring(painter)
+            if self.any_hold_in_progress():
+                self.draw_hold_rings(painter)
             if self.draw_state == "LASER":
                 self.draw_laser(painter)
             if self.draw_state == "MAGNIFIER":
@@ -4008,6 +4260,8 @@ class DrawingCanvas(QMainWindow):
 
     def mousePressEvent(self, event):
         if not self.is_drawing_mode: return
+        if self._touch_synthesized(event):
+            return          # 多指已接管，这是 Windows 为主接触点补发的鼠标消息
         pos = event.position().toPoint()
         if event.button() == Qt.MouseButton.RightButton:
             if self.draw_state == "SHAPE":
@@ -4132,6 +4386,8 @@ class DrawingCanvas(QMainWindow):
             self.execute_erase(pos)
 
     def mouseMoveEvent(self, event):
+        if self._touch_synthesized(event):
+            return
         pos = event.position().toPoint()
         self.mouse_pos = pos
         self.aid_hover_pos = QPointF(pos)
@@ -4263,6 +4519,8 @@ class DrawingCanvas(QMainWindow):
         self.last_erase_point = pos
 
     def mouseReleaseEvent(self, event):
+        if self._touch_synthesized(event):
+            return
         # 与 mousePressEvent 对称：右键/中键释放不能结束仍按着的左键笔画、清掉停笔计时。
         if event.button() != Qt.MouseButton.LeftButton:
             return
@@ -4300,11 +4558,12 @@ class DrawingCanvas(QMainWindow):
         # 抬笔＝明确表示「就要这条手绘」，此处不做任何识别，只把停笔计时收掉。
         # 想要标准图形的话，画完最后一点后把笔停在原地别抬即可（见 _tick_smart_hold）。
         self._cancel_smart_recognition(drop_pending=True)
+        # 笔画按「完成时间」入栈；其余操作（擦除/选择变换/图形/文字）仍走整页快照
+        handled = self._finish_pointer_stroke()
         self.current_stroke_points = []
-        if self.pending_undo is not None:
-            if self.snapshot_differs(self.pending_undo):
-                self.commit_undo(self.pending_undo)
-            self.pending_undo = None
+        if not handled and self.pending_undo is not None and self.snapshot_differs(self.pending_undo):
+            self.commit_undo(self.pending_undo)
+        self.pending_undo = None
         if self.panel:
             self.panel.position_selection_panel(self.selection_bounds())
         self.drag_start = None
@@ -4318,6 +4577,235 @@ class DrawingCanvas(QMainWindow):
         if self.whiteboard_mode and self.draw_state in {"PEN", "MARKER", "ERASER", "SELECT", "TEXT"}:
             self.save_current_page()
         if self.panel: self.panel.heartbeat_refresh()
+
+    # --- 多指书写 ---
+    # 只有批注笔/荧光笔接管多指：两根手指同时写字是真实的课堂场景。
+    # 选择框、图形拖拽、文字、橡皮在「两个接触点同时操作」下没有明确语义，
+    # 交回 Qt 由主接触点合成鼠标事件即可（第一根手指说话，其余忽略），
+    # 这也保证这些工具的行为与改造前完全一致。
+    TOUCH_TOOLS = ("PEN", "MARKER")
+    # 合成鼠标事件可能比 TouchBegin 早到多少（秒）。取 0.4s：足以覆盖两者的投递抖动，
+    # 又远小于「用户上一笔用真鼠标画的」时间尺度。
+    TOUCH_MOUSE_LEAD_S = 0.4
+    # 合成鼠标笔的落点与接触点的最大允许偏差（像素）。它跟着主接触点走，本该重合；
+    # 留一点余量给取整和帧间位移。
+    TOUCH_MOUSE_MATCH_PX = 48.0
+
+    def event(self, ev):
+        kind = ev.type()
+        if kind in (QEvent.Type.TouchBegin, QEvent.Type.TouchUpdate, QEvent.Type.TouchEnd):
+            if self._handle_touch(ev):
+                ev.accept()
+                return True
+            return False        # 不接受 → Qt 用主接触点合成鼠标事件，单指路径照旧
+        if kind == QEvent.Type.TouchCancel:
+            if self._pointer_slots:
+                self._cancel_all_pointers()
+                ev.accept()
+                return True
+            return False
+        return super().event(ev)
+
+    def _handle_touch(self, ev):
+        handled = self._dispatch_touch(ev)
+        if not handled:
+            # 交回鼠标合成：本次触控序列由主接触点以鼠标事件驱动，
+            # 必须放开 mouse 事件，否则单指书写会整个失灵。
+            self._touch_owns_input = False
+        return handled
+
+    def _dispatch_touch(self, ev):
+        if not self.is_drawing_mode or self.draw_state not in self.TOUCH_TOOLS:
+            return False
+        if not self.smart_multitouch_enabled:
+            return False
+        points = ev.points()
+        if not points:
+            return False
+        # 记下这次触控序列的起点。第二根手指落下时要靠它判断「鼠标路径上那一笔
+        # 是不是本次触控的第一根手指画的」——是才丢，不能误伤之前用真鼠标画的。
+        if ev.type() == QEvent.Type.TouchBegin and not self._pointer_slots:
+            self._touch_sequence_since = time.perf_counter()
+        # 单指且没有其他手指在写：交给鼠标合成，走与 v5.1 完全相同的代码路径。
+        # 多指改造只在真的有第二根手指时才接管，单指书写的行为一字不变。
+        if len(points) < 2 and not self._pointer_slots:
+            return False
+        touched = False
+        for point in points:
+            key = point.id()
+            state = point.state()
+            pos = point.position().toPoint()
+            if state == QEventPoint.State.Pressed:
+                self._pointer_press(key, pos, point.pressure())
+                touched = True
+            elif state == QEventPoint.State.Updated:
+                self._pointer_move(key, pos, point.pressure())
+                touched = True
+            elif state == QEventPoint.State.Released:
+                self._pointer_release(key, pos)
+                touched = True
+            # Stationary：手指没动，不落墨也不重置停笔计时（停住才能定形）
+        if touched:
+            # Windows 对主接触点会在 WM_POINTER 之外【另发】一套传统鼠标消息
+            # （Qt 里表现为 pointingDevice().type() == TouchScreen 的 QMouseEvent）。
+            # 不挡掉的话第一根手指会被画两次——一次走触控、一次走鼠标，凭空多出一笔。
+            if not self._touch_owns_input:
+                self._discard_mouse_path_stroke(points)
+            self._touch_owns_input = True
+            self.update()
+            if self.panel:
+                self.panel.heartbeat_refresh()
+        return touched
+
+    def _discard_mouse_path_stroke(self, points=()):
+        """多指接管的那一刻，丢掉主接触点在鼠标路径上刚起的那一笔。
+
+        第二根手指落下之前，第一根手指是靠 Windows 补发的合成鼠标事件在画的。
+        接管之后它的鼠标 release 会被挡掉，这一笔就永远提交不了——既留在屏幕上
+        又不占撤销步骤。触控路径会把同一根手指的轨迹完整重画一遍，所以这里直接
+        把它丢掉（最多损失接管前那一两帧的几个像素）。
+        """
+        stroke_id = self.current_stroke_id
+        if stroke_id is None or not self._mouse_stroke_belongs_to_touch(points):
+            return          # 这一笔是真鼠标画的，与本次触控无关，不能动
+        self.all_segments = [s for s in self.all_segments if s["id"] != stroke_id]
+        # 合成的鼠标 release 有时【先于】双指帧到达，这一笔已经入栈了。
+        # 只删墨不撤条目会留下一个撤不掉任何东西的空步骤。
+        if self.undo_stack and self._is_delta(self.undo_stack[-1]) \
+                and self.undo_stack[-1].get("stroke_id") == stroke_id:
+            self.undo_stack.pop()
+            if self.panel:
+                self.panel.update_history_ui()
+        # 只收掉鼠标路径自己的停笔计时。不能走 _cancel_smart_recognition：在
+        # pointer scope 之外它会连所有手指的计时器一起停掉，而那些手指刚刚落笔。
+        if self._smart_recognize_timer is not None and self._smart_recognize_timer.isActive():
+            self._smart_recognize_timer.stop()
+        self._hold_active = False
+        self._hold_anchor = None
+        self._hold_progress = 0.0
+        self.pending_smart = None
+        self.current_stroke_id = None
+        self.current_stroke_points = []
+        self.current_stroke_widths = []
+        self.last_point = None
+        self.last_erase_point = None
+        self._stroke_uses_delta = False
+        self.pending_undo = None
+        self._mouse_stroke_since = None
+
+    def _mouse_stroke_belongs_to_touch(self, points=()):
+        """鼠标路径上那一笔是不是本次触控序列的第一根手指画出来的？
+
+        两个证据都要满足，缺一不可：
+
+        1. 时间：合成鼠标事件与触控帧只隔几毫秒。先后并不固定（Windows 有时先发
+           鼠标消息，Qt 才投递触控帧），所以留一个 TOUCH_MOUSE_LEAD_S 的前置窗口。
+        2. 位置：合成事件跟着主接触点走，所以这一笔的落点必然【压在某个接触点上】。
+           用户之前用真鼠标画的笔画不会正好停在手指落下的地方。
+
+        只看时间不够——用户完全可能刚用鼠标画完一笔就立刻上手去触屏。判不出来时
+        一律当作「不是」：宁可留一笔多余的墨（看得见、能撤销），也不能凭空吞掉
+        他画好的东西。
+        """
+        started = self._mouse_stroke_since
+        sequence = self._touch_sequence_since
+        if started is None or sequence is None:
+            return False
+        if started < sequence - self.TOUCH_MOUSE_LEAD_S:
+            return False
+        anchor = self.last_point
+        if anchor is None:
+            anchor = self.current_stroke_points[-1] if self.current_stroke_points else None
+        if anchor is None:
+            return False
+        ax, ay = float(anchor.x()), float(anchor.y())
+        for point in points:
+            pos = point.position()
+            if math.hypot(pos.x() - ax, pos.y() - ay) <= self.TOUCH_MOUSE_MATCH_PX:
+                return True
+        return False
+
+    def _touch_synthesized(self, event):
+        """这个鼠标事件是不是 Windows 为触控主接触点补发的？
+
+        只在多指已经接管时才拦：单指书写正是靠这套合成的鼠标事件驱动的，
+        无条件丢弃会让单指彻底画不出来。
+        """
+        if not self._touch_owns_input:
+            return False
+        try:
+            device = event.pointingDevice()
+        except Exception:
+            return False
+        if device is None:
+            return False
+        if device.type() != QInputDevice.DeviceType.TouchScreen:
+            self._touch_owns_input = False      # 真鼠标回来了，交还控制权
+            return False
+        return True
+
+    def _pointer_press(self, key, pos, pressure):
+        with self._pointer_scope(key):
+            self.current_pressure = max(0.05, float(pressure) or 1.0)
+            self._cancel_smart_recognition(drop_pending=True)
+            self._begin_stroke(pos)
+            self._start_smart_hold(pos)
+        self.mouse_pos = pos
+        if self.draw_state == "MARKER":
+            track_event("marker_stroke_start", color=self.marker_color.name(),
+                        width=self.marker_width, alpha=self.marker_alpha, touch=True)
+        else:
+            track_event("stroke_start", color=self.pen_color.name(), width=self.pen_width, touch=True)
+
+    def _pointer_move(self, key, pos, pressure):
+        if key not in self._pointer_slots:
+            # 没收到 Pressed 就来了 Updated（抢到事件流中段）：就地补一次落笔
+            self._pointer_press(key, pos, pressure)
+            return
+        with self._pointer_scope(key):
+            self.current_pressure = max(0.05, float(pressure) or 1.0)
+            if self.last_point is None:
+                # 上一笔刚被停笔定形而手指没抬：就地另起一笔，书写不中断
+                self._begin_stroke(pos)
+                self._start_smart_hold(pos)
+            else:
+                self.current_stroke_points.append(QPointF(pos))
+                self.add_smooth_segments(pos)
+                self._track_smart_hold(pos)
+        self.mouse_pos = pos
+
+    def _pointer_release(self, key, pos):
+        if key not in self._pointer_slots:
+            return
+        with self._pointer_scope(key):
+            if self.last_point is not None and pos != self.last_point:
+                self.current_stroke_points.append(QPointF(pos))
+                self.add_smooth_segments(pos)
+            self._cancel_smart_recognition(drop_pending=True)
+            self._finish_pointer_stroke()
+        self._drop_pointer(key)
+        if self.whiteboard_mode:
+            self.save_current_page()
+
+    def _drop_pointer(self, key):
+        timer = self._pointer_timers.pop(key, None)
+        if timer is not None:
+            timer.stop()
+            timer.deleteLater()
+        self._pointer_slots.pop(key, None)
+
+    def _cancel_all_pointers(self):
+        """TouchCancel（系统手势抢走了触控序列）：把每根手指已落的墨按笔收尾。
+
+        不回滚已经画上去的笔迹——用户看得见它，静默抹掉比留下更让人困惑；
+        入栈之后一次撤销就能去掉。
+        """
+        for key in list(self._pointer_slots):
+            with self._pointer_scope(key):
+                self._cancel_smart_recognition(drop_pending=True)
+                self._finish_pointer_stroke()
+            self._drop_pointer(key)
+        self.update()
 
     def wheelEvent(self, event):
         if self.is_drawing_mode and self.draw_state == "MAGNIFIER":
