@@ -11,7 +11,7 @@ MyScreenDraw is a fullscreen annotation / whiteboard / math-teaching tool built 
 - **Random name picker, timer, presentation spotlight, calculator** — a whole lesson without switching apps
 - **Fully offline**: no network, no uploads, no account — suitable for classrooms and restricted environments
 
-Current version **v5.1.1**. The UI follows the system language in 8 languages: English, 中文, Français, Español, Deutsch, Русский, 한국어, 日本語.
+Current version **v5.2.0**. The UI follows the system language in 8 languages: English, 中文, Français, Español, Deutsch, Русский, 한국어, 日本語.
 
 > Product screenshots are not included in the public release yet; the current local captures contain development-environment details and must not be committed to GitHub.
 
@@ -90,7 +90,7 @@ A: The drawing canvas stays on the primary screen; the toolbar can travel across
 A: EPS is vector PostScript using standard fonts; viewers without a CJK font may miss non-Latin glyphs. Use SVG when you need vector output with CJK text.
 
 **Q: Can two people draw at once?**
-A: Currently single-touch only; simultaneous multi-pointer drawing is not yet supported.
+A: Yes, since v5.2.0. The pen and highlighter accept several contacts at once — each finger draws its own stroke and dwells on its own clock, and undo removes the last stroke to *finish*. Both fingers share the current tool and colour (no pen-in-one-hand, eraser-in-the-other); select, shapes, text and eraser remain single-point.
 
 ## Privacy & data safety
 
