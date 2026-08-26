@@ -73,9 +73,19 @@ class DragToSizeTests(TextBoxCase):
         self.assertAlmostEqual(item["pos"].x(), 150.0)
         self.assertAlmostEqual(item["pos"].y(), 220.0)
 
-    def test_a_tiny_drag_still_yields_a_usable_box(self):
-        """触屏上很难拖出精确矩形；一点就没反应会被当成工具坏了。"""
-        item = self.make_box(w=2.0, h=1.0)
+    def test_a_tap_sized_drag_creates_nothing(self):
+        """位移小于阈值就是点击，不该建框。
+
+        5.3.0 把这种情况当成「拖得太小」并按最小尺寸给一个框，结果在画布上点一下
+        就冒出一个空框。用户要的是拖拽定框，点击不该有任何东西出现。
+        """
+        self.assertIsNone(self.make_box(w=2.0, h=1.0))
+        self.assertEqual(self.canvas.text_items, [])
+
+    def test_a_drag_over_the_threshold_still_gets_a_minimum_size(self):
+        """确实拖动了、但拖得很小：给最小尺寸的框，别给一个装不下字的框。"""
+        span = self.canvas.TEXT_DRAG_MIN_PX + 2
+        item = self.make_box(w=span, h=span)
         self.assertIsNotNone(item)
         self.assertGreaterEqual(item["box"][0], self.canvas.TEXT_MIN_W)
         self.assertGreaterEqual(item["box"][1], self.canvas.TEXT_MIN_H)

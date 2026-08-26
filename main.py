@@ -2,6 +2,19 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # 版本号：见 version.py（唯一来源，代码里统一用 APP_VERSION）
 # 更新日志：
+# v5.3.1：修复 5.3.0 的十个报告问题
+# 1. 键盘无法输入：新增可聚焦的 _TextInputEdit（画布 NoFocus，键盘无处送字符）；
+#    并堵住三个抢焦点的来源——心跳置顶重排、选中面板顶置、面板按钮持有焦点
+# 2. 退格/换行按钮改了画布却没同步控件，下次打字会整体回写旧内容
+# 3. 面板定位改回复用 _floating_anchor：不压任务栏、被键盘遮挡时翻面、内容变化不重锚
+#    （5.3.0 自造第三套定位，一次踩了「压任务栏/被键盘挡/乱跳/层级错」四个坑）
+# 4. 点一下不再出文本框（位移 < 12px 视为点击）
+# 5. 空文本框统一在 load_page 作废编辑态，并加 discard_empty_text_items 兜底
+# 6. 切到非 TEXT 工具无条件收面板与键盘
+# 7. 白板模式与批注模式行为一致
+# 8. 新增 tests/test_text_workflow.py：只走真实入口的端到端用例。5.3.0 的 381 项
+#    测试全是直接调方法，没有一项按过鼠标或敲过键，因此漏掉了全部十个问题
+#
 # v5.3.0：文本框重做 + 结构化公式编辑器
 # 1. 修复停笔定形「光环转完却纹丝不动」：进度环出现前先判可行性，明显不可能成形
 #    （开放曲线等）立刻收手，一圈都不画，之后按住多久都保持原样静止
@@ -184,7 +197,7 @@ from i18n import tr, trf, CURRENT
 import eps_export
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QLabel, QPushButton,
                              QVBoxLayout, QHBoxLayout, QWidget, QFrame, QGridLayout, QColorDialog, QSlider,
-                             QInputDialog, QMessageBox, QMenu, QFileDialog, QLineEdit, QListWidget,
+                             QInputDialog, QMessageBox, QMenu, QFileDialog, QLineEdit, QTextEdit, QListWidget,
                              QAbstractItemView, QSizePolicy, QListWidgetItem, QDialog, QDoubleSpinBox,
                              QScroller, QToolTip)
 from PyQt6.QtCore import (Qt, QPoint, QPointF, QRectF, QTimer, QTranslator, QLibraryInfo, QLine, pyqtSignal, QLocale, QEvent,
@@ -2084,6 +2097,16 @@ class DrawingCanvas(QMainWindow):
                 (last.x2(), last.y2()) if last is not None else None)
 
     def load_page(self, page):
+        # 整页替换会让「正在编辑的那一框」失去意义（它可能属于上一页）。放在这里而不是
+        # 各个调用点：new_page / switch_page / apply_snapshot / 打开项目全都经过 load_page，
+        # 逐个去改必然漏掉一个，漏掉的那条路径就会留下一个指向已消失对象的编辑虚线框。
+        if getattr(self, "editing_text_id", None) is not None:
+            self.editing_text_id = None
+            self.editing_slot = None
+            self.text_drag_start = None
+            self.text_drag_rect = None
+            if self.panel:
+                self.panel.close_text_input()
         self.all_segments = [{"line": QLine(seg["line"]), "pen": QPen(seg["pen"]), "id": seg["id"], "marker": seg.get("marker", False)} for seg in page.get("segments", [])]
         self.text_items = [
             self.clone_text_item(item)
@@ -2135,7 +2158,7 @@ class DrawingCanvas(QMainWindow):
         self.current_stroke_points = []
         self.current_stroke_widths = []
         self.last_point = None
-        self.load_page(snapshot)
+        self.load_page(snapshot)        # 编辑态由 load_page 统一作废
         if self.whiteboard_mode:
             self.save_current_page()
         self.last_undo_key = None
@@ -2348,15 +2371,20 @@ class DrawingCanvas(QMainWindow):
                 return item
         return None
 
+    TEXT_DRAG_MIN_PX = 12.0     # 小于此位移视为「点击」而不是拖拽
+
     def finish_text_box(self, rect):
         """拖拽结束：建一个空文本框并进入编辑。
 
-        太小的拖拽（其实是点击）按最小尺寸给一个框，而不是什么都不做——触屏上
-        很难拖出精确矩形，一点就没反应会让人以为工具坏了。
+        位移小于 TEXT_DRAG_MIN_PX 的按下-抬起是【点击】，不建框。5.3.0 把它当成
+        「拖得太小」并按最小尺寸给一个框，结果只要在画布上点一下就冒出一个空框——
+        用户要的是拖拽定框，点一下不该有东西出现。
         """
         if rect is None:
             return None
         rect = QRectF(rect).normalized()
+        if rect.width() < self.TEXT_DRAG_MIN_PX and rect.height() < self.TEXT_DRAG_MIN_PX:
+            return None
         width = max(self.TEXT_MIN_W, rect.width())
         height = max(self.TEXT_MIN_H, rect.height())
         item = self.create_text_item(rect.topLeft(), box=(width, height))
@@ -2395,13 +2423,38 @@ class DrawingCanvas(QMainWindow):
             return None
         return next((t for t in self.text_items if t["id"] == self.editing_text_id), None)
 
+    @staticmethod
+    def text_item_is_empty(item):
+        return not str(item.get("text", "")).strip() and not item.get("formula")
+
+    def discard_empty_text_items(self):
+        """清掉所有空文本框。
+
+        兜底用。任何绕过 end_text_edit 的路径（切模式、撤销、翻页、切工具）都可能
+        把一个空框留在画布上，而它带着编辑虚线框却没人能编辑——报告里的「虚空出现
+        无法编辑的文本框」就是这么来的。
+        """
+        empty = [t["id"] for t in self.text_items if self.text_item_is_empty(t)]
+        if not empty:
+            return False
+        keep = set(empty)
+        self.text_items = [t for t in self.text_items if t["id"] not in keep]
+        for item_id in empty:
+            self.selected_ids.discard(item_id)
+        if self.editing_text_id in keep:
+            self.editing_text_id = None
+            self.editing_slot = None
+        self.mark_content_changed()
+        return True
+
     def end_text_edit(self, *, discard_empty=True):
         """离开编辑态。空框默认删掉，避免画布上留一堆看不见的空盒子。"""
         item = self.editing_text_item()
         self.editing_text_id = None
         self.editing_slot = None
-        if item is not None and discard_empty and not str(item.get("text", "")).strip() \
-                and not item.get("formula"):
+        self.text_drag_start = None
+        self.text_drag_rect = None
+        if item is not None and discard_empty and self.text_item_is_empty(item):
             self.text_items = [t for t in self.text_items if t["id"] != item["id"]]
             self.selected_ids.discard(item["id"])
             self.mark_content_changed()
@@ -5520,6 +5573,96 @@ class DrawingCanvas(QMainWindow):
         return self.draw_state == "SELECT" and self.drag_action in {"move", "scale", "rotate"}
 
 # --- 2. 悬浮面板类 ---
+class _TextInputEdit(QTextEdit):
+    """文字/公式面板里真正接收按键的控件。
+
+    存在的唯一理由：系统触摸键盘（TabTip）把 WM_CHAR 发给【有焦点的窗口】，而画布
+    是 WindowDoesNotAcceptFocus——点它要能绘图，不能抢激活。所以键盘的字符永远到不了
+    画布，必须有一个可获得焦点的控件替它收，再同步进画布对象。
+
+    两种模式行为不同：
+    * 纯文本：本控件就是真编辑器，保留 Qt 的输入法（中文/日文/韩文的候选窗需要一个
+      真正可编辑的字段才能工作），内容变化后整体同步给画布对象。
+    * 公式：内容留空，截获按键转成 canvas.text_insert / text_backspace，因为字符要
+      落进当前那个格子，而不是一条平铺的字符串。
+    """
+
+    def __init__(self, panel):
+        super().__init__()
+        self._panel = panel
+        self._syncing = False
+        self.setAcceptRichText(False)
+        self.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        self.textChanged.connect(self._on_text_changed)
+
+    def _canvas(self):
+        return getattr(self._panel, "canvas", None)
+
+    def _formula_mode(self):
+        canvas = self._canvas()
+        if canvas is None:
+            return False
+        item = canvas.editing_text_item()
+        return bool(item is not None and item.get("formula"))
+
+    def load_from(self, item):
+        """把画布对象的内容灌进来，不触发回写。"""
+        self._syncing = True
+        try:
+            self.setPlainText("" if item.get("formula") else str(item.get("text", "")))
+            cursor = self.textCursor()
+            cursor.movePosition(cursor.MoveOperation.End)
+            self.setTextCursor(cursor)
+        finally:
+            self._syncing = False
+
+    def _on_text_changed(self):
+        if self._syncing or self._formula_mode():
+            return
+        canvas = self._canvas()
+        if canvas is None:
+            return
+        item = canvas.editing_text_item()
+        if item is None:
+            return
+        item["text"] = self.toPlainText()
+        canvas._after_text_change(item)
+
+    def keyPressEvent(self, event):
+        canvas = self._canvas()
+        if canvas is not None and self._formula_mode():
+            key = event.key()
+            if key in (Qt.Key.Key_Backspace, Qt.Key.Key_Delete):
+                canvas.text_backspace()
+                event.accept()
+                return
+            if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                event.accept()      # 公式里换行没有意义
+                return
+            text = event.text()
+            if text and text.isprintable():
+                canvas.text_insert(text)
+                event.accept()
+                return
+        if event.key() == Qt.Key.Key_Escape:
+            if canvas is not None:
+                canvas.end_text_edit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def inputMethodEvent(self, event):
+        """输入法提交：公式模式下要把已提交的串转进当前格子。"""
+        canvas = self._canvas()
+        if canvas is not None and self._formula_mode():
+            committed = event.commitString()
+            if committed:
+                canvas.text_insert(committed)
+            event.accept()
+            return
+        super().inputMethodEvent(event)
+
+
 class ControlPanel(QWidget):
     exit_requested = pyqtSignal()
 
@@ -6687,9 +6830,12 @@ class ControlPanel(QWidget):
             return
         self.canvas._cancel_smart_recognition(drop_pending=True)  # 切工具：取消上一笔的延迟识别
         if self.canvas.editing_text_id is not None:
-            # 切走工具就收束文字编辑，并收掉输入面板和系统键盘——否则键盘会留在
-            # 屏幕上挡住板书，而画布已经不接受文字输入了。
             self.canvas.end_text_edit()
+        if state != "TEXT":
+            # 无条件收：原先这一步藏在 editing_text_id 判断里，编辑态已经结束但键盘
+            # 还开着时就收不掉，键盘留在屏上挡住板书而画布已不接受文字输入。
+            self.close_text_input()
+            self.canvas.discard_empty_text_items()
         prev = self.canvas.draw_state
         # 离开任意工具时的统一善后：不再有「橡皮特殊分支提前 return」跳过这些清理，
         # 这样从橡皮切到任意绘图工具时，旧工具残留状态（放大镜冻结帧 / 聚光灯叠加 /
@@ -7160,6 +7306,13 @@ class ControlPanel(QWidget):
             self.raise_floating(self.select_panel)
         else:
             force_topmost(self.select_panel.winId())
+        # 文字/公式面板必须压在选中面板【之上】：它是当前的操作焦点，而选中面板
+        # （复制/删除那一条）是辅助。顺序反了不只是观感问题——把选中面板顶上来会
+        # 顺带抢走激活，文字输入控件的键盘焦点随之丢失，键盘就再也打不出字。
+        if getattr(self, "text_panel", None) is not None and self.text_panel.isVisible():
+            force_topmost(self.text_panel.winId())
+            force_above(int(self.text_panel.winId()), int(self.select_panel.winId()))
+            self._refocus_input()
 
     def open_selection_color(self):
         self.timer.stop()
@@ -7502,6 +7655,12 @@ class ControlPanel(QWidget):
 
     def heartbeat_refresh(self):
         self.bind_topmost_stack()
+        # 置顶重排会把主面板重新激活，从而抢走文字输入控件的键盘焦点。心跳每 500ms
+        # 跑一次，所以文字面板打开后不到半秒键盘就失效了——报告里的「键盘根本无法
+        # 输入任何内容」正是这么来的。只要文字面板还开着，就把焦点还回去。
+        if getattr(self, "text_panel", None) is not None and self.text_panel.isVisible():
+            if getattr(self, "text_input", None) is not None and not self.text_input.hasFocus():
+                self._refocus_input()
 
     def raise_floating(self, widget, bind_owner=True):
         """把刚显示出来的浮窗重新钉到全屏画布之上。
@@ -8554,17 +8713,19 @@ class ControlPanel(QWidget):
         if getattr(self, "text_panel", None) is None:
             self._build_text_panel()
         self._text_panel_sync()
+        self.text_input.load_from(item)
         self.text_panel.adjustSize()
-        self._position_text_panel()
+        self._position_text_panel(force=True)
         self.text_panel.show()
         self.raise_floating(self.text_panel)
         if touch_keyboard.available():
             touch_keyboard.show()
-            # 键盘弹出有延迟，稍后按它的实际位置再让一次位
-            QTimer.singleShot(700, self._position_text_panel)
         elif hasattr(self, "text_hint_label"):
             self.text_hint_label.setText(tr("text_keyboard_missing"))
-        self.heartbeat_refresh()
+        # 先做置顶重排，最后才抓焦点：顺序反了的话重排会把刚拿到的焦点又抢走。
+        self.bind_topmost_stack()
+        if not self._refocus_input():
+            QTimer.singleShot(0, self._refocus_input)
         track_event("text_editor_opened", has_formula=bool(item.get("formula")))
 
     def close_text_input(self):
@@ -8575,9 +8736,23 @@ class ControlPanel(QWidget):
 
     def _build_text_panel(self):
         self.text_panel, layout = self._make_tool_window(tr("text_editor_title"))
+        # 这个面板必须能激活并接受焦点，否则系统触摸键盘没有地方送字符——
+        # 画布是 WindowDoesNotAcceptFocus（点它绘图不能抢激活），所以键盘的
+        # WM_CHAR 永远到不了画布。真正的输入落在下面这个 QTextEdit 上，
+        # 再由它同步进画布对象。5.3.0 漏掉这条通路，导致键盘按什么都没反应。
+        self.text_panel.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, False)
+        flags = self.text_panel.windowFlags()
+        self.text_panel.setWindowFlags(flags & ~Qt.WindowType.WindowDoesNotAcceptFocus)
+
         self.text_hint_label = QLabel("")
         self.text_hint_label.setWordWrap(True)
         layout.addWidget(self.text_hint_label)
+
+        self.text_input = _TextInputEdit(self)
+        self.text_input.setObjectName("TextInputEdit")
+        self.text_input.setMinimumHeight(TOUCH_MIN_BUTTON * 2)
+        self.text_input.setMaximumHeight(TOUCH_MIN_BUTTON * 3)
+        layout.addWidget(self.text_input)
 
         # 分组折叠条：一行按钮，点开在其上方展开该组的符号
         group_row = QHBoxLayout()
@@ -8614,32 +8789,70 @@ class ControlPanel(QWidget):
             action_row.addWidget(btn)
         layout.addLayout(action_row)
         self._open_symbol_group = None
+        self._make_panel_buttons_unfocusable()
+
+    def _make_panel_buttons_unfocusable(self):
+        """面板上除输入控件以外的一切都不接受键盘焦点。
+
+        触控面板上的按钮持有键盘焦点没有任何意义，反而是害处：show() 之后 Qt 会把焦点
+        给 tab 序里第一个可聚焦控件（标题栏的 × 按钮），系统触摸键盘于是把字符送给了
+        按钮；按一下退格/符号，焦点又落在那个按钮上，键盘再次失效。把按钮全设成
+        NoFocus，焦点就只能落在 text_input 上，这条问题从结构上消失。
+        """
+        panel = getattr(self, "text_panel", None)
+        if panel is None:
+            return
+        for child in panel.findChildren(QWidget):
+            if child is self.text_input:
+                continue
+            child.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.text_input.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
     def _text_panel_sync(self):
         if hasattr(self, "text_hint_label"):
             self.text_hint_label.setText("")
 
-    def _position_text_panel(self):
-        """把面板放在系统键盘上方；键盘没起来就贴屏幕下沿。
+    def _position_text_panel(self, force=False):
+        """把面板挂在主工具栏旁边，与其它子菜单同一套锚点逻辑。
 
-        必须避开键盘矩形：叠在键盘上的话，符号按钮会被键盘盖住点不到。
+        5.3.0 给这个面板发明了第三套定位（贴屏幕底 / 贴键盘上沿），一次踩了四个坑：
+        贴屏幕底会压住任务栏；贴键盘上沿意味着键盘一动面板就跟着动；每次内容变化
+        （切符号组、退格）都重算位置，面板就会乱跳；而且它跑到了选中面板下面。
+
+        改成复用 _floating_anchor——所有子菜单/缩略图都走它，本来就处理任务栏避让和
+        贴边翻面。位置只在打开时算一次（force=True），内容变化只重新收进屏幕，不重锚，
+        面板因此不会跳。
+
+        force=False 时保持左上角不动，只在面板长大到超出屏幕时才把它拉回来。
         """
         panel = getattr(self, "text_panel", None)
-        if panel is None or not panel.isVisible():
+        if panel is None:
             return
-        screen = self.screen_geometry(panel) or QApplication.primaryScreen().availableGeometry()
         panel.adjustSize()
         width, height = panel.width(), panel.height()
-        x = screen.center().x() - width // 2
+        screen = self.screen_geometry(panel, self) or QApplication.primaryScreen().availableGeometry()
+        bounds = (screen.left(), screen.top(), screen.width(), screen.height())
+        if force or not panel.isVisible():
+            x, y = self._floating_anchor(width, height, gap=6)
+        else:
+            spot = panel.pos()
+            x, y = spot.x(), spot.y()
+        # 键盘可能正好盖在这里：把面板翻到键盘上方，而不是任由它被挡住。
         keyboard = touch_keyboard.keyboard_rect()
         if keyboard:
-            _kx, ky, _kw, _kh = keyboard
-            y = ky - height - 8
-        else:
-            y = screen.bottom() - height - 12
-        x, y = clamp_rect(x, max(screen.top() + 4, y), width, height,
-                          (screen.left(), screen.top(), screen.width(), screen.height()))
+            kx, ky, kw, kh = keyboard
+            overlaps = (x < kx + kw and x + width > kx and y < ky + kh and y + height > ky)
+            if overlaps:
+                lifted = ky - height - 8
+                if lifted >= screen.top():
+                    y = lifted
+                else:
+                    y = min(ky + kh + 8, screen.bottom() - height)
+        x, y = clamp_rect(x, y, width, height, bounds)
         panel.move(x, y)
+        # 选中面板（复制/删除那一条）必须在公式面板【下方】：公式面板是当前操作焦点。
+        if getattr(self, "select_panel", None) is not None and self.select_panel.isVisible():
+            force_topmost(panel.winId())
 
     def _toggle_symbol_group(self, key):
         """同一时间只展开一组——全铺开在触屏上是一片小按钮，必然误触。"""
@@ -8664,9 +8877,10 @@ class ControlPanel(QWidget):
                 self.symbol_grid_layout.addWidget(btn, index // self.SYMBOL_COLUMNS,
                                                   index % self.SYMBOL_COLUMNS)
             self.symbol_grid_host.setVisible(True)
-        self.text_panel.adjustSize()
+        # 不重锚：切符号组只是面板长高/变矮，重算锚点会让它跳位置
         self._position_text_panel()
         self.raise_floating(self.text_panel)
+        self.text_input.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _symbol_pressed(self, entry):
         if not self.canvas:
@@ -8677,21 +8891,65 @@ class ControlPanel(QWidget):
             track_event("formula_structure_inserted", kind=kind)
         else:
             self.canvas.text_insert(entry)
+            self._sync_input_from_canvas()
         self.position_selection_panel(self.canvas.selection_bounds())
+        self._position_text_panel()     # 结构插入会让公式变大，面板可能需要收回屏内
+        self._refocus_input()
+
+    def _refocus_input(self):
+        """按完面板上的按钮把焦点交回输入控件。
+
+        不交回的话，焦点留在刚按的那个 QPushButton 上，系统触摸键盘就没有可送字符
+        的目标——表现为「按过退格之后键盘再也打不出字」。
+        """
+        panel = getattr(self, "text_panel", None)
+        if getattr(self, "text_input", None) is None or panel is None or not panel.isVisible():
+            return False
+        # activateWindow() 是异步的：同一帧紧接着 setFocus() 时窗口还没激活，焦点会
+        # 留在【上一个活动窗口】里（实测是主面板的某个按钮），触摸键盘于是把字符送给
+        # 了那个按钮。所以「激活 → 跑一轮事件 → 聚焦」要循环几次直到真的拿到焦点。
+        for _ in range(3):
+            if not panel.isActiveWindow():
+                panel.raise_()
+                panel.activateWindow()
+                QApplication.processEvents()
+            self.text_input.setFocus(Qt.FocusReason.OtherFocusReason)
+            QApplication.processEvents()
+            if self.text_input.hasFocus():
+                return True
+        return self.text_input.hasFocus()
+
+    def _sync_input_from_canvas(self):
+        """把画布对象的纯文本回灌进输入控件。
+
+        退格/换行按钮改的是画布对象；不回灌的话控件里还是旧内容，用户接着打字时
+        controls 的 textChanged 会把旧内容整体写回画布，刚才那一下退格就白做了。
+        """
+        canvas = self.canvas
+        if canvas is None or getattr(self, "text_input", None) is None:
+            return
+        item = canvas.editing_text_item()
+        if item is not None and not item.get("formula"):
+            self.text_input.load_from(item)
 
     def _text_backspace(self):
         if self.canvas:
             self.canvas.text_backspace()
+            self._sync_input_from_canvas()
+        self._refocus_input()
 
     def _text_newline(self):
         if self.canvas:
             self.canvas.text_newline()
+            self._sync_input_from_canvas()
+        self._refocus_input()
 
     def _text_show_keyboard(self):
         if touch_keyboard.show():
             QTimer.singleShot(700, self._position_text_panel)
         elif hasattr(self, "text_hint_label"):
             self.text_hint_label.setText(tr("text_keyboard_missing"))
+        self._refocus_input()
 
     def _text_done(self):
         if self.canvas:
