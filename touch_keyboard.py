@@ -318,36 +318,92 @@ def show_osk():
     return _shell_execute(path)
 
 
+def hide_backend(name):
+    """Close one specific backend, leaving the other alone."""
+    closed = False
+    for found, hwnd in _candidates():
+        if found != name or not _showing(hwnd):
+            continue
+        try:
+            ctypes.windll.user32.PostMessageW(
+                wintypes.HWND(hwnd), WM_SYSCOMMAND, SC_CLOSE, 0)
+            closed = True
+        except Exception:
+            continue
+    return closed
+
+
+def enforce_single(keep):
+    """Guarantee at most one keyboard is on screen: close everything but `keep`.
+
+    Two keyboards at once is unusable in a classroom -- the reported symptom was
+    TabTip flashing up, vanishing, and osk arriving in its place. Whichever
+    backend won, the other one must be gone.
+    """
+    closed = []
+    for name in ("tabtip", "osk"):
+        if name == keep:
+            continue
+        if hide_backend(name):
+            closed.append(name)
+    return closed
+
+
 def show(prefer=None):
-    """Bring some on-screen keyboard up. Returns True if an attempt succeeded.
+    """Ask for an on-screen keyboard. Returns True if an attempt was made.
 
-    A True result means "a keyboard was asked to appear", not "a keyboard is on
-    screen" -- the shell takes a moment, and callers should re-check
-    :func:`is_visible` on a timer rather than block the UI thread here.
+    Deliberately does NOT wait to see whether the keyboard appeared, and does NOT
+    try the second backend. Both of those were wrong in 5.3.2:
 
-    TabTip is tried first on touch machines and skipped on plain desktops, where
-    it reliably reports success and then stays cloaked; osk.exe is the backend
-    that actually shows up there.
+    A cold-started osk.exe needs about a second to draw itself, and the old code
+    gave up after 0.6s and launched the other backend too -- so the user saw
+    TabTip appear, vanish, and osk take its place. Worse, the cutoff sat right at
+    osk's real launch time, making it a coin flip: warm it appeared in ~0.45s and
+    nothing seemed wrong, cold it took ~1.0s and two keyboards showed up.
+
+    Escalation is the caller's job, on a timer, via :func:`escalate`. That keeps
+    the UI thread free and gives the first backend a realistic amount of time.
     """
     if not available() or not launch_allowed():
         return False
     if is_visible():
         return True
-    first = prefer or ("tabtip" if has_touch() else "osk")
-    order = ("tabtip", "osk") if first == "tabtip" else ("osk", "tabtip")
-    attempted = False
-    for name in order:
-        started = show_tabtip() if name == "tabtip" else show_osk()
-        attempted = attempted or started
-        if not started:
+    return show_tabtip() if (prefer or preferred_backend()) == "tabtip" else show_osk()
+
+
+def preferred_backend():
+    """Which backend to try first on this machine.
+
+    TabTip is the better keyboard -- real touch layout, every IME, all languages --
+    so it is the default choice. But Windows will not show it at all without a touch
+    digitizer: the COM toggle reports success and the window stays cloaked forever.
+    Trying it first on such a machine buys nothing and costs the whole escalation
+    delay before any keyboard appears, which in a classroom reads as "broken".
+    """
+    return "tabtip" if has_touch() else "osk"
+
+
+def escalate(tried=("tabtip",)):
+    """Try the next backend after the previous one failed to appear.
+
+    Returns the backend name that was attempted, or None when there is nothing
+    left to try. Closes anything still lingering from the failed attempt first,
+    so the two keyboards can never be on screen together.
+    """
+    if not available() or not launch_allowed():
+        return None
+    if is_visible():
+        return None
+    for name in ("tabtip", "osk"):
+        if name in tried:
             continue
-        if _wait_showing(LAUNCH_SETTLE_S):
-            return True
-        # The attempt was accepted but nothing appeared. Fall through to the other
-        # backend: on a non-touch desktop TabTip reports success every time and
-        # then stays cloaked forever, which is exactly the case that must not end
-        # the search here.
-    return attempted
+        # The previous backend did not appear, but it may still have a process or a
+        # cloaked window hanging around. Clear it before bringing up another.
+        enforce_single(name)
+        started = show_tabtip() if name == "tabtip" else show_osk()
+        if started:
+            return name
+    return None
 
 
 def hide():

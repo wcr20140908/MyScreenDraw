@@ -113,6 +113,50 @@ class RealKeyboardDeliveryTests(unittest.TestCase):
         self.assertIn(win32, ours,
                       f"Win32 焦点在 {win32}，不在我们的面板里，外部键盘的字符会送到别处")
 
+    def test_pressing_panel_buttons_never_steals_activation(self):
+        """抢激活会让 Windows 取消正在进行的输入法组字。
+
+        离屏跑不了这条：那里文字面板拿不到焦点，于是每次按钮都走「重新激活」的重路径，
+        测到的是平台限制而不是被测代码。5.3.2 无条件走那条路，头 3 秒内跑 6 次，正好
+        落在用户敲第一个词的时间里，中日韩输入法一个字也提交不出来。
+        """
+        self.open_box()
+        self.assertTrue(self.panel.text_input.hasFocus(), "前提不成立：焦点不在输入控件")
+        calls = []
+        original = self.panel.text_panel.activateWindow
+        self.panel.text_panel.activateWindow = lambda: (calls.append(1), original())[1]
+        try:
+            self.panel._text_backspace()
+            self.panel._text_newline()
+            self.panel._symbol_pressed("π")
+            self.panel._toggle_symbol_group("greek")
+            self.panel._symbol_pressed("α")
+            self.pump()
+        finally:
+            self.panel.text_panel.activateWindow = original
+        self.assertEqual(calls, [], f"按面板按钮抢了 {len(calls)} 次激活，组字会被取消")
+        self.assertTrue(self.panel.text_input.hasFocus())
+
+    def test_a_composition_survives_a_full_round_of_panel_presses(self):
+        """真机上组字要能穿过一整轮按钮操作活下来。"""
+        from PyQt6.QtGui import QInputMethodEvent
+        from PyQt6.QtWidgets import QApplication
+
+        item = self.open_box()
+        w = self.panel.text_input
+        QApplication.sendEvent(w, QInputMethodEvent("nihao", []))
+        self.pump(10)
+        self.assertTrue(w.composing())
+        self.panel._text_backspace()
+        self.panel._symbol_pressed("π")
+        self.pump(10)
+        commit = QInputMethodEvent("", [])
+        commit.setCommitString("你好")
+        QApplication.sendEvent(w, commit)
+        self.pump(15)
+        self.assertIn("你好", item.get("text", ""),
+                      "按过面板按钮之后输入法提交丢了")
+
     def test_a_posted_character_reaches_the_canvas_object(self):
         """osk.exe 就是这么送字符的：WM_CHAR 投给焦点窗口。"""
         item = self.open_box()
