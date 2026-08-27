@@ -2,6 +2,20 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # 版本号：见 version.py（唯一来源，代码里统一用 APP_VERSION）
 # 更新日志：
+# v5.3.2：屏幕键盘真的能弹出来了
+# 1. 键盘按钮此前在任何冷启动的机器上都不可能工作，能用纯属侥幸——本次登录会话里若已有
+#    别的东西启动过 TabTip 就正常，重启后同一份代码一次也不行
+# 2. TabTip.exe / osk.exe 的清单都要求提升，subprocess.Popen 必抛 WinError 740 且异常被吞；
+#    改用 ShellExecuteW 走壳层 UAC 路径
+# 3. ITipInvocation 只在 TabTip 已在跑时才注册（否则 REGDB_E_CLASSNOTREG），COM 无法自举；
+#    与上一条合起来是死锁，被会话状态掩盖成「重启前好、重启后坏」
+# 4. Win10 1809+ 真正的键盘是 TextInputHost 的 CoreWindow，且用 DWM cloaked 表示收起；
+#    IPTip_Main_Window 只是 0x0 占位窗口，查它的 IsWindowVisible 永远得到「不可见」
+# 5. 无触摸数字化仪的台式机上 Windows 压制触摸键盘（Toggle 报成功、窗口恒 cloaked），
+#    按机器能力选后端：有触摸先 TabTip，无触摸直接 osk.exe，先试的没出现就换另一个
+# 6. 不再谎报成功：show() 只代表已发起请求，界面 700ms/2.5s 复查屏幕，真没出现才提示并说明原因
+# 7. 离屏运行禁止启动键盘（键盘是系统级窗口，headless 也会落在用户真实屏幕上）
+#
 # v5.3.1：修复 5.3.0 的十个报告问题
 # 1. 键盘无法输入：新增可聚焦的 _TextInputEdit（画布 NoFocus，键盘无处送字符）；
 #    并堵住三个抢焦点的来源——心跳置顶重排、选中面板顶置、面板按钮持有焦点
@@ -8718,10 +8732,7 @@ class ControlPanel(QWidget):
         self._position_text_panel(force=True)
         self.text_panel.show()
         self.raise_floating(self.text_panel)
-        if touch_keyboard.available():
-            touch_keyboard.show()
-        elif hasattr(self, "text_hint_label"):
-            self.text_hint_label.setText(tr("text_keyboard_missing"))
+        self._request_keyboard()
         # 先做置顶重排，最后才抓焦点：顺序反了的话重排会把刚拿到的焦点又抢走。
         self.bind_topmost_stack()
         if not self._refocus_input():
@@ -8945,9 +8956,39 @@ class ControlPanel(QWidget):
         self._refocus_input()
 
     def _text_show_keyboard(self):
-        if touch_keyboard.show():
-            QTimer.singleShot(700, self._position_text_panel)
-        elif hasattr(self, "text_hint_label"):
+        self._request_keyboard()
+        self._refocus_input()
+
+    def _request_keyboard(self):
+        """调起屏幕键盘，并在它真的出现之后才下结论。
+
+        不能用 show() 的返回值当成功判据：在没有触摸数字化仪的台式机上，TabTip 的
+        COM Toggle 每次都返回成功，然后窗口一直保持 DWM cloaked——键盘根本不出现。
+        所以这里只把 show() 当作「已经发起请求」，隔一会儿再看屏幕上到底有没有东西，
+        没有才提示。提示也说清原因，而不是笼统的「不可用」。
+        """
+        if not hasattr(self, "text_hint_label"):
+            return
+        if not touch_keyboard.available():
+            self.text_hint_label.setText(tr("text_keyboard_missing"))
+            return
+        self.text_hint_label.setText("")
+        touch_keyboard.show()
+        # 壳层拉起进程要时间；分两次复查，早的那次让面板尽快躲开键盘。
+        QTimer.singleShot(700, self._keyboard_settled)
+        QTimer.singleShot(2500, self._keyboard_settled)
+
+    def _keyboard_settled(self):
+        """键盘该出现的时刻到了：重排面板，或说明为什么没出现。"""
+        panel = getattr(self, "text_panel", None)
+        if panel is None or not panel.isVisible():
+            return
+        if touch_keyboard.is_visible():
+            self.text_hint_label.setText("")
+            self._position_text_panel()
+        elif not touch_keyboard.has_touch():
+            self.text_hint_label.setText(tr("text_keyboard_no_touch"))
+        else:
             self.text_hint_label.setText(tr("text_keyboard_missing"))
         self._refocus_input()
 

@@ -492,6 +492,107 @@ class PanelPlacementTests(WorkflowCase):
             self.main.touch_keyboard.keyboard_rect = original
 
 
+class KeyboardRequestTests(WorkflowCase):
+    """5.3.2: the app must not claim success just because a launch was accepted.
+
+    The 5.3.1 bug: on a desktop with no digitizer, TabTip's COM toggle returns
+    success every single time and the window then stays DWM-cloaked, so the old
+    code silently believed a keyboard was up. Worse, the launcher it used could
+    never start the process at all, so whether the button worked depended on
+    whether something else had started TabTip earlier in the login session --
+    which is why the identical build worked one day and failed after a reboot.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.kb = self.main.touch_keyboard
+        self._saved = {name: getattr(self.kb, name) for name in
+                       ("available", "show", "is_visible", "has_touch", "keyboard_rect")}
+        self.show_calls = []
+        self.kb.show = lambda prefer=None: (self.show_calls.append(prefer), True)[1]
+
+    def tearDown(self):
+        for name, value in self._saved.items():
+            setattr(self.kb, name, value)
+        super().tearDown()
+
+    def hint(self):
+        return self.panel.text_hint_label.text()
+
+    def test_opening_a_box_asks_for_a_keyboard(self):
+        self.kb.available = lambda: True
+        self.kb.is_visible = lambda: False
+        self.make_box()
+        self.assertTrue(self.show_calls, "打开文本框没有请求键盘")
+
+    def test_no_keyboard_on_the_machine_says_so_immediately(self):
+        self.kb.available = lambda: False
+        self.make_box()
+        self.assertEqual(self.hint(), self.main.tr("text_keyboard_missing"))
+        self.assertEqual(self.show_calls, [], "机器上没有键盘时不该还去启动")
+
+    def test_a_launch_that_never_appears_is_reported_not_ignored(self):
+        """报成功但没出现，必须说出来——沉默地假装成功是 5.3.1 的行为。"""
+        self.kb.available = lambda: True
+        self.kb.is_visible = lambda: False
+        self.kb.has_touch = lambda: False
+        self.make_box()
+        self.panel._keyboard_settled()
+        self.pump()
+        self.assertEqual(self.hint(), self.main.tr("text_keyboard_no_touch"))
+
+    def test_a_touch_machine_with_the_service_off_gets_the_generic_message(self):
+        self.kb.available = lambda: True
+        self.kb.is_visible = lambda: False
+        self.kb.has_touch = lambda: True
+        self.make_box()
+        self.panel._keyboard_settled()
+        self.pump()
+        self.assertEqual(self.hint(), self.main.tr("text_keyboard_missing"))
+
+    def test_a_keyboard_that_does_appear_clears_the_hint(self):
+        self.kb.available = lambda: True
+        self.kb.has_touch = lambda: True
+        self.kb.is_visible = lambda: False
+        self.make_box()
+        self.panel._keyboard_settled()
+        self.pump()
+        self.assertNotEqual(self.hint(), "")
+        self.kb.is_visible = lambda: True
+        self.panel._keyboard_settled()
+        self.pump()
+        self.assertEqual(self.hint(), "", "键盘出现后提示没有清掉")
+
+    def test_the_settle_check_keeps_the_input_focused(self):
+        """复查会重排面板，重排会抢激活——焦点必须还回输入控件。"""
+        self.kb.available = lambda: True
+        self.kb.is_visible = lambda: True
+        self.make_box()
+        self.panel._keyboard_settled()
+        self.pump()
+        self.assertEqual(self.focus_name(), "_TextInputEdit")
+
+    def test_the_settle_check_is_harmless_after_the_panel_closes(self):
+        """定时器可能在面板关闭之后才到——那时不能抛异常，也不该改任何东西。"""
+        self.kb.available = lambda: True
+        self.kb.is_visible = lambda: False
+        self.make_box()
+        self.panel.close_text_input()
+        self.pump()
+        self.panel._keyboard_settled()          # 不该抛
+        self.pump()
+
+    def test_the_no_touch_message_exists_in_all_eight_languages(self):
+        import i18n
+
+        self.assertEqual(len(i18n._LANGS), 8)
+        for lang in i18n._LANGS:
+            table = i18n.TEXT.get(lang, {})
+            self.assertIn("text_keyboard_no_touch", table, f"{lang} 缺新提示语")
+            self.assertTrue(table["text_keyboard_no_touch"].strip(),
+                            f"{lang} 的新提示语是空的")
+
+
 class LayeringTests(WorkflowCase):
     """Bug 9: the formula panel must sit above the select panel, below the main menu."""
 
