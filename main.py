@@ -2,6 +2,21 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # 版本号：见 version.py（唯一来源，代码里统一用 APP_VERSION）
 # 更新日志：
+# v5.3.4：层级、数字键、文本换行
+# 1. 主面板会闪到符号面板上面：bind_topmost_stack 只把每个浮窗钉到【画布】之上，彼此
+#    高低无约束；真实点击激活窗口会让 Windows 重排同 owner 下的其他窗口，而对已在置顶
+#    层内的窗口 force_topmost 不改变兄弟高低，拉不回来
+# 2. 事后 restack 治不了根（点击引发的重排是异步的，矫正总晚一步，那一步就是「闪」），
+#    改为把顺序写进归属关系：chain_floating_owners() 串成 文字→选中→主面板→画布。
+#    Windows 保证被归属窗口永远在其 owner 之上，于是没有需要矫正的时刻
+# 3. 打不出数字：输入法组字悬着时候选窗是开的，数字键变成「选第 N 个候选」（实测 a 起
+#    组字后按 5 得到「阿」）。新增 cancel_ime_composition()，开框/取得焦点时清干净
+# 4. 文字超出文本框：text_lines() 原先只按 \n 切分，完全没有换行。现按框宽自动换行
+#    （中文任意字符可断，西文优先空格，长串硬断），并把框高撑够到最后一行整行在框内
+# 5. 框宽一律不动（用户拖出来的意图），框高不缩到比拖出来的还小（box_min_h，随存档保留）
+# 6. 粗细纳入计算：它同时改字号与笔画溢出（描边笔宽的一半溢出到字形两侧）；框高封顶在
+#    屏幕可用高度，否则粗细 20 时会长到 4607px，比屏幕还高
+#
 # v5.3.3：只弹一个键盘，且不再和输入法打架
 # 1. 两个键盘先后出现：show() 等 0.6s 没见键盘就把另一个后端也启动了，而冷启动的 osk
 #    实测约 1.0s——门槛正好卡在真实耗时上，暖启动看着正常、冷启动就冒出两个
@@ -550,6 +565,11 @@ def serialize_page(page):
         box = item.get("box")
         if box:
             entry["box"] = [float(box[0]), float(box[1])]
+        floor = item.get("box_min_h")
+        if floor:
+            # 用户拖出来的高度。框会因内容长高，重新打开后若没有这个值，删掉几行就会
+            # 缩到比当初拖的还小。
+            entry["box_min_h"] = float(floor)
         tree = item.get("formula")
         if tree:
             entry["formula"] = tree
@@ -617,6 +637,9 @@ def deserialize_page(data):
         if isinstance(raw_box, (list, tuple)) and len(raw_box) >= 2:
             entry["box"] = [_coerce_bounded_float(raw_box[0], 0.0),
                             _coerce_bounded_float(raw_box[1], 0.0)]
+        raw_floor = item.get("box_min_h")
+        if raw_floor is not None:
+            entry["box_min_h"] = _coerce_bounded_float(raw_floor, 0.0)
         # normalize 是全函数：外部文件里的乱数据会被丢掉而不是抛异常
         tree = formula.normalize(item.get("formula"))
         if tree:
@@ -713,6 +736,37 @@ _user32.SetWindowPos.restype = ctypes.c_int   # BOOL
 if hasattr(_user32, "SetWindowLongPtrW"):
     _user32.SetWindowLongPtrW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
     _user32.SetWindowLongPtrW.restype = ctypes.c_void_p
+
+NI_COMPOSITIONSTR = 0x0015
+CPS_CANCEL = 0x0004
+
+
+def cancel_ime_composition(window_id):
+    """取消该窗口上悬着的输入法组字。
+
+    为什么必须做：组字一旦挂着，输入法的候选窗就是打开的，此时按数字键是【选第 N 个
+    候选字】而不是输入数字。实测中文输入法下先按 a 起组字、再按 5，落进去的是「阿」。
+    表现就是「键盘打不出数字，得先打字」——数字键被候选选择吃掉了。
+
+    新开文本框、重新取得焦点时都要清一次，让输入法从干净状态开始。
+    """
+    try:
+        hwnd = int(window_id)
+        if not hwnd:
+            return False
+        imm32 = ctypes.windll.imm32
+        context = imm32.ImmGetContext(ctypes.c_void_p(hwnd))
+        if not context:
+            return False
+        try:
+            imm32.ImmNotifyIME(ctypes.c_void_p(context), NI_COMPOSITIONSTR,
+                               CPS_CANCEL, 0)
+            return True
+        finally:
+            imm32.ImmReleaseContext(ctypes.c_void_p(hwnd), ctypes.c_void_p(context))
+    except Exception:
+        return False
+
 
 def force_topmost(window_id):
     # Keep HWND_TOPMOST without SWP_SHOWWINDOW: repeatedly forcing show during
@@ -2031,6 +2085,9 @@ class DrawingCanvas(QMainWindow):
         box = item.get("box")
         if box:
             clone["box"] = [float(box[0]), float(box[1])]
+        floor = item.get("box_min_h")
+        if floor:
+            clone["box_min_h"] = float(floor)
         tree = item.get("formula")
         if tree:
             clone["formula"] = copy.deepcopy(tree)
@@ -2417,6 +2474,10 @@ class DrawingCanvas(QMainWindow):
         height = max(self.TEXT_MIN_H, rect.height())
         item = self.create_text_item(rect.topLeft(), box=(width, height))
         if item is not None:
+            # 记住拖出来的高度：内容多了框要长高，但绝不能缩到比用户拖的还小——
+            # 那尺寸是用户明确表达的意图。
+            item["box_min_h"] = height
+        if item is not None:
             self.begin_text_edit(item)
         return item
 
@@ -2633,6 +2694,8 @@ class DrawingCanvas(QMainWindow):
         return True
 
     def _after_text_change(self, item):
+        # 内容变了就把框高撑够：要求是最后一行整行都在框内，而不是任由文字画到框外。
+        self.fit_text_box(item)
         self.mark_content_changed()
         if self.whiteboard_mode:
             self.save_current_page()
@@ -3898,6 +3961,9 @@ class DrawingCanvas(QMainWindow):
             if item["id"] in self.selected_ids:
                 item["width"] = max(1, width)
                 item["size"] = max(8, width * 6)
+                # 粗细同时改字号和笔画溢出：换行宽度和所需行数都跟着变，必须重排一次，
+                # 否则调粗之后文字会直接冲出原来的框。
+                self.fit_text_box(item)
         for item in self.shape_items:
             if item["id"] in self.selected_ids:
                 item["width"] = max(1, width)
@@ -4084,8 +4150,72 @@ class DrawingCanvas(QMainWindow):
         font.setBold(bool(item.get("bold", False)))
         return font
 
+    @staticmethod
+    def text_pen_bleed(item):
+        """描边笔画让字比字体度量本身更宽更高，返回单边溢出量。
+
+        用 QPen(width) 画文字是给字形轮廓描边，笔宽的一半会溢出到轮廓两侧。粗细调到
+        20 时这个量比一个字还宽——不算进去的话，换行会按细笔的宽度算，粗笔下必然出框。
+        """
+        return max(1, int(item.get("width", 1))) / 2.0
+
+    def text_wrap_width(self, item):
+        """一行可用的宽度：框宽减去两侧内边距，再减去笔画溢出。
+
+        没有拖拽定框的旧对象（box 缺失）不换行——它们的框是按内容算出来的，
+        再去按框宽换行会自我循环。
+        """
+        stored = item.get("box")
+        if not stored:
+            return None
+        usable = float(stored[0]) - self.TEXT_PAD * 2 - self.text_pen_bleed(item) * 2
+        return usable if usable > 1.0 else 1.0
+
     def text_lines(self, item):
-        return str(item.get("text", "")).split("\n")
+        """显示用的行，含自动换行。
+
+        宽度允许就折行，而不是让文字冲出框外。中文没有空格，所以能在任意字符间断行；
+        西文优先在空格处断，断不开的长串（网址、连写公式）才硬断——否则一个长单词
+        就会顶穿整框。
+        """
+        text = str(item.get("text", ""))
+        limit = self.text_wrap_width(item)
+        if limit is None:
+            return text.split("\n")
+        metrics = QFontMetricsF(self.text_font(item))
+        lines = []
+        for paragraph in text.split("\n"):
+            lines.extend(self._wrap_paragraph(paragraph, metrics, limit))
+        return lines or [""]
+
+    @staticmethod
+    def _wrap_paragraph(paragraph, metrics, limit):
+        """把一个段落折成若干行，每行宽度不超过 limit。"""
+        if not paragraph:
+            return [""]
+        lines = []
+        current = ""
+        last_break = -1        # current 里最后一个可断处（空格之后）的下标
+        for ch in paragraph:
+            candidate = current + ch
+            if metrics.horizontalAdvance(candidate) <= limit or not current:
+                current = candidate
+                if ch.isspace():
+                    last_break = len(current)
+                continue
+            # 放不下了：优先回退到最后一个空格处断行，把剩下的挪到下一行。
+            if last_break > 0:
+                lines.append(current[:last_break].rstrip())
+                current = current[last_break:] + ch
+                last_break = -1
+                if current.strip() == "" and not current:
+                    current = ch
+            else:
+                lines.append(current)
+                current = ch
+        if current:
+            lines.append(current)
+        return lines or [""]
 
     def _formula_metrics(self, item):
         """给 formula.layout 用的度量适配器。
@@ -4123,14 +4253,65 @@ class DrawingCanvas(QMainWindow):
 
     def text_content_size(self, item):
         """内容自身需要的尺寸（不含边距，未经 scale/rotation）。"""
+        bleed = self.text_pen_bleed(item)
         box = self.formula_box(item)
         if box is not None:
-            return box.w, box.height
+            return box.w + bleed * 2, box.height + bleed * 2
         metrics = QFontMetricsF(self.text_font(item))
         lines = self.text_lines(item)
         width = max((metrics.horizontalAdvance(line) for line in lines), default=0.0)
         height = metrics.lineSpacing() * max(1, len(lines))
-        return width, height
+        return width + bleed * 2, height + bleed * 2
+
+    def text_max_height(self):
+        """框高上限：屏幕可用高度。
+
+        没有上限的话会长出荒唐的尺寸。粗细调到 20 时字号是 120pt（size = width * 6），
+        一个 300px 宽的框每行只放得下两个字，几十字就要 4000 多像素高——比屏幕还高，
+        用户既看不到也点不到。到了这个地步再长高没有意义。
+        """
+        try:
+            screen = self.screen() or QApplication.primaryScreen()
+            if screen is not None:
+                return float(screen.availableGeometry().height())
+        except Exception:
+            pass
+        return 1080.0
+
+    def text_required_height(self, item):
+        """装下当前内容所需的框高。
+
+        要求是「最后一行的顶部在框底之上」，也就是整个最后一行都得在框内，而不是刚好
+        压在框线上。所以按行数 × 行距算满，再加上下内边距和笔画溢出。
+        """
+        bleed = self.text_pen_bleed(item)
+        box = self.formula_box(item)
+        if box is not None:
+            content = box.height + bleed * 2
+        else:
+            metrics = QFontMetricsF(self.text_font(item))
+            lines = self.text_lines(item)
+            content = metrics.lineSpacing() * max(1, len(lines)) + bleed * 2
+        needed = content + self.TEXT_PAD * 2
+        return max(self.TEXT_MIN_H, min(needed, self.text_max_height()))
+
+    def fit_text_box(self, item):
+        """按内容把框高撑够。返回是否改动过。
+
+        宽度一律不动：那是用户拖出来的意图，换行要遵守它。高度只在装不下时往上长，
+        并且绝不缩到比用户拖出来的还小——删掉内容后框缩得比拖的小，是在替用户改他
+        明确表达过的尺寸。
+        """
+        stored = item.get("box")
+        if not stored:
+            return False
+        floor = max(self.TEXT_MIN_H, float(item.get("box_min_h", 0.0)))
+        needed = max(floor, self.text_required_height(item))
+        current = float(stored[1])
+        if abs(current - needed) < 0.5:
+            return False
+        item["box"] = [float(stored[0]), needed]
+        return True
 
     def text_local_rect(self, item):
         """文本框在自身局部坐标系里的矩形（未经 scale/rotation）。
@@ -5631,6 +5812,14 @@ class _TextInputEdit(QTextEdit):
         """
         return self._composing
 
+    def reset_ime(self):
+        """把输入法的组字状态清干净，并同步自己的标志。"""
+        self._composing = False
+        try:
+            cancel_ime_composition(int(self.winId()))
+        except Exception:
+            pass
+
     def _canvas(self):
         return getattr(self._panel, "canvas", None)
 
@@ -5646,6 +5835,10 @@ class _TextInputEdit(QTextEdit):
         # 换一个框＝没有任何组字在进行。这个标志若留着上一个框的 True，下一次按键会被
         # 当成「组字期间」而丢掉——表现为新开的文本框第一下打不出字。
         self._composing = False
+        # 光清自己的标志不够：输入法自己也挂着组字，候选窗开着时数字键会被当成「选第
+        # N 个候选」而不是输入数字（实测「a」起组字后按 5 得到「阿」）。必须让输入法
+        # 也回到干净状态，否则表现为「打不出数字」。
+        self.reset_ime()
         self._syncing = True
         try:
             self.setPlainText("" if item.get("formula") else str(item.get("text", "")))
@@ -7368,7 +7561,9 @@ class ControlPanel(QWidget):
         # 顺带抢走激活，文字输入控件的键盘焦点随之丢失，键盘就再也打不出字。
         if getattr(self, "text_panel", None) is not None and self.text_panel.isVisible():
             force_topmost(self.text_panel.winId())
-            force_above(int(self.text_panel.winId()), int(self.select_panel.winId()))
+            # 选中面板刚显示出来，可见集合变了，归属链要跟着重建。
+            self.chain_floating_owners()
+            self.restack_floatings()
             self._refocus_input()
 
     def open_selection_color(self):
@@ -7660,6 +7855,7 @@ class ControlPanel(QWidget):
                 set_window_owner(panel_hwnd, owner)
                 for hwnd in floating_hwnds:
                     set_window_owner(hwnd, owner)
+                self.chain_floating_owners()
                 # 句柄新建/重建时顺手关掉系统触控手势加工（按住变右键、甩动、等待光环）。
                 # 挂在这里而不是每拍心跳：SetProp 是按窗口一次性生效的，而画布切换
                 # 穿透/绘图模式会重建 HWND，新句柄必须重新设置一次。
@@ -7684,6 +7880,11 @@ class ControlPanel(QWidget):
                 if floating.isVisible():
                     force_topmost(int(floating.winId()))
                     force_above(int(floating.winId()), owner)
+            # 上面每一步只保证「某窗口在画布之上」，彼此之间的高低完全没约束——谁在上
+            # 全看 Windows 上一次怎么排的。真实点击会让被激活窗口连带把同一 owner 下的
+            # 其他窗口重排，于是主面板可能压到符号面板上；心跳只 force_topmost 拉不回来
+            # （对已在置顶层的窗口，HWND_TOPMOST 不改变兄弟高低）。这里显式把整条链排一遍。
+            self.restack_floatings()
             self._raise_tooltip(owner)
             self._topmost_state = key
             self._topmost_error = None
@@ -7693,6 +7894,60 @@ class ControlPanel(QWidget):
             if not getattr(self, "_topmost_error", False):
                 self._topmost_error = True
                 LOGGER.exception("窗口层级更新失败")
+
+    def floating_stack(self):
+        """浮窗的期望层级，从最上到最下。
+
+        文字/公式面板在最上：它是当前操作焦点，且被其他窗口压住时符号按钮点不到。
+        选中面板（复制/删除那一条）紧随其后，主面板在浮窗之下——主面板是常驻的，
+        任何临时浮窗都该盖在它上面。
+        """
+        order = [
+            getattr(self, "text_panel", None),
+            getattr(self, "select_panel", None),
+            getattr(self, "menu_panel", None),
+            getattr(self, "calc_panel", None),
+            getattr(self, "roster_panel", None),
+            getattr(self, "thumbnail_panel", None),
+            getattr(self, "mini_timer", None),
+            self,
+        ]
+        return [w for w in order if w is not None and w.isVisible()]
+
+    def restack_floatings(self):
+        """把浮窗按 floating_stack() 的顺序显式排成一条链。
+
+        只把每个窗口分别钉到画布之上是不够的：那样彼此的高低没有任何约束。必须逐对
+        force_above，才能真正决定「谁在谁上面」。
+        """
+        try:
+            stack = self.floating_stack()
+            for upper, lower in zip(stack, stack[1:]):
+                force_above(int(upper.winId()), int(lower.winId()))
+        except Exception:
+            pass
+
+    def chain_floating_owners(self):
+        """把浮窗的归属串成一条链：每个窗口归属于它下面那个。
+
+        为什么不只靠 restack：那是【事后矫正】，而真实点击引发的重排是异步的——被激活
+        的窗口会让 Windows 重排同 owner 下的其他窗口，矫正总是晚一步，那一步就是用户
+        看到的「主面板闪到符号面板上面」。而 Windows 保证【被归属窗口永远在其 owner
+        之上】，把顺序写进归属关系里，就不存在需要矫正的时刻。
+
+        实测：即使显式对主面板调 SetWindowPos(HWND_TOPMOST)，文字面板依然压在它上面。
+        """
+        try:
+            stack = self.floating_stack()
+            if not stack:
+                return
+            for upper, lower in zip(stack, stack[1:]):
+                set_window_owner(int(upper.winId()), int(lower.winId()))
+            # 链尾（主面板）仍归属画布，否则整条链会脱离画布、被普通窗口盖住。
+            if self.canvas is not None:
+                set_window_owner(int(stack[-1].winId()), int(self.canvas.winId()))
+        except Exception:
+            pass
 
     @staticmethod
     def _raise_tooltip(owner):
@@ -8775,6 +9030,9 @@ class ControlPanel(QWidget):
         self._position_text_panel(force=True)
         self.text_panel.show()
         self.raise_floating(self.text_panel)
+        # 归属链随「哪些浮窗可见」变化，而 _bound_key 只在 winId 变化时才重绑，
+        # 显示/隐藏不会改 winId。所以这里显式重建一次。
+        self.chain_floating_owners()
         self._request_keyboard()
         # 先做置顶重排，最后才抓焦点：顺序反了的话重排会把刚拿到的焦点又抢走。
         self.bind_topmost_stack()
@@ -8908,9 +9166,9 @@ class ControlPanel(QWidget):
                     y = min(ky + kh + 8, screen.bottom() - height)
         x, y = clamp_rect(x, y, width, height, bounds)
         panel.move(x, y)
-        # 选中面板（复制/删除那一条）必须在公式面板【下方】：公式面板是当前操作焦点。
-        if getattr(self, "select_panel", None) is not None and self.select_panel.isVisible():
-            force_topmost(panel.winId())
+        # 顺手把整条浮窗链排正。只 force_topmost 不行：对已在置顶层的窗口它不改变兄弟
+        # 高低，主面板压上来时拉不回去。
+        self.restack_floatings()
 
     def _toggle_symbol_group(self, key):
         """同一时间只展开一组——全铺开在触屏上是一片小按钮，必然误触。"""
@@ -8938,6 +9196,9 @@ class ControlPanel(QWidget):
         # 不重锚：切符号组只是面板长高/变矮，重算锚点会让它跳位置
         self._position_text_panel()
         self.raise_floating(self.text_panel)
+        # 立刻排链，不能等下一拍心跳：点击本身会把主面板重排上来，等 500ms 就是用户
+        # 看到的那一下「闪」。
+        self.restack_floatings()
         self.text_input.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _symbol_pressed(self, entry):

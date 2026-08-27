@@ -531,5 +531,143 @@ class SymbolCatalogueTests(unittest.TestCase):
                     self.assertTrue(label)
 
 
+class WrappingTests(TextBoxCase):
+    """5.3.4: text must stay inside the box it was dragged to.
+
+    Before this, text_lines() only split on "\\n", so a long line simply ran out
+    past the right edge and extra lines ran out below the bottom. Both directions
+    also have to survive a thickness change, because the pen width both scales the
+    font (size = width * 6) and strokes the glyph outline, which makes the glyphs
+    wider and taller than the font metrics alone report.
+    """
+
+    def metrics(self, item):
+        from PyQt6.QtGui import QFontMetricsF
+
+        return QFontMetricsF(self.canvas.text_font(item))
+
+    def widest(self, item):
+        m = self.metrics(item)
+        return max((m.horizontalAdvance(line) for line in self.canvas.text_lines(item)),
+                   default=0.0)
+
+    def usable_width(self, item):
+        return (float(item["box"][0]) - self.canvas.TEXT_PAD * 2
+                - self.canvas.text_pen_bleed(item) * 2)
+
+    def last_line_bottom(self, item):
+        m = self.metrics(item)
+        top = self.canvas.TEXT_PAD + self.canvas.text_pen_bleed(item)
+        return top + m.lineSpacing() * len(self.canvas.text_lines(item))
+
+    def typed(self, text, w=300.0, h=80.0, width=3):
+        self.canvas.pen_width = width
+        item = self.make_box(w=w, h=h)
+        item["width"] = width
+        item["size"] = max(8, width * 6)
+        self.canvas.editing_text_id = item["id"]
+        self.canvas.text_insert(text)
+        return item
+
+    def test_a_long_line_wraps_instead_of_overflowing(self):
+        item = self.typed("The quick brown fox jumps over the lazy dog again and again")
+        self.assertGreater(len(self.canvas.text_lines(item)), 1, "长行没有折行")
+        self.assertLessEqual(self.widest(item), self.usable_width(item) + 0.5,
+                             "折行后仍超出框宽")
+
+    def test_chinese_wraps_even_without_spaces(self):
+        """中文没有空格，只按空格断行等于不断行。"""
+        item = self.typed("这是一段很长的中文文字用来测试自动换行是否真的按框宽折行")
+        self.assertGreater(len(self.canvas.text_lines(item)), 1, "中文没有折行")
+        self.assertLessEqual(self.widest(item), self.usable_width(item) + 0.5)
+
+    def test_an_unbreakable_token_is_broken_rather_than_overflowing(self):
+        """一个超长单词若不硬断，就会独自顶穿整个框。"""
+        item = self.typed("ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMNOP", w=200.0)
+        self.assertLessEqual(self.widest(item), self.usable_width(item) + 0.5)
+
+    def test_wrapping_prefers_spaces_over_mid_word_breaks(self):
+        item = self.typed("alpha beta gamma delta epsilon zeta eta theta", w=220.0)
+        for line in self.canvas.text_lines(item):
+            self.assertEqual(line, line.strip(), f"行首尾留了空格：{line!r}")
+
+    def test_the_last_line_sits_inside_the_box(self):
+        """要求：最后一行的顶部在框底之上，也就是整行都在框内。"""
+        item = self.typed("一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十",
+                          w=260.0, h=60.0)
+        self.assertLessEqual(self.last_line_bottom(item), float(item["box"][1]) + 0.5,
+                             "最后一行越过了框底")
+
+    def test_explicit_newlines_grow_the_box(self):
+        item = self.typed("a\nb\nc\nd\ne\nf", w=260.0, h=60.0)
+        self.assertEqual(len(self.canvas.text_lines(item)), 6)
+        self.assertLessEqual(self.last_line_bottom(item), float(item["box"][1]) + 0.5)
+
+    def test_the_box_never_shrinks_below_the_dragged_size(self):
+        """框高可以因内容长高，但缩到比用户拖的还小，是替用户改他的明确意图。"""
+        item = self.typed("a\nb\nc\nd\ne\nf\ng\nh", w=260.0, h=140.0)
+        grown = float(item["box"][1])
+        self.assertGreaterEqual(grown, 140.0)
+        item["text"] = ""
+        self.canvas._after_text_change(item)
+        self.assertGreaterEqual(float(item["box"][1]), 140.0 - 0.5,
+                                "删空内容后框缩得比拖出来的还小")
+
+    def test_the_width_is_never_changed_by_content(self):
+        """宽度是用户拖出来的意图，换行要遵守它，不能反过来改宽度。"""
+        item = self.typed("这是一段足够长的文字会触发多次折行以确认宽度不被改动",
+                          w=240.0, h=80.0)
+        self.assertAlmostEqual(float(item["box"][0]), 240.0, places=3)
+
+    def test_thickness_change_rewraps_and_refits(self):
+        """粗细同时改字号和笔画溢出，两个方向都必须重排。"""
+        item = self.typed("这是一段测试文字用来验证改粗细之后是否仍然不会出框", w=300.0)
+        thin_lines = len(self.canvas.text_lines(item))
+        self.canvas.selected_ids = {item["id"]}
+        self.canvas.apply_selection_width(20)
+        thick_lines = len(self.canvas.text_lines(item))
+        self.assertGreaterEqual(thick_lines, thin_lines, "加粗后没有重新折行")
+        self.assertLessEqual(self.widest(item), self.usable_width(item) + 0.5,
+                             "加粗后超出框宽")
+
+    def test_a_thick_pen_does_not_grow_the_box_past_the_screen(self):
+        """粗细 20 时字号 120pt，窄框每行放两个字——不封顶会长到比屏幕还高。"""
+        item = self.typed("一二三四五六七八九十一二三四五六七八九十", w=300.0)
+        self.canvas.selected_ids = {item["id"]}
+        self.canvas.apply_selection_width(20)
+        self.assertLessEqual(float(item["box"][1]),
+                             self.canvas.text_max_height() + 0.5,
+                             "框高超过屏幕可用高度，用户既看不到也点不到")
+
+    def test_pen_bleed_is_counted_in_the_usable_width(self):
+        """描边笔宽的一半溢出到字形两侧；不算进去，粗笔下必然出框。"""
+        thin = self.typed("x", w=300.0, width=1)
+        thick = self.typed("x", w=300.0, width=20)
+        self.assertGreater(self.canvas.text_pen_bleed(thick),
+                           self.canvas.text_pen_bleed(thin))
+        self.assertLess(self.canvas.text_wrap_width(thick),
+                        self.canvas.text_wrap_width(thin),
+                        "粗笔的可用宽度没有变窄")
+
+    def test_an_item_without_a_dragged_box_does_not_wrap(self):
+        """旧文件的对象没有 box，它的框是按内容算的；再按框宽折行会自我循环。"""
+        item = self.canvas.create_text_item(self.main.QPointF(10, 10),
+                                            text="a fairly long single line of text")
+        self.assertIsNone(self.canvas.text_wrap_width(item))
+        self.assertEqual(self.canvas.text_lines(item),
+                         ["a fairly long single line of text"])
+
+    def test_the_dragged_floor_survives_a_round_trip(self):
+        item = self.typed("a\nb\nc", w=260.0, h=140.0)
+        page = self.main.serialize_page(self.canvas.capture_page())
+        restored = self.main.deserialize_page(page)
+        self.assertAlmostEqual(restored["texts"][0].get("box_min_h"), 140.0, places=3)
+
+    def test_the_dragged_floor_survives_a_clone(self):
+        item = self.typed("a", w=260.0, h=140.0)
+        clone = self.canvas.clone_text_item(item)
+        self.assertAlmostEqual(clone.get("box_min_h"), 140.0, places=3)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

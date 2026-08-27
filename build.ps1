@@ -4,8 +4,8 @@ $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $root
 
 $version = (& python -c "from version import VERSION; print(VERSION)").Trim()
-if ($version -ne "5.3.3") {
-    throw "Release build requires version 5.3.3, found '$version'"
+if ($version -ne "5.3.4") {
+    throw "Release build requires version 5.3.4, found '$version'"
 }
 
 # Never package checked-out runtime data or stale PyInstaller output.
