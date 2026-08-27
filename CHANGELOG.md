@@ -3,7 +3,33 @@
 > 本文件记录 MyScreenDraw 的完整版本历史（含内部技术细节）。
 > 面向用户的说明见 [README.md](README.md) / [README.en.md](README.en.md)。
 
-## v5.3.1（当前）— 修复 5.3.0 的十个报告问题
+## v5.3.2（当前）— 屏幕键盘真的能弹出来了
+
+5.3.1 的键盘按钮**在任何冷启动的机器上都不可能工作**。它有时能用，纯属侥幸：如果本次登录会话里已经有别的东西启动过 TabTip，它就正常；重启之后，同一份代码一次也不行。用户报告的正是这个现象——「昨天多次启动完全正常，今天重启后一次也不行，代码没人动过一个字」。
+
+三个 Windows 细节，每一个单独都足以让按钮失效：
+
+- **两个键盘程序都无法用 `CreateProcess` 启动**。`TabTip.exe` 和 `osk.exe` 的清单都要求提升，普通用户会话下 `subprocess.Popen` 直接抛 `WinError 740`（请求的操作需要提升），异常被 `except Exception: continue` 吞掉。改用 `ShellExecuteW`，它走壳层的 UAC 路径，实测能起来
+- **`ITipInvocation` 只在 TabTip 已经在跑时才注册**，否则 `CoCreateInstance` 返回 `REGDB_E_CLASSNOTREG`（0x80040154）。所以 COM 这条路**无法自举**：进程必须先在。与上一条合起来就是死锁，而死锁被会话状态掩盖，于是表现为「重启前好、重启后坏」
+- **Win10 1809 以后，可见的键盘不是那个看起来该是的窗口**。`IPTip_Main_Window` 还在，但它是个 `0,0,0,0` 的占位窗口；真正的键盘由 `TextInputHost.exe` 绘制，是一个 **DWM cloaked**（而非 hidden）的 `CoreWindow`。对占位窗口查 `IsWindowVisible` 永远返回「不可见」，这也让面板的「躲开键盘」逻辑从未真正触发过
+
+### 无触摸屏的机器现在也能用
+
+Windows 会在没有触摸数字化仪的台式机上压制触摸键盘：`Toggle` 每次都返回成功，窗口却一直 cloaked，键盘根本不出现。现在按机器能力选后端——有触摸先试 TabTip，没触摸直接用 `osk.exe`（老式屏幕键盘，任何桌面都能弹出，向焦点窗口发真实 `WM_KEYDOWN`/`WM_CHAR`）；先试的那个没出现就换另一个。
+
+- 32 位打包版本也能找到 `osk.exe`：32 位进程看到的 `System32` 被重定向到 `SysWOW64`（那里没有它），补上 `Sysnative` 这条不被重定向的路径
+- **不再谎报成功**。`show()` 的返回值只代表「已发起请求」，界面隔 700ms 与 2.5s 各复查一次屏幕上到底有没有键盘；真没有就说明原因（本机无触摸屏 / 键盘服务不可用），而不是笼统的「不可用」。新增 `text_keyboard_no_touch` 提示语，8 种语言齐备
+
+### 测试
+
+- `tests/test_touch_keyboard.py` 重写（28 项）：查语法树确认不再用 `subprocess`/`CreateProcess`、冷机必须先起进程再 toggle、已弹出的键盘不能被 toggle 关掉、TabTip 不出现时必须回落 osk、占位窗口的 0 面积与 cloaked 状态都不算可见
+- `tests/test_text_workflow.py` 新增 `KeyboardRequestTests`（9 项）：报成功但没出现必须说出来，而不是沉默假装成功
+- `tests/test_keyboard_delivery.py` 新增（默认跳过）：离屏平台没有真实 Win32 焦点，所以「外部键盘的字符能否抵达输入控件」只能在真平台验。设 `MYSCREENDRAW_REAL_KEYBOARD=1` 运行
+- **离屏运行禁止启动键盘**。键盘是系统级窗口，无论进程多么 headless 都会落在用户真实屏幕上。`launch_allowed()` 在离屏平台直接拒绝启动（`MYSCREENDRAW_NO_KEYBOARD=1` 可显式关闭）。此前测试会真的往屏幕上弹键盘，也正因如此，真键盘的矩形会和面板定位测试注入的假矩形打架
+
+全套 469 项通过，连续三轮稳定。
+
+## v5.3.1 — 修复 5.3.0 的十个报告问题
 
 5.3.0 带着 381 项通过的测试发布，却有十个问题一上手就撞得到。原因不在数量而在**测试方式**：那 381 项全是直接调方法，没有一项按过鼠标、敲过键、打开过面板。所以没有任何测试发现「根本不存在让按键抵达画布的通路」。本版新增 `tests/test_text_workflow.py`，规则是**只走真实入口**——鼠标事件经 `mousePressEvent`/`mouseMoveEvent`/`mouseReleaseEvent`，按键送给真正持有焦点的控件，面板按钮走它们的处理函数。够不到的功能，用户也够不到。
 
