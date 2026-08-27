@@ -507,7 +507,8 @@ class KeyboardRequestTests(WorkflowCase):
         super().setUp()
         self.kb = self.main.touch_keyboard
         self._saved = {name: getattr(self.kb, name) for name in
-                       ("available", "show", "is_visible", "has_touch", "keyboard_rect")}
+                       ("available", "show", "is_visible", "has_touch", "keyboard_rect",
+                        "escalate", "enforce_single", "backend", "preferred_backend")}
         self.show_calls = []
         self.kb.show = lambda prefer=None: (self.show_calls.append(prefer), True)[1]
 
@@ -537,7 +538,7 @@ class KeyboardRequestTests(WorkflowCase):
         self.kb.is_visible = lambda: False
         self.kb.has_touch = lambda: False
         self.make_box()
-        self.panel._keyboard_settled()
+        self.panel._keyboard_confirm()
         self.pump()
         self.assertEqual(self.hint(), self.main.tr("text_keyboard_no_touch"))
 
@@ -546,7 +547,7 @@ class KeyboardRequestTests(WorkflowCase):
         self.kb.is_visible = lambda: False
         self.kb.has_touch = lambda: True
         self.make_box()
-        self.panel._keyboard_settled()
+        self.panel._keyboard_confirm()
         self.pump()
         self.assertEqual(self.hint(), self.main.tr("text_keyboard_missing"))
 
@@ -555,11 +556,13 @@ class KeyboardRequestTests(WorkflowCase):
         self.kb.has_touch = lambda: True
         self.kb.is_visible = lambda: False
         self.make_box()
-        self.panel._keyboard_settled()
+        self.panel._keyboard_confirm()
         self.pump()
         self.assertNotEqual(self.hint(), "")
         self.kb.is_visible = lambda: True
-        self.panel._keyboard_settled()
+        self.kb.backend = lambda: "osk"
+        self.kb.enforce_single = lambda keep: []
+        self.panel._keyboard_confirm()
         self.pump()
         self.assertEqual(self.hint(), "", "键盘出现后提示没有清掉")
 
@@ -568,7 +571,7 @@ class KeyboardRequestTests(WorkflowCase):
         self.kb.available = lambda: True
         self.kb.is_visible = lambda: True
         self.make_box()
-        self.panel._keyboard_settled()
+        self.panel._keyboard_confirm()
         self.pump()
         self.assertEqual(self.focus_name(), "_TextInputEdit")
 
@@ -579,8 +582,65 @@ class KeyboardRequestTests(WorkflowCase):
         self.make_box()
         self.panel.close_text_input()
         self.pump()
-        self.panel._keyboard_settled()          # 不该抛
+        self.panel._keyboard_confirm()          # 不该抛
         self.pump()
+
+    def test_a_dismissed_keyboard_is_not_dragged_back(self):
+        """出现过又不见了＝用户自己关的。硬拉回来最惹人烦，讲课中途更是如此。"""
+        self.kb.available = lambda: True
+        self.kb.has_touch = lambda: False
+        self.kb.is_visible = lambda: True
+        self.kb.backend = lambda: "osk"
+        self.kb.enforce_single = lambda keep: []
+        self.make_box()
+        self.panel._keyboard_watch_tick()        # 观察到键盘在屏上
+        self.pump()
+        self.assertTrue(self.panel._keyboard_was_seen)
+        self.kb.is_visible = lambda: False       # 用户关掉
+        self.kb.backend = lambda: None
+        escalations = []
+        self.kb.escalate = lambda tried=(): (escalations.append(tried), None)[1]
+        self.panel._keyboard_escalate()
+        self.pump()
+        self.assertEqual(escalations, [], "用户关掉键盘后又被硬拉回来")
+
+    def test_a_dismissed_keyboard_is_not_reported_as_unavailable(self):
+        """用户关掉键盘不等于键盘弹不出来，报「不可用」是彻底的误导。"""
+        self.kb.available = lambda: True
+        self.kb.has_touch = lambda: False
+        self.kb.is_visible = lambda: True
+        self.kb.backend = lambda: "osk"
+        self.kb.enforce_single = lambda keep: []
+        self.make_box()
+        self.panel._keyboard_watch_tick()
+        self.pump()
+        self.kb.is_visible = lambda: False
+        self.kb.backend = lambda: None
+        self.panel._keyboard_confirm()
+        self.pump()
+        self.assertEqual(self.hint(), "", "把用户主动关闭误报成了「弹不出来」")
+
+    def test_the_watch_timer_stops_when_the_panel_closes(self):
+        """面板关了还在轮询就是白烧 CPU。"""
+        self.kb.available = lambda: True
+        self.kb.is_visible = lambda: False
+        self.make_box()
+        self.assertTrue(self.panel._keyboard_watch.isActive())
+        self.panel.close_text_input()
+        self.pump()
+        self.assertFalse(self.panel._keyboard_watch.isActive())
+
+    def test_only_one_keyboard_is_left_on_screen(self):
+        """两个键盘同时在屏上，教室里没法用。"""
+        self.kb.available = lambda: True
+        self.kb.is_visible = lambda: True
+        kept = []
+        self.kb.enforce_single = lambda keep: (kept.append(keep), [])[1]
+        self.kb.backend = lambda: "osk"
+        self.make_box()
+        self.panel._keyboard_watch_tick()
+        self.pump()
+        self.assertIn("osk", kept, "没有强制只保留一个键盘")
 
     def test_the_no_touch_message_exists_in_all_eight_languages(self):
         import i18n
@@ -591,6 +651,169 @@ class KeyboardRequestTests(WorkflowCase):
             self.assertIn("text_keyboard_no_touch", table, f"{lang} 缺新提示语")
             self.assertTrue(table["text_keyboard_no_touch"].strip(),
                             f"{lang} 的新提示语是空的")
+
+
+class ImeCompositionTests(WorkflowCase):
+    """5.3.3: the soft keyboard must not fight the hardware keyboard's IME.
+
+    Reported as "both keyboards conflict with the physical keyboard and the IME,
+    input goes haywire, neither side can type". Two distinct causes:
+
+    * A raw printable key arriving mid-composition was inserted as a character. A
+      soft keyboard injects keys that do not go through the IME, so they interleave
+      with a composition in progress: typing "ni" and tapping a soft key produced
+      "z你" in the formula cell instead of "你".
+    * _refocus_input() called activateWindow() unconditionally -- even when the
+      input already had focus. activateWindow() posts WM_ACTIVATE, and Windows
+      cancels the composition of a window losing focus. It ran six times in the
+      first three seconds a box was open, right when the user is typing their first
+      word, so CJK input could not commit anything at all.
+    """
+
+    def widget(self):
+        return self.panel.text_input
+
+    def preedit(self, text):
+        from PyQt6.QtGui import QInputMethodEvent
+        from PyQt6.QtWidgets import QApplication
+
+        QApplication.sendEvent(self.widget(), QInputMethodEvent(text, []))
+        self.pump()
+
+    def commit(self, text):
+        from PyQt6.QtGui import QInputMethodEvent
+        from PyQt6.QtWidgets import QApplication
+
+        event = QInputMethodEvent("", [])
+        event.setCommitString(text)
+        QApplication.sendEvent(self.widget(), event)
+        self.pump()
+
+    def raw_key(self, ch):
+        from PyQt6.QtCore import QEvent
+        from PyQt6.QtGui import QKeyEvent
+        from PyQt6.QtWidgets import QApplication
+
+        QApplication.sendEvent(self.widget(), QKeyEvent(
+            QEvent.Type.KeyPress, ord(ch.upper()),
+            self.main.Qt.KeyboardModifier.NoModifier, ch))
+        self.pump()
+
+    def formula_box(self):
+        item = self.make_box()
+        self.canvas.text_insert_structure("frac")
+        self.canvas.text_backspace()
+        self.panel.text_input.load_from(item)
+        self.pump()
+        return item
+
+    def test_composition_state_is_tracked(self):
+        """Qt 不提供「是否正在组字」的查询，必须自己跟。"""
+        self.make_box()
+        self.assertFalse(self.widget().composing())
+        self.preedit("ni")
+        self.assertTrue(self.widget().composing())
+        self.commit("你")
+        self.assertFalse(self.widget().composing())
+
+    def test_a_soft_key_during_composition_is_not_inserted_in_a_formula(self):
+        """软键盘按键不走输入法，与组字同时到达就会串成「z你」。"""
+        item = self.formula_box()
+        self.preedit("ni")
+        self.raw_key("z")
+        self.commit("你")
+        text = formula.plain_text(item.get("formula"))
+        self.assertNotIn("z", text, f"组字期间的原始按键被插进了公式：{text}")
+        self.assertIn("你", text)
+
+    def test_typing_still_works_after_a_composition_ends(self):
+        """修组字串味不能把普通打字也一起挡掉。"""
+        item = self.formula_box()
+        self.preedit("ni")
+        self.commit("你")
+        self.raw_key("p")
+        self.raw_key("q")
+        text = formula.plain_text(item.get("formula"))
+        self.assertIn("pq", text, f"组字结束后打不出字了：{text}")
+
+    def test_losing_focus_clears_composition(self):
+        """失焦时 Windows 已取消组字，状态不清会让下次按键被误当成组字期间。"""
+        from PyQt6.QtCore import QEvent
+        from PyQt6.QtGui import QFocusEvent
+        from PyQt6.QtWidgets import QApplication
+
+        self.make_box()
+        self.preedit("ni")
+        self.assertTrue(self.widget().composing())
+        # 直接送 FocusOut：离屏平台上没有别的窗口可接焦点时 clearFocus() 不一定发出
+        # 这个事件，那是平台限制，测的应该是我们的处理。
+        QApplication.sendEvent(self.widget(), QFocusEvent(QEvent.Type.FocusOut))
+        self.pump()
+        self.assertFalse(self.widget().composing())
+
+    def test_opening_a_box_clears_stale_composition(self):
+        """新开的框不该继承上一个框的组字状态，否则第一下按键会被丢掉。"""
+        self.make_box()
+        self.preedit("ni")
+        self.assertTrue(self.widget().composing())
+        item = self.make_box(x1=100, y1=100, x2=300, y2=200)
+        self.assertFalse(self.widget().composing(),
+                         "新框继承了上一个框的组字状态，第一个字会打不出来")
+        self.raw_key("a")
+        self.assertIn("a", item.get("text", ""), "新框第一下按键被丢掉了")
+
+    def require_focus(self):
+        """确保输入控件真的持有焦点，否则跳过。
+
+        离屏平台在隐藏过活动窗口之后会留下「无活动窗口」状态，activateWindow() 无法
+        恢复，焦点于是留在主面板的按钮上——那是平台限制，不是被测代码的问题。这两个
+        用例检验的是「焦点已正确时不许抢激活」，前提不成立就没什么可测的。
+        """
+        self.canvas.activateWindow()
+        self.pump()
+        self.panel.text_panel.activateWindow()
+        self.pump()
+        self.widget().setFocus(self.main.Qt.FocusReason.OtherFocusReason)
+        self.pump()
+        if not self.widget().hasFocus():
+            self.skipTest("离屏平台无法把焦点交给文字面板")
+
+    def count_activations(self, action):
+        calls = []
+        original = self.panel.text_panel.activateWindow
+        self.panel.text_panel.activateWindow = lambda: (calls.append(1), original())[1]
+        try:
+            action()
+            self.pump()
+        finally:
+            self.panel.text_panel.activateWindow = original
+        return calls
+
+    def test_refocus_does_nothing_when_focus_is_already_correct(self):
+        """无条件抢激活会取消组字——焦点本来就对时必须一步都不做。"""
+        self.make_box()
+        self.require_focus()
+        result = []
+        calls = self.count_activations(
+            lambda: result.append(self.panel._refocus_input()))
+        self.assertEqual(result, [True])
+        self.assertEqual(calls, [], "焦点已正确却还抢了一次激活，会毁掉组字")
+
+    def test_pressing_panel_buttons_never_steals_activation(self):
+        """按钮全是 NoFocus，焦点不会跑掉，所以按它们不该触发任何激活动作。"""
+        self.make_box()
+        self.require_focus()
+
+        def press_everything():
+            self.panel._text_backspace()
+            self.panel._text_newline()
+            self.panel._symbol_pressed("π")
+            self.panel._toggle_symbol_group("greek")
+            self.panel._symbol_pressed("α")
+
+        calls = self.count_activations(press_everything)
+        self.assertEqual(calls, [], f"按面板按钮抢了 {len(calls)} 次激活，组字会被取消")
+        self.assertTrue(self.widget().hasFocus())
 
 
 class LayeringTests(WorkflowCase):

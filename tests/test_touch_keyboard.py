@@ -181,16 +181,24 @@ class LaunchMechanismTests(_LauncherHarness):
         self.assertEqual(self.com_calls, [], "键盘已在屏幕上，不该再 toggle")
         self.assertEqual(self.launched, [], "键盘已在屏幕上，不该再启动进程")
 
-    def test_show_falls_back_to_osk_when_tabtip_never_appears(self):
-        """没有数字化仪的台式机上 TabTip 报成功却永不出现，必须退到 osk。"""
+    def test_tabtip_that_never_appears_is_replaced_only_on_escalation(self):
+        """TabTip 报成功却永不出现时要能退到 osk——但那是升级步骤的事，不是 show()。
+
+        5.3.2 在一次 show() 里就连开两个，于是屏幕上先后出现两个键盘。
+        """
+        saved = touch_keyboard.has_touch
         touch_keyboard.has_touch = lambda: True
         try:
-            result = touch_keyboard.show()
+            self.assertTrue(touch_keyboard.show())
+            self.assertTrue(any("TabTip" in p for p in self.launched))
+            self.assertFalse(any("osk" in p.lower() for p in self.launched),
+                             "show() 阶段就启动了备用后端，两个键盘会同时出现")
+            self.launched.clear()
+            self.assertEqual(touch_keyboard.escalate(tried=("tabtip",)), "osk")
+            self.assertTrue(any("osk" in p.lower() for p in self.launched),
+                            f"升级后仍未回落到 osk：{self.launched}")
         finally:
-            del touch_keyboard.has_touch
-        self.assertTrue(result)
-        self.assertTrue(any("osk" in p.lower() for p in self.launched),
-                        f"未回落到 osk，只启动了 {self.launched}")
+            touch_keyboard.has_touch = saved
 
     def test_a_desktop_without_touch_reaches_for_osk_first(self):
         saved = touch_keyboard.has_touch
@@ -207,6 +215,111 @@ class LaunchMechanismTests(_LauncherHarness):
         self.raise_window("osk")
         self.assertTrue(touch_keyboard.show())
         self.assertEqual(self.launched, [], "已经有键盘了，不该再启动")
+
+
+class SingleKeyboardTests(_LauncherHarness):
+    """5.3.3: exactly one keyboard, ever.
+
+    The reported symptom was TabTip appearing, vanishing, and osk arriving in its
+    place. Cause: show() waited only 0.6s for a backend to draw itself and then
+    launched the other one too. A cold-started osk needs about 1.0s, so the cutoff
+    sat right at the real launch time -- warm it looked fine, cold two keyboards
+    showed up.
+    """
+
+    def test_show_does_not_try_the_second_backend(self):
+        """换后端是调用方在定时器上做的事，不能在一次 show() 里连开两个。"""
+        touch_keyboard.show(prefer="tabtip")
+        osk_launches = [p for p in self.launched if "osk" in p.lower()]
+        self.assertEqual(osk_launches, [],
+                         f"一次 show() 就启动了备用后端：{self.launched}")
+
+    def test_show_does_not_block_waiting_for_a_window(self):
+        """show() 不能在 UI 线程上干等键盘画出来。"""
+        import time as _time
+
+        touch_keyboard.LAUNCH_SETTLE_S = 5.0    # 若还在等，这里会明显超时
+        start = _time.monotonic()
+        touch_keyboard.show(prefer="osk")
+        self.assertLess(_time.monotonic() - start, 1.0, "show() 在阻塞等待")
+
+    def test_escalate_tries_the_other_backend(self):
+        touch_keyboard.escalate(tried=("tabtip",))
+        self.assertTrue(any("osk" in p.lower() for p in self.launched),
+                        f"升级没有去试 osk：{self.launched}")
+
+    def test_escalate_does_not_retry_what_already_failed(self):
+        touch_keyboard.escalate(tried=("tabtip", "osk"))
+        self.assertEqual(self.launched, [], "两个都试过了还在重试")
+
+    def test_escalate_is_a_no_op_when_a_keyboard_is_up(self):
+        self.raise_window("osk")
+        self.assertIsNone(touch_keyboard.escalate(tried=("tabtip",)))
+        self.assertEqual(self.launched, [])
+
+    def test_enforce_single_closes_the_other_backend(self):
+        import ctypes
+
+        posted = []
+        saved = ctypes.windll
+        self.raise_window("osk")
+        self.raise_window("tabtip")
+        try:
+            class _U:
+                @staticmethod
+                def PostMessageW(hwnd, msg, wparam, lparam):
+                    posted.append(msg)
+                    return 1
+
+            class _W:
+                user32 = _U()
+
+            ctypes.windll = _W()
+            closed = touch_keyboard.enforce_single("osk")
+        finally:
+            ctypes.windll = saved
+        self.assertEqual(closed, ["tabtip"], "没有收掉另一个键盘")
+        self.assertTrue(posted)
+
+    def test_enforce_single_leaves_the_keeper_alone(self):
+        import ctypes
+
+        posted = []
+        saved = ctypes.windll
+        self.raise_window("osk")
+        try:
+            class _U:
+                @staticmethod
+                def PostMessageW(hwnd, msg, wparam, lparam):
+                    posted.append(msg)
+                    return 1
+
+            class _W:
+                user32 = _U()
+
+            ctypes.windll = _W()
+            closed = touch_keyboard.enforce_single("osk")
+        finally:
+            ctypes.windll = saved
+        self.assertEqual(closed, [], "把要保留的那个也关了")
+        self.assertEqual(posted, [])
+
+    def test_a_touch_machine_prefers_tabtip(self):
+        saved = touch_keyboard.has_touch
+        touch_keyboard.has_touch = lambda: True
+        try:
+            self.assertEqual(touch_keyboard.preferred_backend(), "tabtip")
+        finally:
+            touch_keyboard.has_touch = saved
+
+    def test_a_desktop_prefers_osk(self):
+        """无数字化仪时 TabTip 永远不会出现，先等它就是纯粹的延迟。"""
+        saved = touch_keyboard.has_touch
+        touch_keyboard.has_touch = lambda: False
+        try:
+            self.assertEqual(touch_keyboard.preferred_backend(), "osk")
+        finally:
+            touch_keyboard.has_touch = saved
 
 
 class VisibilityTests(_LauncherHarness):

@@ -2,6 +2,20 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # 版本号：见 version.py（唯一来源，代码里统一用 APP_VERSION）
 # 更新日志：
+# v5.3.3：只弹一个键盘，且不再和输入法打架
+# 1. 两个键盘先后出现：show() 等 0.6s 没见键盘就把另一个后端也启动了，而冷启动的 osk
+#    实测约 1.0s——门槛正好卡在真实耗时上，暖启动看着正常、冷启动就冒出两个
+# 2. show() 改为只发起一次请求即返回；换后端交给调用方定时器（3s 升级、6s 才下结论），
+#    并用 enforce_single() 兜底：观察到一个出现就立刻关掉另一个
+# 3. 无触摸的机器直接用 osk（TabTip 在那里永远不出现），键盘出现时间 3.98s → 0.48s；
+#    有触摸的机器仍首选 TabTip
+# 4. 用户关掉的键盘不再被硬拉回来、也不再误报「弹不出来」（150ms 轮询代替定点采样）
+# 5. 抢激活会取消输入法组字：_refocus_input() 原先无条件 activateWindow()+processEvents()，
+#    头 3s 内跑 6 次，正好在用户敲第一个词的时候——中日韩一个字也提交不出来。焦点已正确
+#    就立即返回
+# 6. 组字期间的原始按键不再被当字符插入（软键盘注入不走输入法，实测串成「z你」）
+# 7. 新开文本框不再继承上一个框的组字状态（否则第一下按键被丢掉）
+#
 # v5.3.2：屏幕键盘真的能弹出来了
 # 1. 键盘按钮此前在任何冷启动的机器上都不可能工作，能用纯属侥幸——本次登录会话里若已有
 #    别的东西启动过 TabTip 就正常，重启后同一份代码一次也不行
@@ -5605,9 +5619,17 @@ class _TextInputEdit(QTextEdit):
         super().__init__()
         self._panel = panel
         self._syncing = False
+        self._composing = False     # 输入法组字进行中（见 inputMethodEvent）
         self.setAcceptRichText(False)
         self.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         self.textChanged.connect(self._on_text_changed)
+
+    def composing(self):
+        """是否正在输入法组字。
+
+        面板上的按钮要据此避让：抢焦点会让 Windows 取消组字。
+        """
+        return self._composing
 
     def _canvas(self):
         return getattr(self._panel, "canvas", None)
@@ -5621,6 +5643,9 @@ class _TextInputEdit(QTextEdit):
 
     def load_from(self, item):
         """把画布对象的内容灌进来，不触发回写。"""
+        # 换一个框＝没有任何组字在进行。这个标志若留着上一个框的 True，下一次按键会被
+        # 当成「组字期间」而丢掉——表现为新开的文本框第一下打不出字。
+        self._composing = False
         self._syncing = True
         try:
             self.setPlainText("" if item.get("formula") else str(item.get("text", "")))
@@ -5654,7 +5679,11 @@ class _TextInputEdit(QTextEdit):
                 event.accept()      # 公式里换行没有意义
                 return
             text = event.text()
-            if text and text.isprintable():
+            # 组字进行中不能把原始按键当字符插进去：那正是拼音字母和汉字一起冒出来的
+            # 原因（实测「ni」组字中途来一个 z，格子里变成「z你」）。软键盘注入的按键
+            # 不走输入法，与实体键盘的组字同时到达，就会这样互相串。组字期间只认
+            # inputMethodEvent 的提交串。
+            if text and text.isprintable() and not self._composing:
                 canvas.text_insert(text)
                 event.accept()
                 return
@@ -5666,15 +5695,26 @@ class _TextInputEdit(QTextEdit):
         super().keyPressEvent(event)
 
     def inputMethodEvent(self, event):
-        """输入法提交：公式模式下要把已提交的串转进当前格子。"""
+        """输入法事件：跟踪组字状态，并在公式模式下把提交串转进当前格子。
+
+        组字状态必须在这里维护：Qt 不提供「是否正在组字」的查询接口，而面板上的按钮
+        和焦点管理都需要知道——组字期间抢焦点会让 Windows 直接取消这次组字。
+        """
+        committed = event.commitString()
+        # 有未提交的预编辑串＝还在组字；提交或清空预编辑＝组字结束。
+        self._composing = bool(event.preeditString()) and not committed
         canvas = self._canvas()
         if canvas is not None and self._formula_mode():
-            committed = event.commitString()
             if committed:
                 canvas.text_insert(committed)
             event.accept()
             return
         super().inputMethodEvent(event)
+
+    def focusOutEvent(self, event):
+        # 失焦时 Windows 已经取消了组字，状态不清掉会让下一次按键被误当成组字期间。
+        self._composing = False
+        super().focusOutEvent(event)
 
 
 class ControlPanel(QWidget):
@@ -5957,6 +5997,9 @@ class ControlPanel(QWidget):
         self._laser_fade = QTimer(self)
         self._laser_fade.setInterval(33)
         self._laser_fade.timeout.connect(self._tick_laser_fade)
+        # 文字面板开着时盯屏幕键盘：只在面板打开期间跑（见 _request_keyboard）
+        self._keyboard_watch = QTimer(self)
+        self._keyboard_watch.timeout.connect(self._keyboard_watch_tick)
         self._resize_to_content()
         self.timer = QTimer(self); self.timer.timeout.connect(self.heartbeat_refresh); self.timer.start(self.HEARTBEAT_MS)
 
@@ -8743,6 +8786,10 @@ class ControlPanel(QWidget):
         panel = getattr(self, "text_panel", None)
         if panel is not None and panel.isVisible():
             panel.hide()
+        watch = getattr(self, "_keyboard_watch", None)
+        if watch is not None:
+            watch.stop()
+        self._keyboard_was_seen = False
         touch_keyboard.hide()
 
     def _build_text_panel(self):
@@ -8916,11 +8963,21 @@ class ControlPanel(QWidget):
         panel = getattr(self, "text_panel", None)
         if getattr(self, "text_input", None) is None or panel is None or not panel.isVisible():
             return False
-        # activateWindow() 是异步的：同一帧紧接着 setFocus() 时窗口还没激活，焦点会
-        # 留在【上一个活动窗口】里（实测是主面板的某个按钮），触摸键盘于是把字符送给
-        # 了那个按钮。所以「激活 → 跑一轮事件 → 聚焦」要循环几次直到真的拿到焦点。
+        # 已经拿着焦点就立刻返回，绝不多做一步。原先无条件走下面那套「激活 + 跑事件
+        # 循环」，即使焦点本来就在也照跑——而 activateWindow() 会发 WM_ACTIVATE，
+        # Windows 收到后【取消失焦窗口正在进行的输入法组字】。文字面板打开后头 3 秒
+        # 内这套动作要跑 6 次（打开、两个复查定时器、符号按钮…），正好落在用户敲第一
+        # 个词的时间里，于是中日韩输入法一个字也提交不出来，实体键盘和软键盘都「打不
+        # 出字」。
+        if self.text_input.hasFocus():
+            return True
+        # 组字进行中就别碰焦点：抢一次激活就毁掉这次组字。焦点没丢的话上面已经返回，
+        # 走到这里说明焦点确实不在，此时组字本来也已经断了，救不回来。
         for _ in range(3):
             if not panel.isActiveWindow():
+                # activateWindow() 是异步的：同一帧紧接着 setFocus() 时窗口还没激活，
+                # 焦点会留在【上一个活动窗口】里（实测是主面板的某个按钮），键盘于是
+                # 把字符送给了那个按钮。所以「激活 → 跑一轮事件 → 聚焦」要循环几次。
                 panel.raise_()
                 panel.activateWindow()
                 QApplication.processEvents()
@@ -8959,13 +9016,20 @@ class ControlPanel(QWidget):
         self._request_keyboard()
         self._refocus_input()
 
+    # 键盘从「发起请求」到真正画出来要多久：冷启动的 osk 实测约 1.0s，TabTip 更慢。
+    # 5.3.2 用 0.6s 就判失败并去启动另一个后端，于是两个键盘先后出现——教室里不可用。
+    KEYBOARD_ESCALATE_MS = 3000     # 首选后端没出现，才换备用
+    KEYBOARD_CONFIRM_MS = 6000      # 备用也没出现，才下「弹不出来」的结论
+    # 盯键盘的轮询间隔。要够密才不会漏掉「出现过又被用户关掉」——漏掉就会把用户主动
+    # 关闭误判成弹不出来。两次 FindWindowW 而已，150ms 一轮的开销可以忽略。
+    KEYBOARD_WATCH_MS = 150
+
     def _request_keyboard(self):
-        """调起屏幕键盘，并在它真的出现之后才下结论。
+        """调起屏幕键盘：首选 TabTip，起不来才退 osk，且绝不同时出现两个。
 
         不能用 show() 的返回值当成功判据：在没有触摸数字化仪的台式机上，TabTip 的
         COM Toggle 每次都返回成功，然后窗口一直保持 DWM cloaked——键盘根本不出现。
-        所以这里只把 show() 当作「已经发起请求」，隔一会儿再看屏幕上到底有没有东西，
-        没有才提示。提示也说清原因，而不是笼统的「不可用」。
+        所以 show() 只代表「已发起请求」，之后按真实启动耗时分级复查。
         """
         if not hasattr(self, "text_hint_label"):
             return
@@ -8973,24 +9037,75 @@ class ControlPanel(QWidget):
             self.text_hint_label.setText(tr("text_keyboard_missing"))
             return
         self.text_hint_label.setText("")
-        touch_keyboard.show()
-        # 壳层拉起进程要时间；分两次复查，早的那次让面板尽快躲开键盘。
-        QTimer.singleShot(700, self._keyboard_settled)
-        QTimer.singleShot(2500, self._keyboard_settled)
+        # 首选 TabTip，但在没有数字化仪的机器上它永远不会出现（COM 报成功、窗口恒
+        # cloaked），先等它 3 秒纯属浪费——教室里那 3 秒就是「坏了」。
+        first = touch_keyboard.preferred_backend()
+        self._keyboard_tried = (first,)
+        self._keyboard_was_seen = False
+        touch_keyboard.show(prefer=first)
+        # 轮询而不是定点采样：键盘出现的时刻不可预测（冷启动 osk 约 1s、暖启动 0.4s），
+        # 而用户可能在任何时刻关掉它。定点只查一次的话，「出现过」这件事会被漏掉，
+        # 于是把用户主动关闭误判成「弹不出来」，报出彻底误导的提示。
+        self._keyboard_watch.start(self.KEYBOARD_WATCH_MS)
+        QTimer.singleShot(self.KEYBOARD_ESCALATE_MS, self._keyboard_escalate)
+        QTimer.singleShot(self.KEYBOARD_CONFIRM_MS, self._keyboard_confirm)
 
-    def _keyboard_settled(self):
-        """键盘该出现的时刻到了：重排面板，或说明为什么没出现。"""
+    def _keyboard_panel_open(self):
         panel = getattr(self, "text_panel", None)
-        if panel is None or not panel.isVisible():
+        return panel is not None and panel.isVisible()
+
+    def _keyboard_watch_tick(self):
+        """盯着键盘：出现了就记下并让面板躲开，面板关了就停表。"""
+        if not self._keyboard_panel_open():
+            self._keyboard_watch.stop()
             return
-        if touch_keyboard.is_visible():
+        backend = touch_keyboard.backend()
+        if backend is None:
+            return
+        if not getattr(self, "_keyboard_was_seen", False):
+            self._keyboard_was_seen = True
             self.text_hint_label.setText("")
             self._position_text_panel()
-        elif not touch_keyboard.has_touch():
+        # 只要有一个出现了，另一个立刻收掉。两个键盘同时在屏上，教室里没法用。
+        closed = touch_keyboard.enforce_single(backend)
+        if closed:
+            self._position_text_panel()
+
+    def _keyboard_appeared(self):
+        """键盘出现了就让面板躲开它；没出现什么也不做——还没到下结论的时候。"""
+        self._keyboard_watch_tick()
+
+    def _keyboard_escalate(self):
+        """首选后端过了 3 秒还没出现，换备用后端再试一次。"""
+        if not self._keyboard_panel_open():
+            return
+        if touch_keyboard.is_visible():
+            self._keyboard_appeared()
+            return
+        if getattr(self, "_keyboard_was_seen", False):
+            # 键盘出现过又不见了＝用户自己关掉的。硬把它拉回来最惹人烦，尤其在讲课
+            # 中途；用户想要就按面板上的键盘按钮。
+            return
+        tried = getattr(self, "_keyboard_tried", ("tabtip",))
+        started = touch_keyboard.escalate(tried=tried)
+        if started:
+            self._keyboard_tried = tuple(tried) + (started,)
+            QTimer.singleShot(900, self._keyboard_appeared)
+
+    def _keyboard_confirm(self):
+        """两个后端都试过、都没出现：这才是真的弹不出来，说明原因。"""
+        if not self._keyboard_panel_open():
+            return
+        if touch_keyboard.is_visible():
+            self._keyboard_appeared()
+            return
+        if getattr(self, "_keyboard_was_seen", False):
+            # 曾经出现过，是用户关掉的，不是弹不出来。报「不可用」会是彻头彻尾的误导。
+            return
+        if not touch_keyboard.has_touch():
             self.text_hint_label.setText(tr("text_keyboard_no_touch"))
         else:
             self.text_hint_label.setText(tr("text_keyboard_missing"))
-        self._refocus_input()
 
     def _text_done(self):
         if self.canvas:
