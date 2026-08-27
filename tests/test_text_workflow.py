@@ -816,6 +816,209 @@ class ImeCompositionTests(WorkflowCase):
         self.assertTrue(self.widget().hasFocus())
 
 
+class RestackTests(WorkflowCase):
+    """5.3.4: the main panel must never end up above the formula panel.
+
+    bind_topmost_stack pinned each window above the *canvas*, which says nothing
+    about the panels' order relative to each other -- whoever Windows happened to
+    raise last won. A real click activates a window and Windows re-stacks the other
+    windows owned by the same owner, so the main panel could land on top of the
+    symbol panel; force_topmost cannot pull it back, because for a window already
+    in the topmost band HWND_TOPMOST does not change sibling order.
+    """
+
+    def test_the_stack_puts_the_text_panel_first(self):
+        self.make_box()
+        stack = self.panel.floating_stack()
+        self.assertIs(stack[0], self.panel.text_panel,
+                      "文字/公式面板不在最上，符号按钮会被压住点不到")
+
+    def test_the_main_panel_is_last_in_the_stack(self):
+        self.make_box()
+        stack = self.panel.floating_stack()
+        self.assertIs(stack[-1], self.panel,
+                      "主面板不在最下，任何临时浮窗都会被它压住")
+
+    def test_the_text_panel_outranks_the_select_panel(self):
+        self.make_box()
+        self.type_text("x")
+        self.panel.position_selection_panel(self.canvas.selection_bounds())
+        self.pump()
+        stack = self.panel.floating_stack()
+        if self.panel.select_panel not in stack:
+            self.skipTest("选中面板未显示")
+        self.assertLess(stack.index(self.panel.text_panel),
+                        stack.index(self.panel.select_panel))
+
+    def test_hidden_panels_are_not_in_the_stack(self):
+        """隐藏的窗口排进去会白费 SetWindowPos，也会打乱可见窗口的相对顺序。"""
+        self.make_box()
+        for widget in self.panel.floating_stack():
+            self.assertTrue(widget.isVisible())
+
+    def test_restacking_orders_every_adjacent_pair(self):
+        """必须逐对 force_above，只把每个窗口钉到画布之上决定不了彼此高低。"""
+        self.make_box()
+        calls = []
+        original = self.main.force_above
+        self.main.force_above = lambda a, b: calls.append((a, b))
+        try:
+            self.panel.restack_floatings()
+        finally:
+            self.main.force_above = original
+        stack = self.panel.floating_stack()
+        self.assertEqual(len(calls), max(0, len(stack) - 1),
+                         "相邻对数与调用次数不符，链没排全")
+
+    def test_restacking_survives_a_dead_window(self):
+        """浮窗可能刚被销毁；排链不能因此抛异常打断心跳。"""
+        self.make_box()
+        original = self.panel.floating_stack
+        self.panel.floating_stack = lambda: [None]
+        try:
+            self.panel.restack_floatings()      # 不该抛
+        finally:
+            self.panel.floating_stack = original
+
+    def test_ownership_is_chained_through_the_stack(self):
+        """归属链是结构保证：Windows 保证被归属窗口永远在其 owner 之上。
+
+        只靠事后 restack 不够——真实点击引发的重排是异步的，矫正总晚一步，那一步就是
+        用户看到的「主面板闪到符号面板上面」。把顺序写进归属关系，就没有需要矫正的时刻。
+        """
+        self.make_box()
+        pairs = []
+        original = self.main.set_window_owner
+        self.main.set_window_owner = lambda a, b: pairs.append((a, b))
+        try:
+            self.panel.chain_floating_owners()
+        finally:
+            self.main.set_window_owner = original
+        stack = self.panel.floating_stack()
+        # 相邻对 + 链尾归属画布
+        self.assertEqual(len(pairs), max(0, len(stack) - 1) + 1,
+                         "归属链没有串全")
+
+    def test_the_chain_tail_still_belongs_to_the_canvas(self):
+        """链尾脱离画布的话，整条链会跌出置顶层、被普通窗口盖住。"""
+        self.make_box()
+        pairs = []
+        original = self.main.set_window_owner
+        self.main.set_window_owner = lambda a, b: pairs.append((a, b))
+        try:
+            self.panel.chain_floating_owners()
+        finally:
+            self.main.set_window_owner = original
+        self.assertEqual(pairs[-1][1], int(self.canvas.winId()),
+                         "链尾没有归属画布")
+
+    def test_chaining_survives_a_dead_window(self):
+        self.make_box()
+        original = self.panel.floating_stack
+        self.panel.floating_stack = lambda: [None, None]
+        try:
+            self.panel.chain_floating_owners()      # 不该抛
+        finally:
+            self.panel.floating_stack = original
+
+    def test_opening_the_panel_rebuilds_the_chain(self):
+        """归属链随可见集合变化，而 _bound_key 只在 winId 变化时重绑。"""
+        called = []
+        original = self.panel.chain_floating_owners
+        self.panel.chain_floating_owners = lambda: called.append(1)
+        try:
+            self.make_box()
+        finally:
+            self.panel.chain_floating_owners = original
+        self.assertTrue(called, "打开文字面板没有重建归属链")
+
+    def test_the_heartbeat_restacks(self):
+        self.make_box()
+        called = []
+        original = self.panel.restack_floatings
+        self.panel.restack_floatings = lambda: called.append(1)
+        try:
+            self.panel.heartbeat_refresh()
+        finally:
+            self.panel.restack_floatings = original
+        self.assertTrue(called, "心跳没有排链，被点乱的层级要等到下次操作才恢复")
+
+    def test_clicking_a_symbol_group_restacks_immediately(self):
+        """等下一拍心跳就是用户看到的那一下「闪」。"""
+        self.make_box()
+        called = []
+        original = self.panel.restack_floatings
+        self.panel.restack_floatings = lambda: called.append(1)
+        try:
+            self.panel._toggle_symbol_group("greek")
+            self.pump()
+        finally:
+            self.panel.restack_floatings = original
+        self.assertTrue(called, "点符号分组后没有立即排链")
+
+
+class ImeDigitTests(WorkflowCase):
+    """5.3.4: digits must be typeable, including as the first keystroke.
+
+    Reported as "the keyboard cannot type digits first, only letters". Cause: a
+    dangling IME composition leaves the candidate window open, and a digit then
+    selects candidate N instead of inserting a digit. Verified against the real
+    Chinese IME: pressing 'a' then '5' produced 阿, not "a5". So the IME's own
+    composition state -- not just our flag -- has to be cleared when a box opens.
+    """
+
+    def test_opening_a_box_resets_the_ime(self):
+        called = []
+        original = self.main.cancel_ime_composition
+        self.main.cancel_ime_composition = lambda hwnd: called.append(hwnd)
+        try:
+            self.make_box()
+        finally:
+            self.main.cancel_ime_composition = original
+        self.assertTrue(called, "开框没有清输入法组字，数字键会被候选选择吃掉")
+
+    def test_reset_ime_clears_the_composition_flag(self):
+        from PyQt6.QtGui import QInputMethodEvent
+        from PyQt6.QtWidgets import QApplication
+
+        self.make_box()
+        widget = self.panel.text_input
+        QApplication.sendEvent(widget, QInputMethodEvent("ni", []))
+        self.pump()
+        self.assertTrue(widget.composing())
+        widget.reset_ime()
+        self.assertFalse(widget.composing())
+
+    def test_reset_ime_never_raises(self):
+        """输入法上下文可能拿不到（无 IME、策略限制）；不能因此抛异常。"""
+        self.make_box()
+        self.assertIsNone(self.panel.text_input.reset_ime())
+
+    def test_cancel_ime_composition_is_total(self):
+        self.assertFalse(self.main.cancel_ime_composition(0))
+        self.assertIsInstance(self.main.cancel_ime_composition(
+            int(self.panel.text_input.winId())), bool)
+
+    def test_a_digit_is_accepted_as_the_first_character(self):
+        item = self.make_box()
+        self.type_text("5")
+        self.assertEqual(item.get("text", ""), "5", "数字打不进去")
+
+    def test_a_whole_number_types_correctly(self):
+        item = self.make_box()
+        self.type_text("2026")
+        self.assertEqual(item.get("text", ""), "2026")
+
+    def test_digits_work_in_formula_mode(self):
+        item = self.make_box()
+        self.canvas.text_insert_structure("frac")
+        self.canvas.text_backspace()
+        self.panel.text_input.load_from(item)
+        self.pump()
+        self.type_text("7")
+        self.assertIn("7", formula.plain_text(item.get("formula")))
+
+
 class LayeringTests(WorkflowCase):
     """Bug 9: the formula panel must sit above the select panel, below the main menu."""
 
