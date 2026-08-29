@@ -9,8 +9,8 @@ ROOT = Path(__file__).resolve().parents[1]
 class ReleaseMetadataTests(unittest.TestCase):
     def test_version_is_stable_release(self):
         from version import VERSION, APP_VERSION
-        self.assertEqual(VERSION, "5.4.0")
-        self.assertEqual(APP_VERSION, "v5.4.0")
+        self.assertEqual(VERSION, "5.4.1")
+        self.assertEqual(APP_VERSION, "v5.4.1")
 
     def test_no_beta_references_remain_in_release_sources(self):
         paths = [

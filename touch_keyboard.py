@@ -98,6 +98,11 @@ SHUTDOWN_GRACE_S = 1.2
 # opened before us is deliberately left alone -- see shutdown().
 _OUR_PIDS = set()
 
+# Monotonic deadline for a COM toggle owed to a TabTip we just launched, or None.
+# See show_tabtip(): the settle time is waited out by pump() on the caller's
+# timer instead of by sleeping on the UI thread.
+_toggle_due_at = None
+
 
 class _GUID(ctypes.Structure):
     _fields_ = [("Data1", wintypes.DWORD), ("Data2", wintypes.WORD),
@@ -335,18 +340,6 @@ def _invoke_com():
             pass
 
 
-def _wait_showing(timeout=LAUNCH_SETTLE_S):
-    """Poll briefly for a keyboard window to appear. Returns the backend or None."""
-    deadline = time.monotonic() + max(0.0, timeout)
-    while True:
-        name = backend()
-        if name:
-            return name
-        if time.monotonic() >= deadline:
-            return None
-        time.sleep(0.05)
-
-
 def show_tabtip():
     """Best effort at raising TabTip. Returns True if the attempt was made.
 
@@ -354,19 +347,75 @@ def show_tabtip():
     is registered, so a cold machine needs the exe launched *first* and the COM
     toggle issued after. Conversely the toggle is a *toggle*, so it must not be
     fired when the keyboard is already showing.
+
+    Never blocks. 5.4.0 slept up to LAUNCH_SETTLE_S here waiting for the freshly
+    launched process to register ITipInvocation -- on the UI thread, inside the
+    text-edit entry path, so every re-entry froze the whole app for that long on
+    exactly the touch devices where this branch runs. The wait is now owed rather
+    than taken: :func:`pump` issues the toggle from the caller's existing timer.
     """
     if backend() == "tabtip":
         return True
-    launched = False
     if not tabtip_running():
         path = _first_existing(TABTIP_PATHS)
         if path and _shell_execute(path):
-            launched = True
-            # Give the process time to register ITipInvocation before toggling.
-            _wait_showing(LAUNCH_SETTLE_S)
+            _owe_toggle()
+            return True
+        return False
+    return _invoke_com()
+
+
+def _owe_toggle():
+    """Record that a COM toggle is due once the launched process is ready."""
+    global _toggle_due_at
+    _toggle_due_at = time.monotonic() + LAUNCH_SETTLE_S
+
+
+def _forget_toggle():
+    """Drop any owed toggle. Called whenever the keyboard is dismissed.
+
+    Without this a toggle owed from an earlier request would fire after the user
+    closed the panel and pop the keyboard back onto their screen.
+    """
+    global _toggle_due_at
+    _toggle_due_at = None
+
+
+def toggle_pending():
+    """Whether a deferred TabTip toggle is still owed."""
+    return _toggle_due_at is not None
+
+
+def cancel_pending():
+    """Drop an owed toggle without touching any window.
+
+    For callers that stop wanting a keyboard before it arrived -- closing the text
+    panel, say. Issuing the toggle at that point would raise a keyboard onto a UI
+    that no longer has anywhere to put the characters.
+    """
+    was_owed = _toggle_due_at is not None
+    _forget_toggle()
+    return was_owed
+
+
+def pump():
+    """Issue any owed TabTip toggle. Cheap when idle; safe to call on a timer.
+
+    Returns True if a toggle was issued by this call. Replaces the blocking wait
+    that used to sit inside :func:`show_tabtip`.
+    """
+    global _toggle_due_at
+    if _toggle_due_at is None:
+        return False
     if backend() == "tabtip":
-        return True
-    return _invoke_com() or launched
+        _toggle_due_at = None       # already up; the toggle would dismiss it
+        return False
+    # Toggle as soon as the process is up, or give up waiting at the deadline and
+    # try anyway -- a failed toggle is recoverable, a permanently owed one is not.
+    if not tabtip_running() and time.monotonic() < _toggle_due_at:
+        return False
+    _toggle_due_at = None
+    return _invoke_com()
 
 
 def show_osk():
@@ -413,8 +462,12 @@ def enforce_single(keep):
 def show(prefer=None):
     """Ask for an on-screen keyboard. Returns True if an attempt was made.
 
-    Deliberately does NOT wait to see whether the keyboard appeared, and does NOT
-    try the second backend. Both of those were wrong in 5.3.2:
+    Never blocks: no waiting for the keyboard to appear, no second backend. 5.3.2
+    got both wrong, and 5.4.0 half-undid the first -- this docstring already said
+    "does NOT wait" while show_tabtip() slept up to LAUNCH_SETTLE_S on the UI
+    thread, which is what made entering a text box freeze for the better part of a
+    second on touch devices. The settle wait now runs on the caller's timer via
+    :func:`pump`. Why waiting here was wrong in the first place:
 
     A cold-started osk.exe needs about a second to draw itself, and the old code
     gave up after 0.6s and launched the other backend too -- so the user saw
@@ -461,6 +514,10 @@ def escalate(tried=("tabtip",)):
         # The previous backend did not appear, but it may still have a process or a
         # cloaked window hanging around. Clear it before bringing up another.
         enforce_single(name)
+        if name != "tabtip":
+            # Moving on from TabTip: drop any toggle still owed to it, or it fires
+            # later and puts a second keyboard on screen beside this one.
+            _forget_toggle()
         started = show_tabtip() if name == "tabtip" else show_osk()
         if started:
             return name
@@ -469,6 +526,9 @@ def escalate(tried=("tabtip",)):
 
 def hide():
     """Close whichever on-screen keyboard is up."""
+    # A toggle owed from an earlier request must not survive a dismissal, or it
+    # would fire afterwards and put the keyboard back on screen by itself.
+    _forget_toggle()
     closed = False
     for _name, hwnd in _candidates():
         if not _showing(hwnd):
@@ -555,6 +615,7 @@ def shutdown():
     """
     closed, terminated = [], []
     try:
+        _forget_toggle()
         closed = _close_all_windows()
         ours = [pid for pid in _OUR_PIDS if _process_alive(pid)]
         if ours:

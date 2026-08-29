@@ -109,12 +109,17 @@ class _LauncherHarness(unittest.TestCase):
         touch_keyboard.launch_allowed = lambda: True
         touch_keyboard._window_rect = lambda hwnd: (0, 500, 1200, 300)
         self._settle = touch_keyboard.LAUNCH_SETTLE_S
-        touch_keyboard.LAUNCH_SETTLE_S = 0.0
+        # 保留真实的 settle 时间。5.4.0 之前这里被清成 0.0，于是
+        # test_show_does_not_block_waiting_for_a_window 把自己要测的那个等待中和掉了，
+        # 代码在 UI 线程上睡 0.6 秒它照样通过。要测「不阻塞」，就得让真实时长在场。
+        touch_keyboard._forget_toggle()
 
     def tearDown(self):
         for name, value in self._saved.items():
             setattr(touch_keyboard, name, value)
         touch_keyboard.LAUNCH_SETTLE_S = self._settle
+        # 欠着的 toggle 是模块级状态，不清掉会漏进下一个用例。
+        touch_keyboard._forget_toggle()
 
     # --- fakes ---
     def _fake_launch(self, path):
@@ -237,13 +242,28 @@ class SingleKeyboardTests(_LauncherHarness):
                          f"一次 show() 就启动了备用后端：{self.launched}")
 
     def test_show_does_not_block_waiting_for_a_window(self):
-        """show() 不能在 UI 线程上干等键盘画出来。"""
+        """show() 不能在 UI 线程上干等键盘画出来。
+
+        这个用例在 5.4.0 里是空的：它走的是 ``prefer="osk"``，而 osk 那条路本来就不等：
+        阻塞发生在 show_tabtip() 里。名字对、断言对、测的分支不对，于是代码在文字编辑
+        入口上冻 0.6 秒它一路绿灯。要测就必须让 tabtip 的冷启动分支真的执行——
+        键盘没在跑（self.windows 为空），进程刚被启动，正是要等 ITipInvocation 的那一刻。
+        """
         import time as _time
 
         touch_keyboard.LAUNCH_SETTLE_S = 5.0    # 若还在等，这里会明显超时
         start = _time.monotonic()
-        touch_keyboard.show(prefer="osk")
-        self.assertLess(_time.monotonic() - start, 1.0, "show() 在阻塞等待")
+        touch_keyboard.show(prefer="tabtip")
+        elapsed = _time.monotonic() - start
+        self.assertTrue(any("TabTip" in p for p in self.launched),
+                        f"没走到冷启动分支，等待根本没被测到：{self.launched}")
+        self.assertLess(elapsed, 1.0, f"show() 在阻塞等待，耗了 {elapsed * 1000:.0f}ms")
+
+    def test_a_cold_launch_leaves_the_toggle_owed_instead_of_waiting(self):
+        """冷启动后 COM toggle 是「欠着」的，由调用方的定时器还，不是在这里睡出来。"""
+        self.assertTrue(touch_keyboard.show_tabtip())
+        self.assertEqual(self.com_calls, [], "进程刚起来，ITipInvocation 还没注册就 toggle 了")
+        self.assertTrue(touch_keyboard.toggle_pending(), "toggle 既没发也没欠，键盘不会出现")
 
     def test_escalate_tries_the_other_backend(self):
         touch_keyboard.escalate(tried=("tabtip",))
@@ -601,6 +621,109 @@ class ShutdownWindowScopeTests(_LauncherHarness):
                          "这个用例假设 hide() 会跳过被 cloak 的窗口")
         self.assertTrue(touch_keyboard._close_all_windows(),
                         "shutdown 必须连被 cloak 的窗口一起关")
+
+
+class OwedToggleTests(_LauncherHarness):
+    """5.4.1: settle 时间是「欠着的」而不是「睡出来的」。
+
+    5.4.0 在 show_tabtip() 里用 time.sleep 轮询等 TabTip 注册 ITipInvocation，位置是
+    UI 线程、文字编辑入口内，于是每次进入编辑都冻住最多 LAUNCH_SETTLE_S。现在改成记一个
+    单调截止时间，由调用方本来就有的定时器调 pump() 来还。
+
+    这样做多出三条必须堵上的失败路径，每条都对应一个用例：面板已经关了（补上就等于
+    自己把键盘弹到没有输入框的界面上）、升级去了 osk（不清就是 5.3.3 的两个键盘）、
+    以及程序退出。
+    """
+
+    def test_pump_is_a_cheap_no_op_when_nothing_is_owed(self):
+        """它挂在 150ms 的定时器上，空转必须不碰 COM。"""
+        self.assertFalse(touch_keyboard.pump())
+        self.assertEqual(self.com_calls, [])
+
+    def test_pump_issues_the_toggle_once_the_process_is_up(self):
+        touch_keyboard.show_tabtip()
+        self.assertEqual(self.com_calls, [])
+        # 进程起来了：窗口类找得到，但还没显示出来。
+        self.windows[(touch_keyboard.TABTIP_CORE_CLASS,
+                      touch_keyboard.TABTIP_CORE_TITLE)] = False
+        self.assertTrue(touch_keyboard.pump(), "进程已就绪，pump 却没把欠的 toggle 发出去")
+        self.assertEqual(len(self.com_calls), 1)
+
+    def test_the_toggle_is_issued_only_once(self):
+        touch_keyboard.show_tabtip()
+        self.windows[(touch_keyboard.TABTIP_CORE_CLASS,
+                      touch_keyboard.TABTIP_CORE_TITLE)] = False
+        touch_keyboard.pump()
+        self.assertFalse(touch_keyboard.pump(), "同一笔欠账被还了两次，第二次会把键盘收起来")
+        self.assertEqual(len(self.com_calls), 1)
+        self.assertFalse(touch_keyboard.toggle_pending())
+
+    def test_pump_waits_for_the_process_but_not_past_the_deadline(self):
+        """进程一直起不来也不能永远欠着：到点就试一次，失败可恢复，永欠不可。"""
+        touch_keyboard.LAUNCH_SETTLE_S = 5.0
+        touch_keyboard.show_tabtip()
+        self.assertFalse(touch_keyboard.pump(), "进程还没起来就 toggle，ITipInvocation 还没注册")
+        touch_keyboard.LAUNCH_SETTLE_S = 0.0
+        touch_keyboard._owe_toggle()            # 截止时间就是现在
+        self.assertTrue(touch_keyboard.pump(), "到了截止时间还在等，键盘永远不会出现")
+
+    def test_a_keyboard_that_arrived_on_its_own_cancels_the_toggle(self):
+        """toggle 是切换：键盘已经在屏幕上时再发一次等于把它收起来。"""
+        touch_keyboard.show_tabtip()
+        self.raise_window("tabtip")
+        self.assertFalse(touch_keyboard.pump(), "键盘已经出来了还 toggle，等于自己把它关掉")
+        self.assertEqual(self.com_calls, [])
+        self.assertFalse(touch_keyboard.toggle_pending())
+
+    def test_cancel_pending_drops_the_toggle_without_touching_windows(self):
+        """面板关了就得撤销欠账，否则键盘会自己弹到一个没有输入框的界面上。"""
+        touch_keyboard.show_tabtip()
+        self.assertTrue(touch_keyboard.cancel_pending())
+        self.assertFalse(touch_keyboard.pump())
+        self.assertEqual(self.com_calls, [], "撤销后仍然发了 toggle")
+
+    def test_hide_drops_an_owed_toggle(self):
+        """收起键盘后欠账不能存活，否则它稍后触发又把键盘放回屏幕。"""
+        touch_keyboard.show_tabtip()
+        touch_keyboard.hide()
+        self.assertFalse(touch_keyboard.toggle_pending())
+        self.assertFalse(touch_keyboard.pump())
+        self.assertEqual(self.com_calls, [])
+
+    def test_escalating_to_osk_drops_the_toggle_owed_to_tabtip(self):
+        """5.3.3 的两个键盘会以另一种方式回来：欠给 TabTip 的 toggle 在 osk 起来后触发。"""
+        touch_keyboard.show_tabtip()
+        self.assertTrue(touch_keyboard.toggle_pending())
+        self.assertEqual(touch_keyboard.escalate(tried=("tabtip",)), "osk")
+        self.assertFalse(touch_keyboard.toggle_pending(),
+                         "已经换到 osk 了还欠着 TabTip 的 toggle，两个键盘会同时出现")
+
+    def test_shutdown_drops_an_owed_toggle(self):
+        touch_keyboard.show_tabtip()
+        touch_keyboard.shutdown()
+        self.assertFalse(touch_keyboard.toggle_pending())
+
+    def test_no_blocking_sleep_remains_in_the_launch_path(self):
+        """按语法树查：启动路径上不能再有 sleep。
+
+        LAUNCH_SETTLE_S 现在只该被 _owe_toggle 当算术用。shutdown() 里那个 sleep 是
+        拆卸时的宽限轮询，不在 UI 交互路径上，所以按函数名白名单放过。
+        """
+        import ast
+
+        source = Path(touch_keyboard.__file__).read_text(encoding="utf-8")
+        allowed = {"shutdown", "_terminate"}
+        offenders = []
+        for node in ast.walk(ast.parse(source)):
+            if not isinstance(node, ast.FunctionDef) or node.name in allowed:
+                continue
+            for inner in ast.walk(node):
+                if (isinstance(inner, ast.Call)
+                        and isinstance(inner.func, ast.Attribute)
+                        and inner.func.attr == "sleep"):
+                    offenders.append(f"{node.name}():{inner.lineno}")
+        self.assertEqual(offenders, [],
+                         f"启动路径上还有阻塞睡眠，文字编辑入口会被冻住：{offenders}")
 
 
 class ExitWiringTests(unittest.TestCase):
