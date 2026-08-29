@@ -528,6 +528,9 @@ class KeyboardRequestTests(WorkflowCase):
                         "escalate", "enforce_single", "backend", "preferred_backend")}
         self.show_calls = []
         self.kb.show = lambda prefer=None: (self.show_calls.append(prefer), True)[1]
+        # 5.4.1 的欠账 toggle：用例要替换这两个，得留着原件放回去。
+        self._saved_pump = self.kb.pump
+        self._saved_cancel = self.kb.cancel_pending
 
     def tearDown(self):
         for name, value in self._saved.items():
@@ -658,6 +661,42 @@ class KeyboardRequestTests(WorkflowCase):
         self.panel._keyboard_watch_tick()
         self.pump()
         self.assertIn("osk", kept, "没有强制只保留一个键盘")
+
+    def test_the_watch_timer_pays_the_owed_toggle(self):
+        """5.4.1：settle 等待从 UI 线程搬到了这个定时器上，没人调 pump 就等于键盘不出来。
+
+        show_tabtip() 不再自己睡着等 TabTip 注册 ITipInvocation，而是记一笔欠账。这笔账
+        只由盯键盘的定时器来还——所以「有人调 pump」本身就是功能的一部分，不是优化。
+        """
+        self.kb.available = lambda: True
+        self.kb.is_visible = lambda: False
+        pumped = []
+        self.kb.pump = lambda: (pumped.append(True), False)[1]
+        try:
+            self.make_box()
+            self.panel._keyboard_watch_tick()
+        finally:
+            self.kb.pump = self._saved_pump
+        self.assertTrue(pumped, "定时器没有调 pump()，欠着的 toggle 永远没人还，键盘不会出现")
+
+    def test_closing_the_panel_cancels_the_owed_toggle(self):
+        """面板关了要撤销欠账而不是补上——补上就是把键盘弹到一个没有输入框的界面上。"""
+        self.kb.available = lambda: True
+        self.kb.is_visible = lambda: False
+        cancelled = []
+        pumped = []
+        self.kb.cancel_pending = lambda: (cancelled.append(True), False)[1]
+        self.kb.pump = lambda: (pumped.append(True), False)[1]
+        try:
+            self.make_box()
+            self.panel.close_text_input()
+            pumped.clear()
+            self.panel._keyboard_watch_tick()
+        finally:
+            self.kb.cancel_pending = self._saved_cancel
+            self.kb.pump = self._saved_pump
+        self.assertTrue(cancelled, "面板关了却没撤销欠账，键盘会自己弹出来")
+        self.assertEqual(pumped, [], "面板已经关了还去还这笔账，键盘会弹到没有输入框的界面上")
 
     def test_the_no_touch_message_exists_in_all_eight_languages(self):
         import i18n
@@ -831,6 +870,41 @@ class ImeCompositionTests(WorkflowCase):
         calls = self.count_activations(press_everything)
         self.assertEqual(calls, [], f"按面板按钮抢了 {len(calls)} 次激活，组字会被取消")
         self.assertTrue(self.widget().hasFocus())
+
+    def test_refocus_does_not_reenter_itself(self):
+        """5.4.1：重试循环里跑 processEvents，会把这个函数就地再叫进来。
+
+        每一层最多跑 6 次 processEvents，嵌套下去就是几十次事件派发，表现为按键卡住
+        不动。真机上编辑时 500ms 一拍的心跳都会走到这里（重排抢掉焦点），叠上打字的
+        按键事件，重入是常态而不是边界情况——离屏测不出来是因为 SetWindowPos 是空操作，
+        焦点从来没被抢走。所以直接从函数内部模拟重入。
+        """
+        self.make_box()
+        self.require_focus()
+        panel = self.panel
+        depth = {"current": 0, "max": 0}
+        real_loop = type(panel)._refocus_input_loop
+
+        def counting_loop(self_, target):
+            depth["current"] += 1
+            depth["max"] = max(depth["max"], depth["current"])
+            try:
+                # processEvents 会做的事：在本函数返回前把外层函数再叫一次。
+                panel._refocus_input()
+                return real_loop(self_, target)
+            finally:
+                depth["current"] -= 1
+
+        # 焦点必须是「不对」的，否则 _refocus_input 在前面就返回了，根本走不到循环。
+        widget = self.widget()
+        widget.clearFocus()
+        type(panel)._refocus_input_loop = counting_loop
+        try:
+            panel._refocus_input()
+        finally:
+            type(panel)._refocus_input_loop = real_loop
+        self.assertEqual(depth["max"], 1,
+                         f"_refocus_input 嵌套了 {depth['max']} 层，事件派发会成倍膨胀")
 
 
 class RestackTests(WorkflowCase):
@@ -1449,6 +1523,58 @@ class CaretBlinkTests(WorkflowCase):
     def test_the_caret_tick_never_raises_without_an_edit(self):
         self.canvas.end_text_edit()
         self.canvas._caret_tick()       # 不应抛异常
+
+    def test_the_blink_erases_where_it_last_drew(self):
+        """5.4.1：失效区必须覆盖上一次真正画出的那条，不能只覆盖现在算出来的。
+
+        用户截图里屏幕上同时有两条红竖线。只失效「当前」光标位置的代码有个隐含前提：
+        上一条一定还在同一个位置，或者一定有别人来重绘它。光标一移动这个前提就没了。
+        """
+        item = self.make_box()
+        self.type_text("abcdef")
+        self.canvas.set_caret(0)
+        before = self.canvas.caret_rect(item)
+        # 画一次，让 _caret_painted 记下屏幕上真实存在的那条。
+        from PyQt6.QtGui import QPixmap, QPainter
+
+        pixmap = QPixmap(800, 600)
+        painter = QPainter(pixmap)
+        try:
+            self.canvas._draw_caret(painter, item)
+        finally:
+            painter.end()
+        self.assertIsNotNone(self.canvas._caret_painted, "没记下画在哪，就没法擦掉它")
+        # 光标跳到行尾，然后闪一拍：这一拍必须把旧位置也算进失效区。
+        self.canvas.set_caret(6)
+        after = self.canvas.caret_rect(item)
+        self.assertGreater(abs(after.x() - before.x()), 4.0,
+                           "两个位置太近，这个用例分不出旧区有没有被覆盖")
+        areas = self.record_repaints(self.canvas._caret_tick)
+        self.assertTrue(areas, "闪烁一拍什么都没失效")
+        painted = areas[0][0]
+        for name, rect in (("旧", before), ("新", after)):
+            self.assertTrue(painted.contains(rect.toAlignedRect()),
+                            f"{name}光标位置 {rect} 不在失效区 {painted} 内，残影会留在屏幕上")
+
+    def test_leaving_edit_mode_erases_the_last_caret(self):
+        """退出编辑不擦掉最后画的那条，它就一直留在画布上。"""
+        item = self.make_box()
+        self.type_text("abc")
+        from PyQt6.QtGui import QPixmap, QPainter
+
+        pixmap = QPixmap(800, 600)
+        painter = QPainter(pixmap)
+        try:
+            self.canvas._draw_caret(painter, item)
+        finally:
+            painter.end()
+        drawn = self.canvas._caret_painted
+        self.assertIsNotNone(drawn)
+        areas = self.record_repaints(self.canvas.stop_caret_blink)
+        self.assertTrue(areas, "停止闪烁时没有擦掉最后画出的光标")
+        self.assertTrue(areas[0][0].contains(drawn.toAlignedRect()),
+                        f"最后那条光标 {drawn} 没被失效区 {areas[0][0]} 覆盖")
+        self.assertIsNone(self.canvas._caret_painted)
 
     def test_the_caret_draws_in_both_modes(self):
         from PyQt6.QtGui import QPixmap, QPainter

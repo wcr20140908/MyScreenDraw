@@ -1780,6 +1780,9 @@ class DrawingCanvas(QMainWindow):
         self.caret_offset = 0
         self.caret_visible = True       # 闪烁相位
         self._caret_timer = None
+        # 上一次真正画出来的光标矩形（画布坐标），擦除时连它一起失效。见
+        # invalidate_caret：只报新位置的话，旧位置那条竖线会留在屏幕上。
+        self._caret_painted = None
         self.last_point = None
         self.current_stroke_id = None
         self.current_stroke_widths = []
@@ -2689,6 +2692,9 @@ class DrawingCanvas(QMainWindow):
         self.restart_caret_blink()
         self.sync_text_panel()
         self.repaint_text_item(item)
+        # 框的重绘范围通常已经盖住了光标的新旧两处，但不能指望它一定盖住（旋转、
+        # 缩放、DPI 取整都会让边上漏一条）。多报一次并集，代价是几百个像素。
+        self.invalidate_caret(item)
         return True
 
     def sync_text_panel(self):
@@ -2718,9 +2724,18 @@ class DrawingCanvas(QMainWindow):
         timer.start(self.CARET_BLINK_MS)
 
     def stop_caret_blink(self):
+        """停表，并把最后画出来的那条光标擦掉。
+
+        只停表是不够的：退出编辑时屏幕上可能正停在「亮」的相位，那条竖线会一直留在
+        画布上——编辑早就结束了，光标却还在闪过的地方立着。
+        """
         if self._caret_timer is not None:
             self._caret_timer.stop()
         self.caret_visible = True
+        painted = getattr(self, "_caret_painted", None)
+        if painted is not None:
+            self._caret_painted = None
+            self.update(QRectF(painted).adjusted(-3.0, -3.0, 3.0, 3.0).toAlignedRect())
 
     def _caret_tick(self):
         item = self.editing_text_item()
@@ -2728,12 +2743,9 @@ class DrawingCanvas(QMainWindow):
             self.stop_caret_blink()
             return
         self.caret_visible = not self.caret_visible
-        rect = self.caret_rect(item)
-        if rect is None:
-            return
         # 只刷光标那一条，不是整框：闪烁是每半秒一次的常驻开销，刷整框等于让编辑态
-        # 永远在重绘。
-        self.update(rect.adjusted(-3.0, -3.0, 3.0, 3.0).toAlignedRect())
+        # 永远在重绘。连上一次画出来的位置一起报，见 invalidate_caret。
+        self.invalidate_caret(item)
 
     def caret_rect(self, item):
         """插入点在画布坐标里的矩形（已含旋转/缩放）；拿不到位置则返回 None。"""
@@ -5005,11 +5017,17 @@ class DrawingCanvas(QMainWindow):
 
         画在局部坐标里再走同一套 translate/rotate/scale，光标才会跟着框一起旋转、
         缩放；用画布坐标画的竖线在旋转过的框里会明显歪掉。
+
+        画完记下这一条在画布坐标里的位置。擦除不能依赖「别人顺手会刷到这里」——
+        5.4.0 就是这么假设的（框的重绘范围一定覆盖光标），一旦不成立，旧位置那条
+        竖线就留在屏幕上，用户会同时看到两个光标。记下来，下次失效时连旧的一起报。
         """
         if not self.caret_visible:
+            self._caret_painted = None
             return
         local = self.caret_local_rect(item)
         if local is None:
+            self._caret_painted = None
             return
         painter.save()
         painter.setTransform(self.text_transform(item), True)
@@ -5017,6 +5035,29 @@ class DrawingCanvas(QMainWindow):
         painter.setBrush(QColor(item["color"]))
         painter.drawRect(local)
         painter.restore()
+        self._caret_painted = self.text_transform(item).mapRect(QRectF(local))
+
+    def invalidate_caret(self, item=None):
+        """让光标那一条失效，连上一次真正画出来的位置一起。
+
+        并集是关键：光标从 A 移到 B 时，只报 B 的话 A 那条没人擦。框的重绘通常会
+        盖住 A，但「通常」不是「一定」——旋转、缩放、溢出、DPI 取整都能让它漏出去，
+        而漏出去的表现就是屏幕上多一个光标。这里不去分辨是哪种情况，直接两条都报。
+        """
+        if item is None:
+            item = self.editing_text_item()
+        area = None
+        painted = getattr(self, "_caret_painted", None)
+        if painted is not None:
+            area = QRectF(painted)
+        if item is not None:
+            current = self.caret_rect(item)
+            if current is not None:
+                area = QRectF(current) if area is None else area.united(QRectF(current))
+        if area is None:
+            return False
+        self.update(area.adjusted(-3.0, -3.0, 3.0, 3.0).toAlignedRect())
+        return True
 
     def _draw_radical(self, painter, box):
         """根号：钩部 + 上横线用 QPainterPath 画，不靠字体的 √ 字形。
@@ -9921,6 +9962,21 @@ class ControlPanel(QWidget):
         # 出字」。
         if self.text_input.hasFocus():
             return True
+        # 不重入。下面要跑 processEvents，那会把排队的事件（含按键、心跳、重绘）就地
+        # 处理掉，于是这个函数可能在自己还没返回时被再叫一次，每层又各跑 6 次
+        # processEvents——嵌套几层下去就是几十次，表现为按键卡住不动。真机上编辑时
+        # 每 500ms 一拍心跳都会走到这里（重排会抢掉焦点），叠上打字的按键事件，
+        # 重入是常态而不是边界情况。
+        if getattr(self, "_refocusing", False):
+            return self.text_input.hasFocus()
+        self._refocusing = True
+        try:
+            return self._refocus_input_loop(panel)
+        finally:
+            self._refocusing = False
+
+    def _refocus_input_loop(self, panel):
+        """_refocus_input 的实际重试循环，重入保护之内。"""
         # 组字进行中就别碰焦点：抢一次激活就毁掉这次组字。焦点没丢的话上面已经返回，
         # 走到这里说明焦点确实不在，此时组字本来也已经断了，救不回来。
         for _ in range(3):
@@ -10006,10 +10062,19 @@ class ControlPanel(QWidget):
         return panel is not None and panel.isVisible()
 
     def _keyboard_watch_tick(self):
-        """盯着键盘：出现了就记下并让面板躲开，面板关了就停表。"""
+        """盯着键盘：出现了就记下并让面板躲开，面板关了就停表。
+
+        顺带替 touch_keyboard 把欠着的 COM toggle 补上。5.4.0 是在 show_tabtip()
+        里 sleep 等进程就绪的，那一等落在 UI 线程、落在进编辑的路上——触摸设备每次
+        进框都要卡上大半秒。等待挪到这拍心跳上，进编辑那一下就不再阻塞。
+        """
         if not self._keyboard_panel_open():
+            # 面板已经关了，欠着的 toggle 必须取消而不是补上——补上就等于自己把键盘
+            # 弹到一个没有输入面板的界面上。
+            touch_keyboard.cancel_pending()
             self._keyboard_watch.stop()
             return
+        touch_keyboard.pump()
         backend = touch_keyboard.backend()
         if backend is None:
             return
