@@ -68,6 +68,8 @@ class WorkflowCase(unittest.TestCase):
         c.selected_ids = set()
         c.editing_text_id = None
         c.editing_slot = None
+        c.caret_offset = 0
+        c.stop_caret_blink()
         c.text_drag_start = None
         c.text_drag_rect = None
         self.panel.close_text_input()
@@ -188,6 +190,21 @@ class WorkflowCase(unittest.TestCase):
 
     def texts(self):
         return [t.get("text", "") for t in self.canvas.text_items]
+
+    def record_repaints(self, action):
+        """Run `action` and return the argument tuples passed to canvas.update().
+
+        Patched on the instance, not the class: QWidget.update is a C++ slot wrapper,
+        and assigning it back onto the class leaves an unbound descriptor that every
+        later test trips over.
+        """
+        areas = []
+        self.canvas.update = lambda *a: areas.append(a)
+        try:
+            action()
+        finally:
+            del self.canvas.update
+        return areas
 
 
 class KeyboardInputTests(WorkflowCase):
@@ -1229,6 +1246,879 @@ class FormulaWorkflowTests(WorkflowCase):
             self.canvas.draw_text_item(painter, item, editing=True)
         finally:
             painter.end()
+
+
+class CaretEditingTests(WorkflowCase):
+    """5.4.0 request: "符号面板上的文字应该光标点在哪就编辑哪".
+
+    Before this, every keystroke appended and backspace always removed the last
+    character, no matter where the user had clicked. These drive it the way a user
+    does -- click on the canvas, type on the keyboard -- rather than calling
+    set_caret directly, because the click-to-offset mapping is the part that breaks.
+    """
+
+    def caret_x(self, item, offset):
+        """Canvas x of the caret at `offset`, for aiming a click."""
+        self.canvas.caret_offset = offset
+        rect = self.canvas.caret_rect(item)
+        self.assertIsNotNone(rect, "拿不到插入点矩形")
+        return rect.center().x(), rect.center().y()
+
+    def test_a_new_box_starts_with_the_caret_at_the_end(self):
+        item = self.make_box()
+        self.type_text("abc")
+        self.assertEqual(self.canvas.caret_offset, 3)
+
+    def test_clicking_mid_text_then_typing_inserts_there(self):
+        item = self.make_box()
+        self.type_text("abd")
+        x, y = self.caret_x(item, 2)
+        self.click(int(round(x)), int(round(y)))
+        self.type_text("c")
+        self.assertEqual(item["text"], "abcd")
+
+    def test_clicking_mid_text_then_backspacing_deletes_there(self):
+        item = self.make_box()
+        self.type_text("abxc")
+        x, y = self.caret_x(item, 3)
+        self.click(int(round(x)), int(round(y)))
+        self.type_key(self.main.Qt.Key.Key_Backspace)
+        self.assertEqual(item["text"], "abc")
+
+    def test_clicking_before_the_first_character_puts_the_caret_at_zero(self):
+        item = self.make_box(300, 300, 560, 420)
+        self.type_text("abc")
+        self.click(302, 306)
+        self.assertEqual(self.canvas.caret_offset, 0)
+        self.type_text("Z")
+        self.assertEqual(item["text"], "Zabc")
+
+    def test_clicking_past_the_last_character_puts_the_caret_at_the_end(self):
+        item = self.make_box(300, 300, 560, 420)
+        self.type_text("ab")
+        self.click(550, 306)
+        self.assertEqual(self.canvas.caret_offset, 2)
+
+    def test_the_caret_lands_on_the_line_that_was_clicked(self):
+        """自动换行让行号不能从 text 里数出来——软换行在原文里没有字符。"""
+        item = self.make_box(300, 300, 420, 460)
+        self.type_text("一二三四五六七八九十")
+        lines = self.canvas.text_lines(item)
+        self.assertGreater(len(lines), 1, "没有发生换行，这个用例没测到东西")
+        metrics = self.canvas.text_metrics(self.canvas.text_font(item))
+        y = 300 + self.canvas.TEXT_PAD + metrics.lineSpacing() * 1.5
+        self.click(305, int(round(y)))
+        row, _column = self.canvas.caret_line_column(item)
+        self.assertEqual(row, 1)
+
+    def test_delete_removes_the_character_after_the_caret(self):
+        item = self.make_box()
+        self.type_text("abxc")
+        x, y = self.caret_x(item, 2)
+        self.click(int(round(x)), int(round(y)))
+        self.type_key(self.main.Qt.Key.Key_Delete)
+        self.assertEqual(item["text"], "abc")
+
+    def test_arrow_keys_move_the_caret(self):
+        item = self.make_box()
+        self.type_text("abc")
+        self.type_key(self.main.Qt.Key.Key_Left)
+        self.type_key(self.main.Qt.Key.Key_Left)
+        self.type_text("Z")
+        self.assertEqual(item["text"], "aZbc")
+
+    def test_typing_in_a_formula_inserts_at_the_caret(self):
+        item = self.make_box()
+        self.panel._symbol_pressed(("!frac", "a/b"))
+        self.type_text("13")
+        self.type_key(self.main.Qt.Key.Key_Left)
+        self.type_text("2")
+        self.assertEqual(formula.plain_text(item["formula"]), "(123)/()")
+
+    def test_backspace_in_a_formula_deletes_at_the_caret(self):
+        item = self.make_box()
+        self.panel._symbol_pressed(("!frac", "a/b"))
+        self.type_text("1x2")
+        self.type_key(self.main.Qt.Key.Key_Left)
+        self.type_key(self.main.Qt.Key.Key_Backspace)
+        self.assertEqual(formula.plain_text(item["formula"]), "(12)/()")
+
+    def test_a_structure_lands_at_the_caret_inside_a_slot(self):
+        """光标停在 "ab|c" 中间时，分数要落在 ab 和 c 之间，不是追加到最后。"""
+        item = self.make_box()
+        self.panel._symbol_pressed(("!sqrt", "√‾"))
+        self.type_text("ac")
+        self.type_key(self.main.Qt.Key.Key_Left)
+        self.panel._symbol_pressed(("!frac", "x/y"))
+        self.assertEqual(formula.plain_text(item["formula"]), "sqrt(a()/()c)")
+
+    def test_clicking_a_formula_slot_moves_the_caret_into_it(self):
+        item = self.make_box()
+        self.panel._symbol_pressed(("!frac", "a/b"))
+        self.type_text("12")
+        box = self.canvas.formula_box(item)
+        rect = self.canvas.text_local_rect(item)
+        found = None
+        for path, x, y, w, h in formula.slot_rects(box):
+            if path == (0, "den"):
+                found = (x + w / 2.0, y + h / 2.0)
+        self.assertIsNotNone(found, "排版里没有分母这个槽")
+        self.click(int(round(item["pos"].x() + rect.left() + self.canvas.TEXT_PAD + found[0])),
+                   int(round(item["pos"].y() + rect.top() + self.canvas.TEXT_PAD
+                             + box.ascent + found[1])))
+        self.assertEqual(self.canvas.editing_slot, (0, "den"))
+        self.type_text("3")
+        self.assertEqual(formula.plain_text(item["formula"]), "(12)/(3)")
+
+    def test_a_stale_caret_never_drops_a_character(self):
+        """撤销/翻页会让插入点指向已经不存在的位置，此时也不能吞掉用户敲的字。"""
+        item = self.make_box()
+        self.type_text("ab")
+        self.canvas.caret_offset = 999
+        self.type_text("c")
+        self.assertEqual(item["text"], "abc")
+
+    def test_the_caret_survives_a_stale_formula_slot(self):
+        item = self.make_box()
+        self.panel._symbol_pressed(("!frac", "a/b"))
+        self.canvas.editing_slot = (7, "num")       # 不存在的路径
+        self.type_text("z")
+        self.assertIn("z", formula.plain_text(item["formula"]))
+
+    def test_home_and_end_reach_both_ends(self):
+        item = self.make_box()
+        self.type_text("abc")
+        self.canvas.caret_to_line_edge(home=True)
+        self.assertEqual(self.canvas.caret_offset, 0)
+        self.canvas.caret_to_line_edge(home=False)
+        self.assertEqual(self.canvas.caret_offset, 3)
+
+    def test_the_caret_cannot_leave_the_content(self):
+        item = self.make_box()
+        self.type_text("ab")
+        self.assertFalse(self.canvas.move_caret(+5))
+        self.canvas.set_caret(0)
+        self.assertFalse(self.canvas.move_caret(-1))
+        self.assertEqual(self.canvas.caret_offset, 0)
+
+
+class CaretBlinkTests(WorkflowCase):
+    """5.4.0 request: "光标应该闪烁，不该静止"."""
+
+    def test_editing_starts_the_blink(self):
+        self.make_box()
+        self.assertTrue(self.canvas._caret_timer is not None
+                        and self.canvas._caret_timer.isActive(),
+                        "进入编辑态没有起闪烁计时器，光标是静止的")
+
+    def test_the_phase_actually_toggles(self):
+        item = self.make_box()
+        self.type_text("a")
+        first = self.canvas.caret_visible
+        self.canvas._caret_tick()
+        self.assertNotEqual(self.canvas.caret_visible, first)
+        self.canvas._caret_tick()
+        self.assertEqual(self.canvas.caret_visible, first)
+
+    def test_leaving_edit_mode_stops_the_blink(self):
+        self.make_box()
+        self.type_text("x")
+        self.panel._text_done()
+        self.assertFalse(self.canvas._caret_timer.isActive(),
+                         "退出编辑后计时器还在跑，等于每半秒白刷一次屏")
+
+    def test_typing_shows_the_caret_immediately(self):
+        """刚敲完/刚点过必须看得见光标，否则正好落在熄灭那半拍会以为没生效。"""
+        item = self.make_box()
+        self.type_text("a")
+        self.canvas.caret_visible = False
+        self.canvas.set_caret(0)
+        self.assertTrue(self.canvas.caret_visible)
+
+    def test_the_blink_only_repaints_the_caret(self):
+        """闪烁是常驻开销：刷整框等于编辑态永远在重绘。"""
+        item = self.make_box()
+        self.type_text("abc")
+        areas = self.record_repaints(self.canvas._caret_tick)
+        self.assertEqual(len(areas), 1)
+        caret = self.canvas.caret_rect(item)
+        painted = areas[0][0]
+        self.assertLess(painted.width(), caret.width() + 20)
+        self.assertLess(painted.height(), caret.height() + 20)
+
+    def test_the_caret_tick_never_raises_without_an_edit(self):
+        self.canvas.end_text_edit()
+        self.canvas._caret_tick()       # 不应抛异常
+
+    def test_the_caret_draws_in_both_modes(self):
+        from PyQt6.QtGui import QPixmap, QPainter
+
+        for build in (lambda: None, lambda: self.panel._symbol_pressed(("!frac", "a/b"))):
+            with self.subTest(mode=build):
+                item = self.make_box()
+                build()
+                self.type_text("1")
+                pixmap = QPixmap(400, 300)
+                painter = QPainter(pixmap)
+                try:
+                    self.canvas._draw_caret(painter, item)
+                finally:
+                    painter.end()
+                self.canvas.end_text_edit()
+
+
+class SymbolPanelContentTests(WorkflowCase):
+    """5.4.0 report: "打几个字，文本框里出现了，符号面板却没出现".
+
+    In 5.3.x the input widget was deliberately blank in formula mode, so the user saw
+    their characters on the canvas and nothing in the panel.
+    """
+
+    def panel_text(self):
+        return self.panel.text_input.toPlainText()
+
+    def test_plain_text_shows_in_the_panel(self):
+        self.make_box()
+        self.type_text("hello")
+        self.assertEqual(self.panel_text(), "hello")
+
+    def test_formula_characters_show_in_the_panel(self):
+        self.make_box()
+        self.panel._symbol_pressed(("!frac", "a/b"))
+        self.type_text("123")
+        self.assertEqual(self.panel_text(), "123")
+
+    def test_the_panel_shows_the_slot_the_caret_is_in(self):
+        self.make_box()
+        self.panel._symbol_pressed(("!frac", "a/b"))
+        self.type_text("12")
+        self.canvas.editing_slot = (0, "den")
+        self.canvas.set_caret(0)
+        self.type_text("9")
+        self.assertEqual(self.panel_text(), "9")
+
+    def test_a_structure_is_one_placeholder_character_in_the_panel(self):
+        item = self.make_box()
+        self.panel._symbol_pressed(("!sqrt", "√‾"))
+        self.canvas.editing_slot = None
+        self.canvas.set_caret(0)
+        self.panel.text_input.sync_from_canvas()
+        self.assertEqual(self.panel_text(), formula.PLACEHOLDERS["sqrt"])
+
+    def test_the_panel_keeps_up_with_backspace(self):
+        self.make_box()
+        self.panel._symbol_pressed(("!frac", "a/b"))
+        self.type_text("12")
+        self.type_key(self.main.Qt.Key.Key_Backspace)
+        self.assertEqual(self.panel_text(), "1")
+
+    def test_the_panel_keeps_up_with_the_backspace_button(self):
+        self.make_box()
+        self.panel._symbol_pressed(("!frac", "a/b"))
+        self.type_text("12")
+        self.panel._text_backspace()
+        self.pump()
+        self.assertEqual(self.panel_text(), "1")
+
+    def test_the_panel_cursor_follows_a_canvas_click(self):
+        item = self.make_box()
+        self.type_text("abcd")
+        self.canvas.caret_offset = 1
+        rect = self.canvas.caret_rect(item)
+        self.click(int(round(rect.center().x())), int(round(rect.center().y())))
+        self.assertEqual(self.panel.text_input.textCursor().position(), 1)
+
+    def test_moving_the_panel_cursor_moves_the_canvas_caret(self):
+        """反向也要通：在面板里点一下光标，画布插入点跟着走。"""
+        item = self.make_box()
+        self.panel._symbol_pressed(("!frac", "a/b"))
+        self.type_text("123")
+        cursor = self.panel.text_input.textCursor()
+        cursor.setPosition(1)
+        self.panel.text_input.setTextCursor(cursor)
+        self.pump()
+        self.assertEqual(self.canvas.caret_offset, 1)
+        self.type_text("9")
+        self.assertEqual(formula.plain_text(item["formula"]), "(1923)/()")
+
+    def test_the_panel_never_writes_a_placeholder_into_the_formula(self):
+        """占位符只是显示用的：它要是被当成真字符回写，公式里会多出一个 ▨。"""
+        item = self.make_box()
+        self.panel._symbol_pressed(("!sqrt", "√‾"))
+        self.canvas.editing_slot = None
+        self.canvas.set_caret(1)
+        self.panel.text_input.sync_from_canvas()
+        self.type_text("x")
+        self.assertNotIn(formula.PLACEHOLDERS["sqrt"],
+                         formula.plain_text(item["formula"]))
+
+    def test_switching_boxes_reloads_the_panel(self):
+        first = self.make_box(300, 300, 500, 380)
+        self.type_text("one")
+        self.panel._text_done()
+        second = self.make_box(300, 450, 500, 530)
+        self.type_text("two")
+        self.assertEqual(self.panel_text(), "two")
+
+
+class TypingCostTests(WorkflowCase):
+    """5.4.0 report: "且字越多越卡".
+
+    The per-keystroke work was full-scope: whole-screen repaint, whole-page deep
+    copy, whole floating-window restack. These pin the shape of the fix, because a
+    wall-clock assertion would be flaky on a loaded machine.
+    """
+
+    def test_a_keystroke_repaints_only_the_box(self):
+        item = self.make_box(300, 300, 560, 420)
+        self.type_text("abc")
+        areas = self.record_repaints(lambda: self.canvas.text_insert("d"))
+        self.assertTrue(areas, "一个字符都没触发重绘")
+        for call in areas:
+            self.assertTrue(call, "整屏重绘：update() 无参数意味着刷整个画布")
+            painted = call[0]
+            self.assertLess(painted.width(), 700, "重绘范围远大于文本框")
+
+    def test_wrapping_is_computed_once_per_change(self):
+        """text_lines 每键会被问 3 次，入参完全相同——缓存必须命中。"""
+        item = self.make_box()
+        self.type_text("some text here")
+        calls = []
+        canvas_type = self.main.DrawingCanvas
+        original = canvas_type.__dict__["_wrap_paragraph"]
+        inner = original.__func__
+        try:
+            canvas_type._wrap_paragraph = classmethod(
+                lambda cls, *a, **k: (calls.append(1), inner(cls, *a, **k))[1])
+            self.canvas.text_lines(item)
+            self.canvas.text_lines(item)
+            self.canvas.text_lines(item)
+        finally:
+            canvas_type._wrap_paragraph = original
+        self.assertEqual(len(calls), 0, "折行没有缓存，同一内容被反复重算")
+
+    def test_the_layout_is_computed_once_per_change(self):
+        item = self.make_box()
+        self.panel._symbol_pressed(("!frac", "a/b"))
+        self.type_text("12")
+        calls = []
+        original = formula.layout
+        try:
+            formula.layout = lambda *a, **k: (calls.append(1), original(*a, **k))[1]
+            self.canvas.formula_box(item)
+            self.canvas.formula_box(item)
+        finally:
+            formula.layout = original
+        self.assertEqual(len(calls), 0, "公式排版没有缓存")
+
+    def test_changing_content_invalidates_the_layout_cache(self):
+        """缓存漏失效比慢更难查：表现是「打了字公式不变」。"""
+        item = self.make_box()
+        self.panel._symbol_pressed(("!frac", "a/b"))
+        self.type_text("1")
+        before = self.canvas.formula_box(item).w
+        self.type_text("234")
+        self.assertGreater(self.canvas.formula_box(item).w, before)
+
+    def test_changing_content_invalidates_the_wrap_cache(self):
+        item = self.make_box()
+        self.type_text("a")
+        before = len(self.canvas.text_lines(item))
+        self.type_text("一二三四五六七八九十一二三四五六七八九十")
+        self.assertGreater(len(self.canvas.text_lines(item)), before)
+
+    def test_wrapping_stays_linear_in_length(self):
+        """O(n²) 折行就是「越打越卡」：原来每个字符都要量整行的宽度。"""
+        item = self.make_box(300, 300, 500, 400)
+        font = self.canvas.text_font(item)
+        metrics = self.canvas.text_metrics(font)
+        key = (font.family(), font.pointSizeF(), font.bold())
+        counts = {}
+        for length in (60, 240):
+            calls = []
+            original = metrics.horizontalAdvance
+
+            class Counting:
+                def __getattr__(self, name):
+                    return getattr(metrics, name)
+
+                def horizontalAdvance(self, *a):
+                    calls.append(1)
+                    return original(*a)
+
+            self.main.DrawingCanvas._wrap_paragraph("一" * length, Counting(),
+                                                    200.0, key)
+            counts[length] = len(calls)
+        # 线性时 4 倍长度约 4 倍调用；平方时约 16 倍。取 8 倍作为分界。
+        self.assertLess(counts[240], counts[60] * 8,
+                        f"折行开销超线性增长：{counts}")
+
+    def test_wrapping_still_respects_the_box_width(self):
+        """加速不能牺牲正确性：每一行都必须真的装得下。"""
+        item = self.make_box(300, 300, 460, 500)
+        self.type_text("一二三四五六七八九十abcdefghij一二三四五六七八九十")
+        metrics = self.canvas.text_metrics(self.canvas.text_font(item))
+        limit = self.canvas.text_local_rect(item).width() - self.canvas.TEXT_PAD * 2
+        for line in self.canvas.text_lines(item):
+            self.assertLessEqual(metrics.horizontalAdvance(line), limit + 0.5,
+                                 f"这一行装不下：{line!r}")
+
+    def test_typing_does_not_restack_the_window_chain(self):
+        """重排是 Win32 调用（实测 1.9ms/键），而打字不会改变层级。"""
+        item = self.make_box()
+        calls = []
+        self.panel.restack_floatings = lambda *a, **k: calls.append(1)
+        try:
+            self.type_text("abcdef")
+        finally:
+            del self.panel.restack_floatings
+        self.assertEqual(calls, [], "打字触发了窗口重排")
+
+    def test_typing_on_the_whiteboard_does_not_copy_the_page_per_key(self):
+        self.canvas.enter_whiteboard()
+        self.pump()
+        try:
+            item = self.make_box()
+            calls = []
+            self.canvas.save_current_page = lambda *a, **k: calls.append(1)
+            try:
+                self.type_text("abcdefgh")
+            finally:
+                del self.canvas.save_current_page
+            self.assertLessEqual(len(calls), 1, f"每键都在深拷贝整页：{len(calls)} 次")
+        finally:
+            self.canvas.exit_whiteboard()
+            self.pump()
+
+    def test_the_debounced_snapshot_still_lands(self):
+        """省下的拷贝不能把内容丢了：最后那一次必须写进页面。"""
+        self.canvas.enter_whiteboard()
+        self.pump()
+        try:
+            item = self.make_box()
+            self.type_text("kept")
+            self.canvas.flush_pending_snapshot()
+            page = self.canvas.pages[self.canvas.current_page]
+            self.assertIn("kept", [t.get("text", "") for t in page.get("texts", [])])
+        finally:
+            self.canvas.exit_whiteboard()
+            self.pump()
+
+    def test_a_pending_snapshot_cannot_land_on_the_wrong_page(self):
+        """延后的快照要是在翻页之后才落，会把内容写进另一页。"""
+        self.canvas.enter_whiteboard()
+        self.pump()
+        try:
+            self.make_box()
+            self.type_text("page one")
+            self.canvas.new_page()
+            self.pump()
+            self.canvas.flush_pending_snapshot()
+            texts = [t.get("text", "")
+                     for t in self.canvas.pages[self.canvas.current_page].get("texts", [])]
+            self.assertNotIn("page one", texts)
+        finally:
+            self.canvas.exit_whiteboard()
+            self.pump()
+
+    def test_cache_keys_never_reach_a_saved_project(self):
+        """缓存键住在 item 字典里，漏进存档就会写进用户的项目文件。"""
+        item = self.make_box()
+        self.type_text("abc")
+        self.canvas.text_lines(item)
+        self.assertIn("_wrap_cache", item, "这个用例假设缓存就在 item 里")
+        page = self.main.serialize_page(self.canvas.capture_page())
+        for stored in page.get("texts", []):
+            for key in ("_wrap_cache", "_box_cache", "_rev"):
+                self.assertNotIn(key, stored, f"{key} 漏进了存档")
+
+
+class ClippedPaintTests(WorkflowCase):
+    """paintEvent 只重画失效区域，是 5.4.0 降低每键耗时最大的一项改动。
+
+    风险不在慢，在残影和导出缺内容：裁剪一旦漏画，屏幕上留的是上一帧的像素，而
+    导出要是也跟着裁，用户的文件里就会少东西。所以这里两头都钉住。
+    """
+
+    def drawn_texts(self, **kwargs):
+        """draw_content 实际画过的文本对象内容。"""
+        seen = []
+        canvas = self.canvas
+        original = type(canvas).draw_text_item
+        canvas.draw_text_item = lambda painter, item, editing=False: seen.append(
+            (item.get("text", ""), editing))
+        try:
+            original_segments = canvas.draw_segments
+            canvas.draw_segments = lambda *a, **k: None
+            try:
+                canvas.draw_content(self.painter(), **kwargs)
+            finally:
+                del canvas.draw_segments
+        finally:
+            del canvas.draw_text_item
+        return seen
+
+    def painter(self):
+        """一个只吞调用的假 painter：这些用例关心谁被画，不关心画成什么样。"""
+        class Sink:
+            def __getattr__(self, name):
+                return lambda *a, **k: None
+        return Sink()
+
+    def two_far_apart_boxes(self):
+        from PyQt6.QtCore import QRectF
+
+        near = self.canvas.finish_text_box(QRectF(100, 100, 200, 80))
+        near["text"] = "near"
+        far = self.canvas.finish_text_box(QRectF(1200, 900, 200, 80))
+        far["text"] = "far"
+        return near, far
+
+    def test_a_clipped_paint_skips_boxes_it_cannot_reach(self):
+        from PyQt6.QtCore import QRectF
+
+        self.two_far_apart_boxes()
+        drawn = self.drawn_texts(clip=QRectF(80, 80, 260, 140))
+        self.assertEqual([t for t, _ in drawn], ["near"])
+
+    def test_export_draws_every_box(self):
+        """导出走 clip=None：一个对象都不能少。"""
+        self.two_far_apart_boxes()
+        drawn = self.drawn_texts()
+        self.assertEqual(sorted(t for t, _ in drawn), ["far", "near"])
+
+    def test_the_editing_box_is_drawn_once_per_frame(self):
+        """编辑中的框由 paintEvent 带虚框画一次，draw_content 不能再画一遍。"""
+        item = self.make_box()
+        self.type_text("hi")
+        seen = []
+        canvas = self.canvas
+        canvas.draw_text_item = lambda painter, it, editing=False: seen.append(
+            (it["id"], editing))
+        try:
+            canvas.paintEvent(self.paint_event(canvas.rect()))
+        finally:
+            del canvas.draw_text_item
+        mine = [entry for entry in seen if entry[0] == item["id"]]
+        self.assertEqual(len(mine), 1, f"编辑中的框画了 {len(mine)} 遍")
+        self.assertTrue(mine[0][1], "唯一那次必须是带虚框的编辑态渲染")
+
+    def test_a_pass_through_paint_still_draws_the_edited_box(self):
+        """穿透模式不画编辑 HUD，那时这一框必须走常态渲染，不能被跳过。"""
+        item = self.make_box()
+        self.type_text("hi")
+        self.canvas.is_drawing_mode = False
+        seen = []
+        canvas = self.canvas
+        canvas.draw_text_item = lambda painter, it, editing=False: seen.append(
+            (it["id"], editing))
+        try:
+            canvas.paintEvent(self.paint_event(canvas.rect()))
+        finally:
+            del canvas.draw_text_item
+            self.canvas.is_drawing_mode = True
+        self.assertEqual([e[1] for e in seen if e[0] == item["id"]], [False])
+
+    def paint_event(self, rect):
+        from PyQt6.QtGui import QPaintEvent
+
+        return QPaintEvent(rect)
+
+    def test_a_clipped_paint_skips_strokes_it_cannot_reach(self):
+        from PyQt6.QtCore import QLine, QRectF
+        from PyQt6.QtGui import QColor, QPen
+
+        pen = QPen(QColor("#ff0000"), 3)
+        segments = [{"id": 1, "pen": pen, "line": QLine(10, 10, 40, 40)},
+                    {"id": 2, "pen": pen, "line": QLine(1400, 900, 1430, 930)}]
+        drawn = []
+
+        class Sink:
+            def drawLine(self, line):
+                drawn.append((line.x1(), line.y1()))
+
+            def __getattr__(self, name):
+                return lambda *a, **k: None
+
+        self.canvas.draw_segments(Sink(), segments, clip=QRectF(0, 0, 200, 200))
+        self.assertEqual(drawn, [(10.0, 10.0)])
+
+    def test_export_draws_every_stroke(self):
+        from PyQt6.QtCore import QLine
+        from PyQt6.QtGui import QColor, QPen
+
+        pen = QPen(QColor("#ff0000"), 3)
+        segments = [{"id": 1, "pen": pen, "line": QLine(10, 10, 40, 40)},
+                    {"id": 2, "pen": pen, "line": QLine(1400, 900, 1430, 930)}]
+        drawn = []
+
+        class Sink:
+            def drawLine(self, line):
+                drawn.append((line.x1(), line.y1()))
+
+            def __getattr__(self, name):
+                return lambda *a, **k: None
+
+        self.canvas.draw_segments(Sink(), segments)
+        self.assertEqual(len(drawn), 2)
+
+    def test_a_thick_stroke_just_outside_the_clip_still_draws(self):
+        """笔宽会溢出到两侧：只比线段坐标会在粗笔下留下半条笔迹。"""
+        from PyQt6.QtCore import QLine, QRectF
+        from PyQt6.QtGui import QColor, QPen
+
+        # 线在 x=210，裁剪区右边到 200；笔宽 40 意味着它向左溢出 20，正好压进来。
+        segments = [{"id": 1, "pen": QPen(QColor("#ff0000"), 40),
+                     "line": QLine(210, 100, 210, 140)}]
+        drawn = []
+
+        class Sink:
+            def drawLine(self, line):
+                drawn.append(line.x1())
+
+            def __getattr__(self, name):
+                return lambda *a, **k: None
+
+        self.canvas.draw_segments(Sink(), segments, clip=QRectF(0, 0, 200, 200))
+        self.assertEqual(drawn, [210.0], "粗笔的溢出没算进来，会留下半条笔迹")
+
+    def test_a_marker_stroke_is_composited_as_one_path(self):
+        """荧光笔整笔一次合成：裁剪不能把一笔切成两段，否则重叠处会叠色。"""
+        from PyQt6.QtCore import QLine, QRectF
+        from PyQt6.QtGui import QColor, QPen
+
+        pen = QPen(QColor(255, 0, 0, 120), 20)
+        segments = [{"id": 7, "marker": True, "pen": pen, "line": QLine(10, 10, 60, 10)},
+                    {"id": 7, "marker": True, "pen": pen, "line": QLine(60, 10, 110, 10)}]
+        paths = []
+
+        class Sink:
+            def drawPath(self, path):
+                paths.append(path.elementCount())
+
+            def __getattr__(self, name):
+                return lambda *a, **k: None
+
+        self.canvas.draw_segments(Sink(), segments, clip=QRectF(0, 0, 400, 400))
+        self.assertEqual(len(paths), 1, "一笔荧光笔被画成了多条路径")
+
+    def test_a_marker_stroke_outside_the_clip_is_skipped(self):
+        from PyQt6.QtCore import QLine, QRectF
+        from PyQt6.QtGui import QColor, QPen
+
+        pen = QPen(QColor(255, 0, 0, 120), 20)
+        segments = [{"id": 7, "marker": True, "pen": pen,
+                     "line": QLine(1400, 900, 1450, 900)}]
+        paths = []
+
+        class Sink:
+            def drawPath(self, path):
+                paths.append(1)
+
+            def __getattr__(self, name):
+                return lambda *a, **k: None
+
+        self.canvas.draw_segments(Sink(), segments, clip=QRectF(0, 0, 200, 200))
+        self.assertEqual(paths, [])
+
+    def test_the_repainted_rect_covers_the_box_after_it_grows(self):
+        """内容变长会把框撑高，失效区域必须盖住变高之后的样子。"""
+        item = self.make_box(300, 300, 560, 380)
+        self.type_text("一二三")
+        areas = self.record_repaints(lambda: self.canvas.text_insert("四" * 40))
+        after = self.canvas.text_bounds(item)
+        covered = None
+        for call in areas:
+            if not call:
+                return          # 整屏重绘也算盖住了
+            rect = call[0]
+            covered = rect if covered is None else covered.united(rect)
+        self.assertIsNotNone(covered)
+        self.assertTrue(covered.contains(after.toAlignedRect()),
+                        "重绘区域没盖住长高之后的文本框，屏幕上会留下残影")
+
+    def test_the_repainted_rect_covers_the_box_after_it_shrinks(self):
+        """删字会让框变矮，旧区域也得一起擦掉。"""
+        item = self.make_box(300, 300, 560, 380)
+        self.type_text("一二三" * 20)
+        before = self.canvas.text_bounds(item)
+        areas = self.record_repaints(
+            lambda: [self.canvas.text_backspace() for _ in range(40)])
+        covered = None
+        for call in areas:
+            if not call:
+                return
+            rect = call[0]
+            covered = rect if covered is None else covered.united(rect)
+        self.assertIsNotNone(covered)
+        self.assertTrue(covered.contains(before.toAlignedRect()),
+                        "变矮后没擦掉原来的区域，屏幕上会留下残影")
+
+
+class PaintResidueTests(WorkflowCase):
+    """裁剪重绘会不会留残影——按像素比，不靠肉眼。
+
+    做法：把画布渲染进两张同样的图。一张只重放打字过程中真正失效的那些矩形（屏幕
+    上就是这么刷的），另一张最后整屏画一遍。两张不一致的地方，就是用户会看到的残影。
+
+    容差不是零。同一条线裁剪着画和整屏画，抗锯齿在裁剪边界上的覆盖率会差一两级，
+    这是光栅化的正常差异；残影则是整个字留在原地，差值几百。所以按幅度判，不按个数。
+    """
+
+    TOLERANCE = 24              # 单通道差值上限：抗锯齿差个位数，残影是几百
+
+    def render_region(self, image, rect):
+        """按 Qt 刷一块区域的方式渲染：先清成透明，再画。
+
+        半透明窗口上 Qt 会先把失效区域清掉再发 paintEvent。少了这一步，每帧会叠在
+        上一帧上（画布背景 alpha=1），叠出来的重影是这套量法自己的毛病，不是残影。
+        """
+        from PyQt6.QtCore import QPoint
+        from PyQt6.QtGui import QColor, QPainter, QRegion
+
+        painter = QPainter(image)
+        try:
+            painter.setClipRect(rect)
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+            painter.fillRect(rect, QColor(0, 0, 0, 0))
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+            self.canvas.render(painter, QPoint(rect.x(), rect.y()), QRegion(rect))
+        finally:
+            painter.end()
+
+    def blank_image(self):
+        from PyQt6.QtGui import QImage
+
+        image = QImage(self.canvas.width(), self.canvas.height(),
+                       QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(0)
+        return image
+
+    def worst_delta(self, a, b):
+        """两张图最大的单通道差值，以及差得离谱的像素个数。"""
+        if a.constBits().asstring(a.sizeInBytes()) == b.constBits().asstring(b.sizeInBytes()):
+            return 0, 0
+        worst, bad = 0, 0
+        for y in range(a.height()):
+            for x in range(a.width()):
+                pa, pb = a.pixel(x, y), b.pixel(x, y)
+                if pa == pb:
+                    continue
+                delta = max(abs(((pa >> s) & 255) - ((pb >> s) & 255))
+                            for s in (0, 8, 16, 24))
+                worst = max(worst, delta)
+                if delta > self.TOLERANCE:
+                    bad += 1
+        return worst, bad
+
+    def lay_down_strokes(self):
+        """一些已有笔迹，好让裁剪有东西可以漏画。"""
+        from PyQt6.QtCore import QLine
+        from PyQt6.QtGui import QColor, QPen
+
+        # QLine, not QLine: clone_segments 用 QLine(seg["line"]) 深拷贝，喂 QLine
+        # 会在撤销快照里炸——这里跟真实数据保持一致。
+        pen = QPen(QColor("#e74c3c"), 6)
+        for i in range(24):
+            self.canvas.all_segments.append(
+                {"id": 900 + i, "pen": pen,
+                 "line": QLine(200 + i * 14, 250, 260 + i * 14, 620)})
+
+    def replay(self, image, actions):
+        """执行每个动作，只把它失效的那些矩形重画到 image 上。"""
+        from PyQt6.QtCore import QRect
+
+        full = QRect(0, 0, self.canvas.width(), self.canvas.height())
+        for action in actions:
+            rects = self.record_repaints(action)
+            for call in rects:
+                if not call:
+                    self.render_region(image, full)      # 整屏重绘
+                    continue
+                rect = call[0] if len(call) == 1 else QRect(*call)
+                clipped = QRect(rect).intersected(full)
+                if not clipped.isEmpty():
+                    self.render_region(image, clipped)
+
+    def check_no_residue(self, actions):
+        from PyQt6.QtCore import QRect
+
+        full = QRect(0, 0, self.canvas.width(), self.canvas.height())
+        incremental = self.blank_image()
+        self.render_region(incremental, full)       # 先有一帧正确的整屏，跟真屏一样
+        self.replay(incremental, actions)
+        reference = self.blank_image()
+        self.render_region(reference, full)
+        # 先证明这一帧真的画出了东西。离屏平台没有字体目录，字形可能一个都不光栅化，
+        # 那时两张图都是空的，比出来永远「没有残影」——用例会变成一句空话。
+        self.assertGreater(self.opaque_pixels(reference), 200,
+                           "参考帧几乎是空的，这台环境画不出内容，比对没有意义")
+        worst, bad = self.worst_delta(incremental, reference)
+        self.assertEqual(bad, 0,
+                         f"{bad} 个像素与整屏重绘不符（最大差 {worst}），屏幕上会留残影")
+
+    def opaque_pixels(self, image):
+        """画上了东西的像素数。背景 alpha=1，所以门槛取 8 就够分开背景和内容。"""
+        count = 0
+        for y in range(0, image.height(), 2):
+            for x in range(0, image.width(), 2):
+                if ((image.pixel(x, y) >> 24) & 255) > 8:
+                    count += 1
+        return count
+
+    def test_typing_leaves_no_residue(self):
+        self.lay_down_strokes()
+        self.make_box(300, 300, 660, 338)
+        text = "上山打老虎一二三四五六七八九十甲乙丙丁戊己庚辛壬癸"
+        self.check_no_residue([
+            (lambda ch=ch: self.canvas.text_insert(ch)) for ch in text])
+
+    def test_deleting_leaves_no_residue(self):
+        """删字让框变矮，旧的那几行必须被擦掉。"""
+        self.lay_down_strokes()
+        self.make_box(300, 300, 660, 338)
+        self.type_text("上山打老虎一二三四五六七八九十甲乙丙丁戊己庚辛壬癸子丑寅卯")
+        self.check_no_residue([self.canvas.text_backspace for _ in range(24)])
+
+    def test_a_blinking_caret_leaves_no_residue(self):
+        self.lay_down_strokes()
+        self.make_box(300, 300, 660, 338)
+        self.type_text("闪烁")
+        self.check_no_residue([self.canvas._caret_tick for _ in range(4)])
+
+    def test_inserting_at_a_clicked_caret_leaves_no_residue(self):
+        """插在中间会把后面的字全推走，重绘范围必须覆盖整框。"""
+        self.lay_down_strokes()
+        self.make_box(300, 300, 660, 338)
+        self.type_text("一二三四五六七八九十")
+        actions = [lambda: self.canvas.set_caret(3)]
+        actions += [(lambda ch=ch: self.canvas.text_insert(ch)) for ch in "插进来"]
+        self.check_no_residue(actions)
+
+    def test_one_insert_that_adds_many_lines_leaves_no_residue(self):
+        """一次插入好几行：输入法一次上屏一整串，框会一下长高很多。
+
+        逐字打的时候，「变更前的包围盒」跟变更后只差一行，重绘范围的余量顺手就盖住了；
+        一次插进十几个字，差的是好几行，盖不住就会看到下半截是旧内容。
+        """
+        self.lay_down_strokes()
+        self.make_box(300, 300, 660, 338)
+        self.check_no_residue([
+            lambda: self.canvas.text_insert("上山打老虎一二三四五六七八九十甲乙丙丁戊己庚辛壬癸")])
+
+    def test_deleting_many_lines_at_once_leaves_no_residue(self):
+        self.lay_down_strokes()
+        self.make_box(300, 300, 660, 338)
+        self.type_text("上山打老虎一二三四五六七八九十甲乙丙丁戊己庚辛壬癸")
+        self.check_no_residue([
+            lambda: [self.canvas.text_backspace() for _ in range(22)]])
+
+    def test_a_formula_leaves_no_residue(self):
+        self.lay_down_strokes()
+        self.make_box(300, 300, 660, 338)
+        self.panel._symbol_pressed(("!frac", "a/b"))
+        self.check_no_residue([
+            (lambda ch=ch: self.canvas.text_insert(ch)) for ch in "1234"])
 
 
 class UndoWorkflowTests(WorkflowCase):

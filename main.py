@@ -2,6 +2,32 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # 版本号：见 version.py（唯一来源，代码里统一用 APP_VERSION）
 # 更新日志：
+# v5.4.0：插入点、闪烁光标、打字不再卡、退出顺带收键盘
+# 1. 「越打越卡」不是感觉：实测每键 12.2ms（60 字）→ 19.4ms（180 字）→ 21.6ms（白板
+#    180 字）。每敲一个字符都做了四件全量的事——整屏重绘、整页深拷贝、重排整条浮窗链、
+#    重新抓焦点；折行还是 O(n²)（每个字符都去量整行的宽度）。软键盘连打必然积压
+# 2. 改为：只重绘受影响的那一框（union 前后包围盒）、页面快照合并到 400ms 定时器、打字
+#    不重排窗口层级（层级只在浮窗显示/隐藏时才真的变）、折行改成线性（逐字符累加，只
+#    在接近边界时才精确量一次）
+# 3. 度量全部加缓存：字体度量、单字符宽度、折行结果（按内容+字体规格）、公式排版（按
+#    改动计数 _rev，公式树可变不能自己当键）。实测 text_lines 每键被问 3 次、formula_box
+#    3～5 次、formula.layout 12 次，入参完全相同
+# 4. 「符号面板却没出现」：公式模式下输入控件是【故意留空】的，用户的字只出现在画布上。
+#    现在把当前格子投影成一行文本显示出来（formula.project_slot，结构节点占一个占位字符，
+#    偏移与插入点一一对应）
+# 5. 插入点模型（此前根本不存在）：输入永远追加到末尾、退格永远删最后一个，点到中间也
+#    改不了那里。现在插入点是槽内的整数偏移，可点、可用方向键走、可 Home/End，纯文本与
+#    公式同一套；面板光标与画布插入点双向同步
+# 6. 光标会闪烁了（530ms，跟随 Windows 默认）。此前只有一个静止的高亮方框；闪烁只重绘
+#    光标那一条，否则编辑态会永远在重绘
+# 7. 折行边界的插入点归属修正：纯软换行处算下一行行首，否则打满一行后光标停在右边框外
+# 8. 退出时顺带关掉软键盘：此前没有任何退出路径调用键盘收尾（F12 走 exit_requested →
+#    QApplication.quit，main.py 里也没有 closeEvent）。且 SC_CLOSE 对 TabTip 通常只是让它
+#    重新 cloak，进程还在跑——用户下次点到输入框它又冒出来，而我们已经退了
+# 9. 改用 ShellExecuteExW 启动键盘（同样走 UAC 提升），它能带回进程句柄，从而记下我们
+#    启动的 PID；退出时先关窗口、给宽限期、再只终止我们启动的那些。用户自己开着的键盘
+#    不动——杀掉它比留着更糟
+#
 # v5.3.4：层级、数字键、文本换行
 # 1. 主面板会闪到符号面板上面：bind_topmost_stack 只把每个浮窗钉到【画布】之上，彼此
 #    高低无约束；真实点击激活窗口会让 Windows 重排同 owner 下的其他窗口，而对已在置顶
@@ -739,6 +765,12 @@ if hasattr(_user32, "SetWindowLongPtrW"):
 
 NI_COMPOSITIONSTR = 0x0015
 CPS_CANCEL = 0x0004
+
+# 文字度量缓存。两层都是纯函数结果（同一字体同一字符的宽度不会变），所以可以
+# 无条件缓存，只在长得过大时整体丢弃——不做 LRU，因为一次板书用到的字体规格
+# 只有几种，命中率本来就接近 1。
+_FONT_METRICS_CACHE = {}
+_CHAR_ADVANCE_CACHE = {}
 
 
 def cancel_ime_composition(window_id):
@@ -1742,6 +1774,12 @@ class DrawingCanvas(QMainWindow):
         self.text_drag_rect = None
         self.editing_text_id = None
         self.editing_slot = None        # 结构化公式里当前插入点所在的槽路径
+        # 插入点。纯文本是 text 里的字符下标；公式是 editing_slot 指向的槽内偏移
+        # （见 formula.slot_length 的定义）。5.3.x 没有这个概念，所有输入都追加到
+        # 末尾、退格永远删最后一个——点到中间也改不了那里。
+        self.caret_offset = 0
+        self.caret_visible = True       # 闪烁相位
+        self._caret_timer = None
         self.last_point = None
         self.current_stroke_id = None
         self.current_stroke_widths = []
@@ -2188,6 +2226,8 @@ class DrawingCanvas(QMainWindow):
         if getattr(self, "editing_text_id", None) is not None:
             self.editing_text_id = None
             self.editing_slot = None
+            self.caret_offset = 0
+            self.stop_caret_blink()
             self.text_drag_start = None
             self.text_drag_rect = None
             if self.panel:
@@ -2210,6 +2250,12 @@ class DrawingCanvas(QMainWindow):
             self.current_page = 0
 
     def save_current_page(self):
+        # 挂着的合并快照在这里作废：本方法做的就是它要做的事，而且做得更完整。
+        # 不取消的话它会在换页之后才响，把新页的内容写进去——或者更糟，写到刚切走
+        # 的那一页上。
+        timer = getattr(self, "_page_snapshot_timer", None)
+        if timer is not None and timer.isActive():
+            timer.stop()
         self.ensure_page_state()
         self.pages[self.current_page] = self.capture_page()
 
@@ -2487,6 +2533,11 @@ class DrawingCanvas(QMainWindow):
         self.selected_ids = {item["id"]}
         tree = item.get("formula")
         self.editing_slot = self._first_empty_slot(tree) if tree else None
+        # 插入点落在末尾：二次编辑一个已有的框时，接着写是最常见的意图。想改中间
+        # 直接点过去（set_caret_at）。
+        self.caret_offset = self.caret_limit(item)
+        self.caret_visible = True
+        self.restart_caret_blink()
         if self.panel:
             self.panel.open_text_input(item)
             self.panel.sync_selection_controls()
@@ -2533,6 +2584,8 @@ class DrawingCanvas(QMainWindow):
         if self.editing_text_id in keep:
             self.editing_text_id = None
             self.editing_slot = None
+            self.caret_offset = 0
+            self.stop_caret_blink()
         self.mark_content_changed()
         return True
 
@@ -2541,6 +2594,8 @@ class DrawingCanvas(QMainWindow):
         item = self.editing_text_item()
         self.editing_text_id = None
         self.editing_slot = None
+        self.caret_offset = 0
+        self.stop_caret_blink()
         self.text_drag_start = None
         self.text_drag_rect = None
         if item is not None and discard_empty and self.text_item_is_empty(item):
@@ -2585,48 +2640,375 @@ class DrawingCanvas(QMainWindow):
         self.update()
         return item
 
+    # --- 插入点 ---
+    def caret_slot_nodes(self, item):
+        """插入点所在的槽（公式），纯文本返回 None。
+
+        顺带修掉失效的槽路径：撤销、换页都可能让 editing_slot 指向已经不存在的位置，
+        此时退回一个还在的槽，而不是把用户刚敲的字符丢掉。
+        """
+        tree = item.get("formula")
+        if not tree:
+            return None
+        if self.editing_slot is None:
+            return tree
+        slot = formula.get_slot(tree, self.editing_slot)
+        if slot is None:
+            self.editing_slot = self._first_empty_slot(tree)
+            slot = formula.get_slot(tree, self.editing_slot) \
+                if self.editing_slot else tree
+            if slot is None:
+                slot = tree
+                self.editing_slot = None
+        return slot
+
+    def caret_limit(self, item):
+        """插入点的最大合法值。"""
+        slot = self.caret_slot_nodes(item)
+        if slot is None:
+            return len(str(item.get("text", "")))
+        return formula.slot_length(slot)
+
+    def clamp_caret(self, item):
+        self.caret_offset = max(0, min(int(self.caret_offset), self.caret_limit(item)))
+        return self.caret_offset
+
+    def set_caret(self, offset, item=None):
+        """把插入点移到 offset，并让闪烁相位重新开始。
+
+        重置相位是有意的：刚点过的地方必须立刻看得见光标，否则正好落在熄灭的那半个
+        周期里，用户会以为没点中。
+        """
+        if item is None:
+            item = self.editing_text_item()
+        if item is None:
+            return False
+        self.caret_offset = int(offset)
+        self.clamp_caret(item)
+        self.caret_visible = True
+        self.restart_caret_blink()
+        self.sync_text_panel()
+        self.repaint_text_item(item)
+        return True
+
+    def sync_text_panel(self):
+        """把插入点/内容同步到面板上的输入框。
+
+        单向的一半：画布 → 面板。另一半（面板 → 画布）在 _TextInputEdit 里。中间靠
+        _syncing 标志断环。
+        """
+        panel = self.panel
+        edit = getattr(panel, "text_input", None) if panel else None
+        if edit is None:
+            return
+        try:
+            edit.sync_from_canvas()
+        except Exception:
+            pass
+
+    def restart_caret_blink(self):
+        timer = self._caret_timer
+        if timer is None:
+            timer = QTimer(self)
+            timer.timeout.connect(self._caret_tick)
+            self._caret_timer = timer
+        if self.editing_text_id is None:
+            timer.stop()
+            return
+        timer.start(self.CARET_BLINK_MS)
+
+    def stop_caret_blink(self):
+        if self._caret_timer is not None:
+            self._caret_timer.stop()
+        self.caret_visible = True
+
+    def _caret_tick(self):
+        item = self.editing_text_item()
+        if item is None:
+            self.stop_caret_blink()
+            return
+        self.caret_visible = not self.caret_visible
+        rect = self.caret_rect(item)
+        if rect is None:
+            return
+        # 只刷光标那一条，不是整框：闪烁是每半秒一次的常驻开销，刷整框等于让编辑态
+        # 永远在重绘。
+        self.update(rect.adjusted(-3.0, -3.0, 3.0, 3.0).toAlignedRect())
+
+    def caret_rect(self, item):
+        """插入点在画布坐标里的矩形（已含旋转/缩放）；拿不到位置则返回 None。"""
+        local = self.caret_local_rect(item)
+        if local is None:
+            return None
+        return self.text_transform(item).mapRect(local)
+
+    def text_transform(self, item):
+        transform = QTransform()
+        transform.translate(item["pos"].x(), item["pos"].y())
+        transform.rotate(item.get("rotation", 0.0))
+        transform.scale(item.get("scale", 1.0), item.get("scale", 1.0))
+        return transform
+
+    def caret_local_rect(self, item):
+        rect = self.text_local_rect(item)
+        box = self.formula_box(item)
+        if box is not None:
+            return self._formula_caret_rect(item, box, rect)
+        return self._plain_caret_rect(item, rect)
+
+    def _plain_caret_rect(self, item, rect):
+        """纯文本的插入点：换行之后它落在第几行、行内第几列。"""
+        metrics = self.text_metrics(self.text_font(item))
+        lines = self.text_lines(item)
+        row, column = self.caret_line_column(item, lines)
+        line = lines[row] if row < len(lines) else ""
+        x = rect.left() + self.TEXT_PAD + metrics.horizontalAdvance(line[:column])
+        y = rect.top() + self.TEXT_PAD + metrics.lineSpacing() * row
+        return QRectF(x, y, max(1.5, metrics.lineSpacing() * 0.06),
+                      metrics.lineSpacing())
+
+    def caret_line_column(self, item, lines=None):
+        """把纯文本插入点换算成 (行号, 行内列号)。
+
+        自动换行让这件事不平凡：text 里没有软换行符，得按 text_lines 的折行结果重新
+        数。硬换行的 \\n 在原文里占一个字符；软换行处如果原本是空格，折行时被
+        rstrip 掉了，也占一个。两者都要跳过，否则光标会画到错误的行上。
+
+        行边界上的归属：纯软换行（一个字符都没被吃掉，中文连续文本就是这样）处的偏移
+        算下一行的行首。算上一行的行尾会有两个后果——点中折行后那一行的开头，报的却是
+        上一行；打满一行后光标停在右边框外而不是跳到下一行开头。硬换行和吃掉空格的软
+        换行则算本行行尾，因为那里确实还有一个位置（\\n / 空格之前）。
+        """
+        if lines is None:
+            lines = self.text_lines(item)
+        text = str(item.get("text", ""))
+        offset = max(0, min(int(self.caret_offset), len(text)))
+        consumed = 0
+        for row, line in enumerate(lines):
+            end = consumed + len(line)
+            separator = 1 if text[end:end + 1] in ("\n", " ") else 0
+            hard_wrap = separator or row == len(lines) - 1
+            if offset < end or (offset == end and hard_wrap):
+                return row, offset - consumed
+            consumed = end + separator
+        last = max(0, len(lines) - 1)
+        return last, len(lines[last]) if lines else 0
+
+    def caret_line_start(self, item, row, lines=None):
+        """第 row 行行首在原文里的下标。"""
+        if lines is None:
+            lines = self.text_lines(item)
+        text = str(item.get("text", ""))
+        start = 0
+        for index in range(min(row, len(lines))):
+            end = start + len(lines[index])
+            start = end + (1 if text[end:end + 1] in ("\n", " ") else 0)
+        return start
+
+    def _formula_caret_rect(self, item, box, rect):
+        """公式的插入点：当前槽内第 caret_offset 个原子之前。"""
+        found = self.find_slot_box(box, self.editing_slot)
+        if found is None:
+            return None
+        origin_x, baseline, row = found
+        nodes = self.caret_slot_nodes(item) or []
+        index, char_index = formula.locate(nodes, self.caret_offset)
+        x = origin_x
+        if row.children:
+            if index < len(row.children):
+                dx, _dy, child = row.children[index]
+                x = origin_x + dx
+                if char_index and child.kind == "t":
+                    x += self._formula_metrics(item).advance(
+                        child.text[:char_index], child.size)
+            else:
+                dx, _dy, child = row.children[-1]
+                x = origin_x + dx + child.w
+        height = max(4.0, row.height)
+        return QRectF(x + rect.left() + self.TEXT_PAD,
+                      baseline - row.ascent + rect.top() + self.TEXT_PAD + box.ascent,
+                      max(1.5, height * 0.06), height)
+
+    @classmethod
+    def find_slot_box(cls, box, path, origin_x=0.0, baseline=0.0):
+        """找出 path 指名那个槽的行盒，连同它在公式里的绝对原点与基线。"""
+        target = () if path is None else tuple(path)
+        if (box.kind in ("row", "empty") and box.slot_path is not None
+                and tuple(box.slot_path) == target):
+            return origin_x, baseline, box
+        for dx, dy, child in box.children:
+            found = cls.find_slot_box(child, path, origin_x + dx, baseline + dy)
+            if found is not None:
+                return found
+        return None
+
+    def set_caret_at(self, pos):
+        """点画布：把插入点移到离点击处最近的那个位置。"""
+        item = self.editing_text_item()
+        if item is None:
+            return False
+        inverse, ok = self.text_transform(item).inverted()
+        if not ok:
+            return False
+        local = inverse.map(QPointF(pos))
+        rect = self.text_local_rect(item)
+        box = self.formula_box(item)
+        if box is None:
+            return self.set_caret(self._plain_offset_at(item, local, rect), item)
+        x = local.x() - (rect.left() + self.TEXT_PAD)
+        y = local.y() - (rect.top() + self.TEXT_PAD + box.ascent)
+        found = formula.hit_slot(box, x, y)
+        if found is not None:
+            self.editing_slot = found
+        return self.set_caret(self._formula_offset_at(item, box, x), item)
+
+    def _plain_offset_at(self, item, local, rect):
+        """纯文本：点击处最接近哪个字符边界。"""
+        font = self.text_font(item)
+        metrics = self.text_metrics(font)
+        lines = self.text_lines(item)
+        spacing = metrics.lineSpacing() or 1.0
+        row = int((local.y() - rect.top() - self.TEXT_PAD) // spacing)
+        row = max(0, min(row, max(0, len(lines) - 1)))
+        start = self.caret_line_start(item, row, lines)
+        line = lines[row] if lines else ""
+        x = local.x() - rect.left() - self.TEXT_PAD
+        font_key = (font.family(), font.pointSizeF(), font.bold())
+        column = len(line)
+        accumulated = 0.0
+        for index, ch in enumerate(line):
+            advance = self.char_advance(metrics, font_key, ch)
+            # 过了这个字的中线就算点在它后面——和所有文本编辑器的手感一致。
+            if x < accumulated + advance / 2.0:
+                column = index
+                break
+            accumulated += advance
+        return start + column
+
+    def _formula_offset_at(self, item, box, x):
+        """公式：在当前槽内，点击的 x 落在第几个原子边界。"""
+        found = self.find_slot_box(box, self.editing_slot)
+        if found is None:
+            return 0
+        origin_x, _baseline, row = found
+        nodes = self.caret_slot_nodes(item) or []
+        metrics = self._formula_metrics(item)
+        local_x = x - origin_x
+        offset = 0
+        for index, (dx, _dy, child) in enumerate(row.children):
+            if index >= len(nodes):
+                break
+            node = nodes[index]
+            if node.get("k") == "t":
+                text = node.get("v", "")
+                accumulated = dx
+                for position, ch in enumerate(text):
+                    advance = metrics.advance(ch, child.size)
+                    if local_x < accumulated + advance / 2.0:
+                        return offset + position
+                    accumulated += advance
+                offset += len(text)
+                continue
+            if local_x < dx + child.w / 2.0:
+                return offset
+            offset += 1
+        return offset
+
+    def move_caret(self, delta):
+        """左右移动插入点。到槽/文本边界就停住。"""
+        item = self.editing_text_item()
+        if item is None:
+            return False
+        target = self.caret_offset + delta
+        if target < 0 or target > self.caret_limit(item):
+            return False
+        return self.set_caret(target, item)
+
+    def move_caret_line(self, delta):
+        """上下移动插入点，尽量保持横向列位置（纯文本）。"""
+        item = self.editing_text_item()
+        if item is None or item.get("formula"):
+            return False
+        lines = self.text_lines(item)
+        row, column = self.caret_line_column(item, lines)
+        target = row + delta
+        if target < 0 or target >= len(lines):
+            return False
+        start = self.caret_line_start(item, target, lines)
+        return self.set_caret(start + min(column, len(lines[target])), item)
+
+    def caret_to_line_edge(self, home):
+        """插入点移到本行首/行尾；公式里等价于槽首/槽尾。"""
+        item = self.editing_text_item()
+        if item is None:
+            return False
+        if item.get("formula"):
+            return self.set_caret(0 if home else self.caret_limit(item), item)
+        lines = self.text_lines(item)
+        row, _column = self.caret_line_column(item, lines)
+        start = self.caret_line_start(item, row, lines)
+        return self.set_caret(start if home else start + len(lines[row]), item)
+
     # --- 编辑态下的内容变更 ---
     def text_insert(self, chars):
-        """往当前插入点写字符。公式模式下写进当前槽，否则追加到纯文本。"""
+        """往当前插入点写字符。
+
+        写在插入点处，而不是一律追加到末尾——「点哪就改哪」是 5.4.0 才有的，之前
+        无论光标点在哪里，敲的字都落在最后。
+        """
         item = self.editing_text_item()
         if item is None or not chars:
             return False
-        if item.get("formula") is not None and self.editing_slot is not None:
-            slot = formula.get_slot(item["formula"], self.editing_slot)
-            if slot is None:
-                self.editing_slot = self._first_empty_slot(item["formula"])
-                slot = formula.get_slot(item["formula"], self.editing_slot) \
-                    if self.editing_slot else None
-            if slot is None:
-                return False
-            # 连续输入合并进同一个文本节点，避免每个字符一个节点把树撑爆
-            if slot and slot[-1].get("k") == "t":
-                slot[-1]["v"] += chars
-            else:
-                slot.append(formula.new_node("t", chars))
+        slot = self.caret_slot_nodes(item)
+        if slot is not None:
+            self.clamp_caret(item)
+            self.caret_offset = formula.insert_text(slot, self.caret_offset, chars)
         else:
-            item["text"] = str(item.get("text", "")) + chars
+            text = str(item.get("text", ""))
+            offset = max(0, min(int(self.caret_offset), len(text)))
+            item["text"] = text[:offset] + chars + text[offset:]
+            self.caret_offset = offset + len(chars)
         self._after_text_change(item)
         return True
 
     def text_backspace(self):
+        """删掉插入点前的一个位置。公式里的结构节点整个删掉。"""
         item = self.editing_text_item()
         if item is None:
             return False
-        if item.get("formula") is not None and self.editing_slot is not None:
-            slot = formula.get_slot(item["formula"], self.editing_slot)
-            if not slot:
+        slot = self.caret_slot_nodes(item)
+        if slot is not None:
+            self.clamp_caret(item)
+            if self.caret_offset <= 0:
                 return False
-            tail = slot[-1]
-            if tail.get("k") == "t" and len(tail.get("v", "")) > 1:
-                tail["v"] = tail["v"][:-1]
-            else:
-                slot.pop()
+            self.caret_offset = formula.delete_before(slot, self.caret_offset)
         else:
             text = str(item.get("text", ""))
-            if not text:
+            offset = max(0, min(int(self.caret_offset), len(text)))
+            if offset <= 0:
                 return False
-            item["text"] = text[:-1]
+            item["text"] = text[:offset - 1] + text[offset:]
+            self.caret_offset = offset - 1
+        self._after_text_change(item)
+        return True
+
+    def text_delete_forward(self):
+        """Delete 键：删掉插入点后的一个位置。插入点自己不动。"""
+        item = self.editing_text_item()
+        if item is None:
+            return False
+        slot = self.caret_slot_nodes(item)
+        if slot is not None:
+            self.clamp_caret(item)
+            if self.caret_offset >= formula.slot_length(slot):
+                return False
+            formula.delete_before(slot, self.caret_offset + 1)
+        else:
+            text = str(item.get("text", ""))
+            offset = max(0, min(int(self.caret_offset), len(text)))
+            if offset >= len(text):
+                return False
+            item["text"] = text[:offset] + text[offset + 1:]
         self._after_text_change(item)
         return True
 
@@ -2634,9 +3016,7 @@ class DrawingCanvas(QMainWindow):
         item = self.editing_text_item()
         if item is None or item.get("formula") is not None:
             return False        # 公式里换行没有意义
-        item["text"] = str(item.get("text", "")) + "\n"
-        self._after_text_change(item)
-        return True
+        return self.text_insert("\n")
 
     def text_insert_structure(self, kind):
         """插入一个结构节点（分数/根号/上下标/求和/积分）并把插入点移进它的第一个槽。"""
@@ -2658,50 +3038,98 @@ class DrawingCanvas(QMainWindow):
             node = formula.new_node(kind)
         except ValueError:
             return False
-        target.append(node)
-        index = len(target) - 1
+        # 插到插入点处，不是追加到槽尾：光标停在 "ab|c" 中间时，分数要落在 ab 和 c
+        # 之间。insert_node 会为此把文本节点拆开。
+        self.caret_offset = max(0, min(int(self.caret_offset),
+                                       formula.slot_length(target)))
+        index, _after = formula.insert_node(target, self.caret_offset, node)
         first_slot = formula.SLOTS[kind][0]
         base = self.editing_slot or ()
         self.editing_slot = base + (index, first_slot)
+        self.caret_offset = 0            # 新结构的第一个槽是空的
         self._after_text_change(item)
         return True
 
     def set_editing_slot_at(self, pos):
-        """点击画布上的公式：把插入点移到被点中的那个格子。"""
+        """点击编辑中的框：把插入点移到点中的位置（公式里连同所在格子）。
+
+        5.3.x 只认格子，格子内部一律追加到末尾。现在细到字符边界，纯文本也一样——
+        这就是「光标点在哪就编辑哪」。
+        """
         item = self.editing_text_item()
-        if item is None or not item.get("formula"):
+        if item is None:
             return False
-        box = self.formula_box(item)
-        if box is None:
-            return False
-        rect = self.text_local_rect(item)
-        # 把画布坐标逆变换回文本框的局部坐标系
-        transform = QTransform()
-        transform.translate(item["pos"].x(), item["pos"].y())
-        transform.rotate(item.get("rotation", 0.0))
-        transform.scale(item.get("scale", 1.0), item.get("scale", 1.0))
-        inverse, ok = transform.inverted()
-        if not ok:
-            return False
-        local = inverse.map(QPointF(pos))
-        x = local.x() - (rect.left() + self.TEXT_PAD)
-        y = local.y() - (rect.top() + self.TEXT_PAD + box.ascent)
-        found = formula.hit_slot(box, x, y)
-        if found is None:
-            return False
-        self.editing_slot = found
-        self.update()
-        return True
+        return self.set_caret_at(pos)
 
     def _after_text_change(self, item):
+        """一次内容变更之后的善后。每敲一个字符都会走这里，所以它必须便宜。
+
+        5.3.4 之前这里做了四件全量的事：整屏重绘、整页深拷贝、重排整条浮窗链、
+        重新抓焦点。实测每键 12.2ms（60 字）到 21.6ms（白板模式 180 字），软键盘
+        连打必然积压——用户看到的就是「打了字符号面板半天不出来，越打越卡」。
+        现在只重绘受影响的那块矩形，页面快照合并到一个定时器上。
+        """
+        before = self.text_bounds(item)
+        self.bump_text_revision(item)
         # 内容变了就把框高撑够：要求是最后一行整行都在框内，而不是任由文字画到框外。
         self.fit_text_box(item)
-        self.mark_content_changed()
+        self.content_revision += 1          # 缩略图靠它判断要不要重画
+        if self.whiteboard_mode:
+            self.schedule_page_snapshot()
+        if self.panel:
+            # 只挪位置，不重排窗口层级：框长高时选中面板要跟着走，但重排是 Win32
+            # 调用（实测 1.9ms/键），而层级只在浮窗显示/隐藏时才真的会变。
+            self.panel.position_selection_panel(self.selection_bounds(), restack=False)
+        self.sync_text_panel()
+        self.repaint_text_item(item, before)
+
+    def repaint_text_item(self, item, before=None):
+        """只重绘这一框占的区域。
+
+        画布是全屏的，update() 意味着整屏重新合成（实测每键约 8ms，占了大头）。
+        文字编辑只影响一框，重绘范围就该只有那一框。before 传的是变更前的包围盒：
+        框会因内容长高，也会因删字变矮，两种情况都要把旧区域一起擦掉，否则会留下
+        上一帧的残影。
+        """
+        area = self.text_bounds(item)
+        if before is not None:
+            area = area.united(before)
+        # 余量要盖住：编辑虚框、插入点、笔画溢出、选中控制点。给得比实际需要宽一些，
+        # 代价只是多刷几十像素，而给少了就是残影。
+        margin = 24.0 + float(max(1, int(item.get("width", 1))))
+        self.update(area.adjusted(-margin, -margin, margin, margin).toAlignedRect())
+
+    PAGE_SNAPSHOT_MS = 400
+
+    def schedule_page_snapshot(self):
+        """把白板页面快照合并到一次定时器里。
+
+        save_current_page 是整页深拷贝（实测每键 3～5ms）。打字时每个字符存一次页
+        没有意义——中间那些状态谁也不会回去看，只有最后那一次要落到 pages 里。
+        """
+        timer = getattr(self, "_page_snapshot_timer", None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._flush_page_snapshot)
+            self._page_snapshot_timer = timer
+        timer.start(self.PAGE_SNAPSHOT_MS)
+
+    def _flush_page_snapshot(self):
         if self.whiteboard_mode:
             self.save_current_page()
-        if self.panel:
-            self.panel.position_selection_panel(self.selection_bounds())
-        self.update()
+
+    def flush_pending_snapshot(self):
+        """立刻落盘挂着的页面快照。
+
+        任何「读取 pages 才正确」的动作之前都必须调它：换页、保存项目、导出、撤销
+        入栈。少了这一步，最后打的几个字会因为定时器还没到而不在页面数据里——表现
+        为「换一页回来，刚打的字没了」。
+        """
+        timer = getattr(self, "_page_snapshot_timer", None)
+        if timer is not None and timer.isActive():
+            timer.stop()
+            self._flush_page_snapshot()
 
     def make_shape_item(self, rect):
         return {
@@ -4081,13 +4509,39 @@ class DrawingCanvas(QMainWindow):
                 previous = point
         self.last_point = pos
 
-    def draw_segments(self, painter, segments):
-        """普通笔迹逐段绘制；荧光笔按整笔合成一条路径，避免重叠处叠色发黑。"""
+    @staticmethod
+    def _segment_visible(seg, clip):
+        """这一小段笔迹会不会落在失效区域里。
+
+        一整页笔迹可能有几万段，打字时每键都从头走一遍。逐段建 QRectF 反而更贵，
+        所以直接比坐标，笔宽算作两侧余量。
+        """
+        line = seg["line"]
+        pen = seg.get("pen")
+        margin = (pen.widthF() / 2.0 + 1.0) if pen is not None else 1.0
+        x1, x2 = line.x1(), line.x2()
+        y1, y2 = line.y1(), line.y2()
+        if x1 > x2:
+            x1, x2 = x2, x1
+        if y1 > y2:
+            y1, y2 = y2, y1
+        return not (x2 + margin < clip.left() or x1 - margin > clip.right()
+                    or y2 + margin < clip.top() or y1 - margin > clip.bottom())
+
+    def draw_segments(self, painter, segments, clip=None):
+        """普通笔迹逐段绘制；荧光笔按整笔合成一条路径，避免重叠处叠色发黑。
+
+        clip 非空时跳过区域外的段。荧光笔那条整笔路径仍然要完整拼出来（一笔的透明度
+        必须一次性合成），只是最后判一下要不要画。
+        """
         index = 0
         total = len(segments)
         while index < total:
             seg = segments[index]
             if not seg.get("marker"):
+                if clip is not None and not self._segment_visible(seg, clip):
+                    index += 1
+                    continue
                 painter.setPen(seg["pen"])
                 painter.drawLine(seg["line"])
                 index += 1
@@ -4103,6 +4557,10 @@ class DrawingCanvas(QMainWindow):
                 end = line.p2()
                 index += 1
             pen = QPen(seg["pen"])
+            if clip is not None:
+                margin = pen.widthF() / 2.0 + 1.0
+                if not clip.intersects(path.boundingRect().adjusted(-margin, -margin, margin, margin)):
+                    continue
             color = QColor(pen.color())
             alpha = color.alpha()
             color.setAlpha(255)
@@ -4129,26 +4587,81 @@ class DrawingCanvas(QMainWindow):
                            pixmap, QRectF(0, 0, pixmap.width(), pixmap.height()))
         painter.restore()
 
-    def draw_content(self, painter, segments=None, shapes=None, texts=None, images=None):
-        """只画内容本身（笔迹/图片/图形/文本），不含选中框、预览、光标等辅助图元，导出复用。"""
-        self.draw_segments(painter, self.all_segments if segments is None else segments)
+    def draw_content(self, painter, segments=None, shapes=None, texts=None, images=None,
+                     clip=None, skip_text_id=None):
+        """只画内容本身（笔迹/图片/图形/文本），不含选中框、预览、光标等辅助图元，导出复用。
+
+        clip 给的是失效区域（屏幕坐标）。传了就按包围盒跳过画不到的对象——省下的不是
+        光栅化（那部分 setClipRect 已经省了），而是 Python 侧每个对象的取值、建
+        QPainterPath、算变换。导出走的是 clip=None，一个对象都不能少。
+
+        skip_text_id 是正在编辑的那一框：paintEvent 后面会带虚框和插入点再画一次，
+        这里跳过它，正好省下打字时最贵的那一次文字渲染。同样只在屏幕上跳，导出不跳。
+        """
+        self.draw_segments(painter, self.all_segments if segments is None else segments, clip=clip)
         for item in (self.image_items if images is None else images):
+            if clip is not None and not clip.intersects(self.image_bounds(item)):
+                continue
             self.draw_image_item(painter, item)
         for item in (self.shape_items if shapes is None else shapes):
+            if clip is not None and not clip.intersects(self.shape_bounds(item)):
+                continue
             self.draw_shape_item(painter, item)
         for item in (self.text_items if texts is None else texts):
+            if item["id"] == skip_text_id:
+                continue                 # 正在编辑的那框由 paintEvent 带虚框重画，别画两遍
+            if clip is not None and not clip.intersects(self.text_bounds(item)):
+                continue
             self.draw_text_item(painter, item)
 
     # --- 文本 / 公式渲染 ---
     TEXT_PAD = 6.0              # 文本框内边距
     TEXT_MIN_W = 60.0           # 拖拽定框的最小尺寸；再小就装不下一个字
     TEXT_MIN_H = 36.0
+    CARET_BLINK_MS = 530        # 跟随 Windows 默认的光标闪烁周期
 
     @staticmethod
     def text_font(item):
         font = QFont("Microsoft YaHei", max(1, int(item.get("size", 24))))
         font.setBold(bool(item.get("bold", False)))
         return font
+
+    @staticmethod
+    def text_metrics(font):
+        """QFontMetricsF for this font, cached.
+
+        Constructing one is not free, and the layout code asks for advances a few
+        hundred times per keystroke（公式排版每个节点都要问字宽）。实测把这一层缓存
+        掉，公式排版从 31.6ms/40 键降到几乎不可见。
+        """
+        key = (font.family(), font.pointSizeF(), font.bold())
+        cached = _FONT_METRICS_CACHE.get(key)
+        if cached is None:
+            cached = QFontMetricsF(font)
+            if len(_FONT_METRICS_CACHE) > 256:
+                _FONT_METRICS_CACHE.clear()
+            _FONT_METRICS_CACHE[key] = cached
+        return cached
+
+    @classmethod
+    def char_advance(cls, metrics, key, ch):
+        """单字符宽度，按 (字体键, 字符) 缓存。
+
+        换行原来对每个字符都量一次【整行】，行越长每次越贵，于是打字越多越卡——
+        实测 60 字时 12.2ms/键，180 字时 19.4ms/键。改成累加单字符宽度后，每个新
+        字符只量它自己，且同一个字符第二次出现直接命中缓存。
+        """
+        cache = _CHAR_ADVANCE_CACHE.get(key)
+        if cache is None:
+            cache = {}
+            if len(_CHAR_ADVANCE_CACHE) > 64:
+                _CHAR_ADVANCE_CACHE.clear()
+            _CHAR_ADVANCE_CACHE[key] = cache
+        width = cache.get(ch)
+        if width is None:
+            width = metrics.horizontalAdvance(ch)
+            cache[ch] = width
+        return width
 
     @staticmethod
     def text_pen_bleed(item):
@@ -4177,29 +4690,59 @@ class DrawingCanvas(QMainWindow):
         宽度允许就折行，而不是让文字冲出框外。中文没有空格，所以能在任意字符间断行；
         西文优先在空格处断，断不开的长串（网址、连写公式）才硬断——否则一个长单词
         就会顶穿整框。
+
+        结果按内容缓存：本方法在每次按键中要被调用 3 次（撑高、量尺寸、重绘），
+        三次的入参完全一样。
         """
         text = str(item.get("text", ""))
         limit = self.text_wrap_width(item)
         if limit is None:
             return text.split("\n")
-        metrics = QFontMetricsF(self.text_font(item))
+        font = self.text_font(item)
+        key = (text, round(limit, 2), font.family(), font.pointSizeF(), font.bold())
+        cached = item.get("_wrap_cache")
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        metrics = self.text_metrics(font)
+        font_key = (font.family(), font.pointSizeF(), font.bold())
         lines = []
         for paragraph in text.split("\n"):
-            lines.extend(self._wrap_paragraph(paragraph, metrics, limit))
-        return lines or [""]
+            lines.extend(self._wrap_paragraph(paragraph, metrics, limit, font_key))
+        lines = lines or [""]
+        item["_wrap_cache"] = (key, lines)
+        return lines
 
-    @staticmethod
-    def _wrap_paragraph(paragraph, metrics, limit):
-        """把一个段落折成若干行，每行宽度不超过 limit。"""
+    @classmethod
+    def _wrap_paragraph(cls, paragraph, metrics, limit, font_key=None):
+        """把一个段落折成若干行，每行宽度不超过 limit。
+
+        宽度靠累加单字符宽度得到，而不是每加一个字就重量整行——后者让打字成本随
+        已有字数线性上升（实测 180 字时每键 19.4ms）。累加值只用来判断「还早得很」；
+        一旦接近 limit 就改量真实字符串，所以贴边处的断行位置与逐次全量测量一致，
+        字距调整（kerning）不会让某一行悄悄超出框宽。
+        """
         if not paragraph:
             return [""]
+        if font_key is None:
+            font_key = (metrics.font().family(), metrics.font().pointSizeF(),
+                        metrics.font().bold())
+        # 进入精确测量的阈值。留 8% 余量：字距调整只会让实际宽度比累加值略小或略大
+        # 一点点，8% 远超单个字符能造成的偏差。
+        exact_zone = limit * 0.92
         lines = []
         current = ""
+        running = 0.0          # current 的累加宽度（近似）
         last_break = -1        # current 里最后一个可断处（空格之后）的下标
         for ch in paragraph:
-            candidate = current + ch
-            if metrics.horizontalAdvance(candidate) <= limit or not current:
-                current = candidate
+            advance = cls.char_advance(metrics, font_key, ch)
+            estimate = running + advance
+            if estimate <= exact_zone:
+                fits = True
+            else:
+                fits = metrics.horizontalAdvance(current + ch) <= limit
+            if fits or not current:
+                current += ch
+                running = estimate
                 if ch.isspace():
                     last_break = len(current)
                 continue
@@ -4213,6 +4756,7 @@ class DrawingCanvas(QMainWindow):
             else:
                 lines.append(current)
                 current = ch
+            running = sum(cls.char_advance(metrics, font_key, c) for c in current)
         if current:
             lines.append(current)
         return lines or [""]
@@ -4222,34 +4766,61 @@ class DrawingCanvas(QMainWindow):
 
         formula.py 刻意不依赖 Qt，排版只通过这个接口拿字宽和升降部——这样几何
         计算能用假度量做精确断言，而不是「看起来差不多」。
+
+        度量对象走 text_metrics 的缓存：原先每次 advance/ascent/descent 调用都新建
+        一个 QFont 和一个 QFontMetricsF，而一次公式排版会调几百次。
         """
         base_font = self.text_font(item)
+        owner = self
 
         class _Metrics:
             @staticmethod
-            def _font(size):
+            def _metrics(size):
                 font = QFont(base_font)
                 font.setPointSizeF(max(1.0, float(size)))
-                return font
+                return owner.text_metrics(font)
 
             def advance(self, text, size):
-                return QFontMetricsF(self._font(size)).horizontalAdvance(text)
+                return self._metrics(size).horizontalAdvance(text)
 
             def ascent(self, size):
-                return QFontMetricsF(self._font(size)).ascent()
+                return self._metrics(size).ascent()
 
             def descent(self, size):
-                return QFontMetricsF(self._font(size)).descent()
+                return self._metrics(size).descent()
 
         return _Metrics()
 
     def formula_box(self, item):
-        """排好版的公式盒；没有公式则返回 None。"""
+        """排好版的公式盒；没有公式则返回 None。
+
+        按「内容改动计数 + 字体规格」缓存。排版一次要问几百次字宽，而每次按键会有
+        3～5 处分别调本方法（撑高、量尺寸、重绘、命中测试），入参完全相同。改动计数
+        由 bump_text_revision 维护——公式树是可变对象，不能拿它自己当键。
+        """
         tree = item.get("formula")
         if not tree:
             return None
-        return formula.layout(tree, float(max(1, item.get("size", 24))),
-                              self._formula_metrics(item))
+        font = self.text_font(item)
+        key = (item.get("_rev", 0), font.family(), font.pointSizeF(), font.bold())
+        cached = item.get("_box_cache")
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        box = formula.layout(tree, float(max(1, item.get("size", 24))),
+                             self._formula_metrics(item))
+        item["_box_cache"] = (key, box)
+        return box
+
+    @staticmethod
+    def bump_text_revision(item):
+        """内容改了：让 formula_box 的缓存失效。
+
+        公式树是就地修改的，所以缓存不可能自己发现内容变了——每一处改动都必须经过
+        这里。漏掉一处的表现是「打了字公式不变」，比慢更难查，因此所有改动都收束在
+        _after_text_change / text_insert_structure 这两条路上。
+        """
+        item["_rev"] = int(item.get("_rev", 0)) + 1
+        item.pop("_wrap_cache", None)
 
     def text_content_size(self, item):
         """内容自身需要的尺寸（不含边距，未经 scale/rotation）。"""
@@ -4352,7 +4923,7 @@ class DrawingCanvas(QMainWindow):
             self._draw_formula_box(painter, box, item, editing=editing)
             painter.restore()
         else:
-            metrics = QFontMetricsF(self.text_font(item))
+            metrics = self.text_metrics(self.text_font(item))
             y = rect.top() + self.TEXT_PAD + metrics.ascent()
             for line in self.text_lines(item):
                 painter.drawText(QPointF(rect.left() + self.TEXT_PAD, y), line)
@@ -4427,6 +4998,24 @@ class DrawingCanvas(QMainWindow):
         painter.setPen(QPen(accent, 1.6))
         painter.setBrush(QColor(accent.red(), accent.green(), accent.blue(), 40))
         painter.drawRect(target.adjusted(-1.5, -1.5, 1.5, 1.5))
+        painter.restore()
+
+    def _draw_caret(self, painter, item):
+        """画插入点。熄灭相位不画——这就是「闪烁」。
+
+        画在局部坐标里再走同一套 translate/rotate/scale，光标才会跟着框一起旋转、
+        缩放；用画布坐标画的竖线在旋转过的框里会明显歪掉。
+        """
+        if not self.caret_visible:
+            return
+        local = self.caret_local_rect(item)
+        if local is None:
+            return
+        painter.save()
+        painter.setTransform(self.text_transform(item), True)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(item["color"]))
+        painter.drawRect(local)
         painter.restore()
 
     def _draw_radical(self, painter, box):
@@ -5091,8 +5680,16 @@ class DrawingCanvas(QMainWindow):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.fillRect(self.rect(), self.board_background())
-        self.draw_content(painter)
+        # 只重画失效的那块。画布是全屏的，而打一个字只改一框：整屏填背景加逐个对象
+        # 重绘实测 9.5ms/帧（白板模式），是每键耗时里最大的一项。裁剪之后 Qt 光栅化
+        # 只处理这块，draw_content 里再按包围盒把画不到的对象跳过。
+        clip = QRectF(event.rect())
+        painter.setClipRect(clip)
+        painter.fillRect(clip, self.board_background())
+        # 穿透模式下不画编辑 HUD，那时编辑中的框得走常态渲染，不能跳过。
+        editing = self.editing_text_item() if self.is_drawing_mode else None
+        self.draw_content(painter, clip=clip,
+                          skip_text_id=None if editing is None else editing["id"])
         # 穿透模式下不绘制任何交互 HUD（选择框 / 拖拽框 / 预览图形 / 光标圈），
         # 只保留已落墨的批注内容，避免画布层残留会误导用户的叠加元素。
         if self.is_drawing_mode:
@@ -5108,11 +5705,11 @@ class DrawingCanvas(QMainWindow):
                 painter.setBrush(QColor(120, 140, 170, 30))
                 painter.drawRect(self.text_drag_rect)
                 painter.restore()
-            editing = self.editing_text_item()
             if editing is not None:
-                # 编辑中的框重画一遍带虚框和空槽提示；常态渲染与导出都不含这些辅助图元
+                # 编辑中的框带虚框和空槽提示画一次；常态渲染与导出都不含这些辅助图元
                 self.draw_text_item(painter, editing, editing=True)
                 self._draw_active_slot(painter, editing)
+                self._draw_caret(painter, editing)
             if self.draw_state == "SHAPE" and self.pending_points:
                 preview = self.build_point_shape(self.shape_type, self.pending_points + [QPointF(self.mouse_pos)])
                 if preview:
@@ -5270,9 +5867,8 @@ class DrawingCanvas(QMainWindow):
         elif self.draw_state == "TEXT":
             editing = self.editing_text_item()
             if editing is not None and self.text_bounds(editing).contains(QPointF(pos)):
-                # 正在编辑这一框：点击是「把插入点移到这个格子」，不是新建
-                if not self.set_editing_slot_at(pos):
-                    self.editing_slot = None
+                # 正在编辑这一框：点击是「把插入点移到这里」，不是新建
+                self.set_editing_slot_at(pos)
                 return
             hit = self.text_at(pos)
             if editing is not None and (hit is None or hit["id"] != editing["id"]):
@@ -5792,8 +6388,13 @@ class _TextInputEdit(QTextEdit):
     两种模式行为不同：
     * 纯文本：本控件就是真编辑器，保留 Qt 的输入法（中文/日文/韩文的候选窗需要一个
       真正可编辑的字段才能工作），内容变化后整体同步给画布对象。
-    * 公式：内容留空，截获按键转成 canvas.text_insert / text_backspace，因为字符要
-      落进当前那个格子，而不是一条平铺的字符串。
+    * 公式：字符要落进当前那个格子而不是一条平铺的字符串，所以按键被截获转成
+      canvas.text_insert / text_backspace；同时把当前格子投影成一行文本显示出来
+      （formula.project_slot），偏移与插入点一一对应。5.3.x 这里是空的——用户打的字
+      只出现在画布上，面板里什么也没有，正是「符号面板却没出现」。
+
+    两种模式都把光标位置和画布插入点双向同步：在这里挪光标画布跟着动，在画布上点一下
+    这里的光标也跟着走。
     """
 
     def __init__(self, panel):
@@ -5804,6 +6405,7 @@ class _TextInputEdit(QTextEdit):
         self.setAcceptRichText(False)
         self.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         self.textChanged.connect(self._on_text_changed)
+        self.cursorPositionChanged.connect(self._on_cursor_moved)
 
     def composing(self):
         """是否正在输入法组字。
@@ -5841,15 +6443,71 @@ class _TextInputEdit(QTextEdit):
         self.reset_ime()
         self._syncing = True
         try:
-            self.setPlainText("" if item.get("formula") else str(item.get("text", "")))
-            cursor = self.textCursor()
-            cursor.movePosition(cursor.MoveOperation.End)
-            self.setTextCursor(cursor)
+            self.setPlainText(self._projection(item))
+            self._place_cursor(self._caret_offset())
         finally:
             self._syncing = False
 
+    def _projection(self, item):
+        """本控件该显示的字符串。公式显示当前格子的投影，纯文本显示全文。"""
+        canvas = self._canvas()
+        if item.get("formula") and canvas is not None:
+            return formula.project_slot(canvas.caret_slot_nodes(item) or [])
+        return str(item.get("text", ""))
+
+    def _caret_offset(self):
+        canvas = self._canvas()
+        return int(getattr(canvas, "caret_offset", 0)) if canvas is not None else 0
+
+    def _place_cursor(self, offset):
+        cursor = self.textCursor()
+        offset = max(0, min(int(offset), len(self.toPlainText())))
+        cursor.setPosition(offset)
+        self.setTextCursor(cursor)
+
+    def sync_from_canvas(self):
+        """画布内容或插入点变了：把这里的文本与光标对上。
+
+        只在真的不一致时改动。setPlainText 会重置光标并触发 textChanged，每敲一个字
+        都无条件重设一次既是白干，也会把用户在这里的光标位置踩掉。
+        """
+        canvas = self._canvas()
+        if canvas is None or self._syncing:
+            return
+        item = canvas.editing_text_item()
+        if item is None:
+            return
+        target = self._projection(item)
+        offset = self._caret_offset()
+        self._syncing = True
+        try:
+            if self.toPlainText() != target:
+                self.setPlainText(target)
+                self._place_cursor(offset)
+            elif self.textCursor().position() != offset:
+                self._place_cursor(offset)
+        finally:
+            self._syncing = False
+
+    def _on_cursor_moved(self):
+        """这里挪光标＝画布插入点跟着挪。方向键、点击本控件都走这条路。"""
+        if self._syncing or self._composing:
+            return
+        canvas = self._canvas()
+        item = canvas.editing_text_item() if canvas is not None else None
+        if item is None:
+            return
+        if not item.get("formula") and self.toPlainText() != str(item.get("text", "")):
+            # 内容正在改（打字的那一刻光标也会动），交给 _on_text_changed 一并处理。
+            # 否则每敲一个字符要多走一次 set_caret，多刷一次画面。
+            return
+        position = self.textCursor().position()
+        if position == self._caret_offset():
+            return
+        canvas.set_caret(position)
+
     def _on_text_changed(self):
-        if self._syncing or self._formula_mode():
+        if self._syncing:
             return
         canvas = self._canvas()
         if canvas is None:
@@ -5857,19 +6515,39 @@ class _TextInputEdit(QTextEdit):
         item = canvas.editing_text_item()
         if item is None:
             return
+        if item.get("formula"):
+            # 公式模式下内容由 keyPressEvent/inputMethodEvent 经画布改，这里只是镜像。
+            # 万一被别的路径改了（粘贴、输入法直接改 document），以画布为准还原回去。
+            self.sync_from_canvas()
+            return
         item["text"] = self.toPlainText()
+        # 插入点跟着 Qt 自己的光标走：纯文本模式下本控件才是真编辑器，它的光标位置就
+        # 是权威，画布只是照着画。
+        canvas.caret_offset = self.textCursor().position()
         canvas._after_text_change(item)
 
     def keyPressEvent(self, event):
         canvas = self._canvas()
         if canvas is not None and self._formula_mode():
             key = event.key()
-            if key in (Qt.Key.Key_Backspace, Qt.Key.Key_Delete):
+            if key == Qt.Key.Key_Backspace:
                 canvas.text_backspace()
+                self.sync_from_canvas()
+                event.accept()
+                return
+            if key == Qt.Key.Key_Delete:
+                canvas.text_delete_forward()
+                self.sync_from_canvas()
                 event.accept()
                 return
             if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
                 event.accept()      # 公式里换行没有意义
+                return
+            if key in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Home,
+                       Qt.Key.Key_End, Qt.Key.Key_Up, Qt.Key.Key_Down):
+                # 交给 QTextEdit 挪光标，_on_cursor_moved 会把画布插入点同步过去。
+                # 公式的投影是一行，上/下等价于行首/行尾，正是这里想要的。
+                super().keyPressEvent(event)
                 return
             text = event.text()
             # 组字进行中不能把原始按键当字符插进去：那正是拼音字母和汉字一起冒出来的
@@ -5878,6 +6556,7 @@ class _TextInputEdit(QTextEdit):
             # inputMethodEvent 的提交串。
             if text and text.isprintable() and not self._composing:
                 canvas.text_insert(text)
+                self.sync_from_canvas()
                 event.accept()
                 return
         if event.key() == Qt.Key.Key_Escape:
@@ -5900,6 +6579,7 @@ class _TextInputEdit(QTextEdit):
         if canvas is not None and self._formula_mode():
             if committed:
                 canvas.text_insert(committed)
+                self.sync_from_canvas()
             event.accept()
             return
         super().inputMethodEvent(event)
@@ -7537,7 +8217,14 @@ class ControlPanel(QWidget):
             self.select_panel.show()
             self.raise_floating(self.select_panel)
 
-    def position_selection_panel(self, rect):
+    def position_selection_panel(self, rect, restack=True):
+        """把选中面板摆到选中范围旁边。
+
+        restack=False 是打字路径专用：文本框长高会让选中范围变化，面板必须跟着挪，
+        但重排整条浮窗链是一串 Win32 调用（实测 1.9ms/键），而层级只在浮窗的显示/
+        隐藏集合变化时才真的需要重算。打字不改变哪些窗口可见，所以那一串可以省掉。
+        面板从隐藏变为显示时仍然无条件重排——那一次可见集合确实变了。
+        """
         if not hasattr(self, "select_panel") or not self.canvas or not self.canvas.selected_ids or rect.isNull():
             if hasattr(self, "select_panel"):
                 self.select_panel.hide()
@@ -7560,11 +8247,12 @@ class ControlPanel(QWidget):
         # （复制/删除那一条）是辅助。顺序反了不只是观感问题——把选中面板顶上来会
         # 顺带抢走激活，文字输入控件的键盘焦点随之丢失，键盘就再也打不出字。
         if getattr(self, "text_panel", None) is not None and self.text_panel.isVisible():
-            force_topmost(self.text_panel.winId())
-            # 选中面板刚显示出来，可见集合变了，归属链要跟着重建。
-            self.chain_floating_owners()
-            self.restack_floatings()
-            self._refocus_input()
+            if restack or not was_visible:
+                force_topmost(self.text_panel.winId())
+                # 选中面板刚显示出来，可见集合变了，归属链要跟着重建。
+                self.chain_floating_owners()
+                self.restack_floatings()
+                self._refocus_input()
 
     def open_selection_color(self):
         self.timer.stop()
@@ -9210,7 +9898,8 @@ class ControlPanel(QWidget):
             track_event("formula_structure_inserted", kind=kind)
         else:
             self.canvas.text_insert(entry)
-            self._sync_input_from_canvas()
+        # 插结构会换格子，插符号会改内容，两种都要让输入控件跟上当前投影
+        self._sync_input_from_canvas()
         self.position_selection_panel(self.canvas.selection_bounds())
         self._position_text_panel()     # 结构插入会让公式变大，面板可能需要收回屏内
         self._refocus_input()
@@ -9249,17 +9938,18 @@ class ControlPanel(QWidget):
         return self.text_input.hasFocus()
 
     def _sync_input_from_canvas(self):
-        """把画布对象的纯文本回灌进输入控件。
+        """把画布对象的内容回灌进输入控件。
 
         退格/换行按钮改的是画布对象；不回灌的话控件里还是旧内容，用户接着打字时
-        controls 的 textChanged 会把旧内容整体写回画布，刚才那一下退格就白做了。
+        textChanged 会把旧内容整体写回画布，刚才那一下退格就白做了。
+
+        公式模式同样要回灌：5.4.0 起输入控件会显示当前格子的投影，不再是空的。
         """
         canvas = self.canvas
         if canvas is None or getattr(self, "text_input", None) is None:
             return
-        item = canvas.editing_text_item()
-        if item is not None and not item.get("formula"):
-            self.text_input.load_from(item)
+        if canvas.editing_text_item() is not None:
+            self.text_input.sync_from_canvas()
 
     def _text_backspace(self):
         if self.canvas:
@@ -9988,6 +10678,12 @@ if __name__ == "__main__":
     pnl.apply_theme()
     pnl.load_settings()
     app.aboutToQuit.connect(pnl.save_settings)
+    # 退出必须顺带收走软键盘。挂在 aboutToQuit 上而不是某个窗口的 closeEvent：
+    # 退出有多条路（F12 全局热键 → exit_requested → QApplication.quit、面板的退出
+    # 按钮、任务管理器之外的正常关闭），只有 aboutToQuit 是它们共同的出口。留着
+    # 不关的后果是我们已经退了，TabTip/osk 还占着屏幕，用户下一次点任何输入框它
+    # 又弹出来，而能收它的程序已经不在了。
+    app.aboutToQuit.connect(lambda: touch_keyboard.shutdown())
     pnl.update_whiteboard_ui()
     pnl.update_history_ui()
     # Prefer the screen the panel will live on; fall back to primary.

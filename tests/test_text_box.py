@@ -457,19 +457,24 @@ class SlotClickTests(TextBoxCase):
         self.assertTrue(self.canvas.set_editing_slot_at(canvas_point))
         self.assertEqual(self.canvas.editing_slot, (0, "den"))
 
-    def test_clicking_outside_any_slot_reports_false(self):
+    def test_clicking_outside_any_slot_keeps_the_current_slot(self):
+        """5.4.0 起点击总会落到一个插入点上，但点不中任何格子时不该换格子。"""
         from PyQt6.QtCore import QPointF
 
         self.make_box()
         self.canvas.text_insert_structure("frac")
-        self.assertFalse(self.canvas.set_editing_slot_at(QPointF(-900.0, -900.0)))
+        before = self.canvas.editing_slot
+        self.canvas.set_editing_slot_at(QPointF(-900.0, -900.0))
+        self.assertEqual(self.canvas.editing_slot, before)
 
-    def test_clicking_a_plain_text_box_reports_false(self):
+    def test_clicking_a_plain_text_box_positions_the_caret(self):
+        """5.3.x 纯文本点击什么也不做（只认公式格子），所以点中间也改不了那里。"""
         from PyQt6.QtCore import QPointF
 
         item = self.make_box()
         self.canvas.text_insert("no formula")
-        self.assertFalse(self.canvas.set_editing_slot_at(QPointF(item["pos"])))
+        self.assertTrue(self.canvas.set_editing_slot_at(QPointF(item["pos"])))
+        self.assertEqual(self.canvas.caret_offset, 0)
 
 
 class ColourAndWidthTests(TextBoxCase):

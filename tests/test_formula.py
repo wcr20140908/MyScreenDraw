@@ -361,5 +361,132 @@ class PlainTextTests(unittest.TestCase):
         self.assertEqual(formula.plain_text(None), "")
 
 
+class CaretOffsetTests(unittest.TestCase):
+    """The caret is an integer offset into a slot. 5.3.x had no such concept: every
+    keystroke appended and backspace always took the last atom, so a click in the
+    middle of a formula changed nothing about where the next character landed."""
+
+    def slot(self):
+        return [text_node("ab"),
+                {"k": "frac", "num": [text_node("1")], "den": [text_node("2")]},
+                text_node("cd")]
+
+    def test_a_structure_node_is_one_position_however_big_it_is(self):
+        # Otherwise the caret could land "inside" a fraction in the parent row,
+        # which is not a place the parent row can represent.
+        self.assertEqual(formula.slot_length(self.slot()), 5)
+
+    def test_empty_and_none_have_no_positions(self):
+        self.assertEqual(formula.slot_length([]), 0)
+        self.assertEqual(formula.slot_length(None), 0)
+
+    def test_offsets_map_to_nodes_and_back(self):
+        nodes = self.slot()
+        for offset in range(formula.slot_length(nodes) + 1):
+            index, char = formula.locate(nodes, offset)
+            self.assertEqual(formula.offset_of(nodes, index, char), offset)
+
+    def test_locate_walks_across_the_structure_node(self):
+        nodes = self.slot()
+        self.assertEqual(formula.locate(nodes, 0), (0, 0))
+        self.assertEqual(formula.locate(nodes, 2), (1, 0))   # before the fraction
+        self.assertEqual(formula.locate(nodes, 3), (2, 0))   # after it
+        self.assertEqual(formula.locate(nodes, 5), (3, 0))   # past the end
+
+    def test_a_stale_offset_clamps_instead_of_raising(self):
+        # Undo and page switches can leave a caret pointing past the end. Dropping
+        # the character the user just typed would be worse than clamping.
+        nodes = [text_node("ab")]
+        self.assertEqual(formula.locate(nodes, 99), (1, 0))
+        self.assertEqual(formula.insert_text(nodes, 99, "c"), 3)
+        self.assertEqual(nodes[0]["v"], "abc")
+
+    def test_insert_lands_at_the_caret_not_at_the_end(self):
+        nodes = [text_node("ac")]
+        self.assertEqual(formula.insert_text(nodes, 1, "b"), 2)
+        self.assertEqual(nodes[0]["v"], "abc")
+
+    def test_typing_merges_into_one_text_node(self):
+        # One node per character would turn a sentence into hundreds of nodes, and
+        # every layout pass walks all of them.
+        nodes = []
+        offset = 0
+        for char in "hello":
+            offset = formula.insert_text(nodes, offset, char)
+        self.assertEqual(len(nodes), 1)
+        self.assertEqual(nodes[0]["v"], "hello")
+
+    def test_typing_after_a_structure_extends_the_text_that_follows(self):
+        nodes = [{"k": "sqrt", "arg": [text_node("x")]}, text_node("y")]
+        self.assertEqual(formula.insert_text(nodes, 1, "z"), 2)
+        self.assertEqual([n.get("v") for n in nodes if n["k"] == "t"], ["zy"])
+
+    def test_a_structure_inserted_mid_text_splits_it(self):
+        nodes = [text_node("abc")]
+        index, after = formula.insert_node(nodes, 2, formula.new_node("sqrt"))
+        self.assertEqual((index, after), (1, 3))
+        self.assertEqual([n.get("v", n["k"]) for n in nodes], ["ab", "sqrt", "c"])
+
+    def test_a_structure_inserted_at_the_end_does_not_leave_an_empty_node(self):
+        nodes = [text_node("ab")]
+        index, _after = formula.insert_node(nodes, 2, formula.new_node("frac"))
+        self.assertEqual(index, 1)
+        self.assertEqual(len(nodes), 2)
+
+    def test_backspace_deletes_at_the_caret(self):
+        nodes = [text_node("abc")]
+        self.assertEqual(formula.delete_before(nodes, 2), 1)
+        self.assertEqual(nodes[0]["v"], "ac")
+
+    def test_backspace_takes_a_whole_structure(self):
+        # Merging a half-deleted fraction's slots into the parent row is never what
+        # the user meant, and every equation editor behaves this way.
+        nodes = self.slot()
+        self.assertEqual(formula.delete_before(nodes, 3), 2)
+        self.assertEqual([n["k"] for n in nodes], ["t", "t"])
+
+    def test_backspace_at_the_start_does_nothing(self):
+        nodes = [text_node("ab")]
+        self.assertEqual(formula.delete_before(nodes, 0), 0)
+        self.assertEqual(nodes[0]["v"], "ab")
+
+    def test_emptied_text_nodes_are_removed(self):
+        nodes = [text_node("a"), {"k": "sqrt", "arg": []}]
+        formula.delete_before(nodes, 1)
+        self.assertEqual([n["k"] for n in nodes], ["sqrt"])
+
+
+class ProjectionTests(unittest.TestCase):
+    """The symbol panel shows a projection of the current slot. Its offsets must
+    equal caret offsets exactly, or a cursor clicked in the panel maps to the wrong
+    place in the formula."""
+
+    def test_text_projects_verbatim(self):
+        self.assertEqual(formula.project_slot([text_node("ab")]), "ab")
+
+    def test_each_structure_is_exactly_one_character(self):
+        nodes = [text_node("a"), {"k": "frac", "num": [], "den": []}, text_node("b")]
+        projection = formula.project_slot(nodes)
+        self.assertEqual(len(projection), formula.slot_length(nodes))
+        self.assertEqual(projection[1], formula.PLACEHOLDERS["frac"])
+
+    def test_projection_length_equals_caret_positions_for_every_kind(self):
+        for kind in formula.SLOTS:
+            nodes = [formula.new_node(kind)]
+            with self.subTest(kind=kind):
+                self.assertEqual(len(formula.project_slot(nodes)),
+                                 formula.slot_length(nodes))
+
+    def test_a_structures_contents_do_not_leak_into_the_projection(self):
+        # The projection is one slot deep on purpose: the panel edits the slot the
+        # caret is in, and a fraction's numerator is a different slot.
+        nodes = [{"k": "frac", "num": [text_node("123")], "den": [text_node("456")]}]
+        self.assertEqual(len(formula.project_slot(nodes)), 1)
+
+    def test_empty_projects_empty(self):
+        self.assertEqual(formula.project_slot([]), "")
+        self.assertEqual(formula.project_slot(None), "")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -208,6 +208,124 @@ def is_empty(nodes):
     return not nodes
 
 
+def slot_length(nodes):
+    """How many caret positions a slot's contents span.
+
+    A text node contributes one position per character; a structure node counts as
+    a single indivisible position. That makes the caret an integer offset into the
+    slot, which is what lets it be clicked to, walked with the arrow keys and
+    compared in tests -- rather than "always the end", which is what 5.3.x did.
+    """
+    total = 0
+    for node in nodes or []:
+        total += len(node.get("v", "")) if node.get("k") == "t" else 1
+    return total
+
+
+def locate(nodes, offset):
+    """Map a caret offset in a slot to (node_index, char_index).
+
+    char_index is only meaningful for text nodes; for a structure node it is 0
+    (caret before it) and the position after it is reported as the next node index.
+    An offset past the end clamps to the end, because a stale caret must degrade to
+    a sane position rather than dropping the character the user just typed.
+    """
+    remaining = max(0, int(offset))
+    for index, node in enumerate(nodes or []):
+        span = len(node.get("v", "")) if node.get("k") == "t" else 1
+        if remaining < span:
+            return index, remaining
+        remaining -= span
+    return len(nodes or []), 0
+
+
+def offset_of(nodes, node_index, char_index=0):
+    """Inverse of :func:`locate`: the caret offset at (node_index, char_index)."""
+    total = 0
+    for index, node in enumerate(nodes or []):
+        if index >= node_index:
+            break
+        total += len(node.get("v", "")) if node.get("k") == "t" else 1
+    return total + max(0, int(char_index))
+
+
+def insert_text(nodes, offset, chars):
+    """Insert characters at a caret offset. Returns the offset after the insertion.
+
+    Adjacent characters are merged into one text node rather than one node per
+    character -- a sentence would otherwise become hundreds of nodes, and every
+    layout pass walks all of them.
+    """
+    if not chars:
+        return offset
+    # Clamp first: a stale offset (undo, page switch) must come back as a real
+    # position, not as `stale + len(chars)`, which would be past the end again and
+    # stay wrong for every keystroke after it.
+    offset = max(0, min(int(offset), slot_length(nodes)))
+    index, char_index = locate(nodes, offset)
+    if index < len(nodes) and nodes[index].get("k") == "t":
+        value = nodes[index]["v"]
+        nodes[index]["v"] = value[:char_index] + chars + value[char_index:]
+        return offset + len(chars)
+    # Landing between nodes: extend the text node just before, if there is one, so
+    # typing across a structure boundary does not fragment the tree.
+    if index > 0 and nodes[index - 1].get("k") == "t" and char_index == 0:
+        nodes[index - 1]["v"] += chars
+        return offset + len(chars)
+    nodes.insert(index, new_node("t", chars))
+    return offset + len(chars)
+
+
+def insert_node(nodes, offset, node):
+    """Insert a structure node at a caret offset, splitting a text node if needed.
+
+    Returns (node_index, offset_after). Splitting matters: with the caret in the
+    middle of "abc", a fraction has to land between "ab" and "c", not after both.
+    """
+    offset = max(0, min(int(offset), slot_length(nodes)))
+    index, char_index = locate(nodes, offset)
+    if index < len(nodes) and nodes[index].get("k") == "t" and char_index > 0:
+        value = nodes[index]["v"]
+        if char_index >= len(value):
+            index += 1
+        else:
+            nodes[index]["v"] = value[:char_index]
+            nodes.insert(index + 1, new_node("t", value[char_index:]))
+            index += 1
+    nodes.insert(index, node)
+    return index, offset + 1
+
+
+def delete_before(nodes, offset):
+    """Delete the one caret position before `offset`. Returns the new offset.
+
+    Deleting a structure node takes the whole node with its contents -- the same
+    thing every equation editor does, because merging a half-deleted fraction's
+    slots into the surrounding row is never what the user meant.
+    """
+    offset = max(0, min(int(offset), slot_length(nodes)))
+    if offset <= 0:
+        return 0
+    index, char_index = locate(nodes, offset)
+    if index < len(nodes) and nodes[index].get("k") == "t" and char_index > 0:
+        value = nodes[index]["v"]
+        nodes[index]["v"] = value[:char_index - 1] + value[char_index:]
+        if not nodes[index]["v"]:
+            nodes.pop(index)
+        return offset - 1
+    # The caret sits at a node boundary: the thing before it is the previous node.
+    if index == 0:
+        return 0
+    previous = nodes[index - 1]
+    if previous.get("k") == "t":
+        previous["v"] = previous["v"][:-1]
+        if not previous["v"]:
+            nodes.pop(index - 1)
+        return offset - 1
+    nodes.pop(index - 1)
+    return offset - 1
+
+
 def get_slot(nodes, path):
     """Resolve a slot path to the list it names. Returns None if the path is stale."""
     current = nodes
@@ -398,6 +516,37 @@ def hit_slot(box, x, y):
             if best_area is None or area < best_area:
                 best, best_area = path, area
     return best
+
+
+# One placeholder character per structure node, for the editable projection below.
+# They are real, visible glyphs rather than U+FFFC so that the panel shows the user
+# *something* where a fraction sits, instead of a tofu box.
+PLACEHOLDERS = {
+    "frac": "▨",
+    "sup": "▴",
+    "sub": "▾",
+    "sqrt": "√",
+    "int": "∫",
+    "sum": "∑",
+}
+PLACEHOLDER_CHARS = frozenset(PLACEHOLDERS.values())
+
+
+def project_slot(nodes):
+    """Project one slot to a string whose offsets equal caret offsets, exactly.
+
+    Every text character maps to one caret position and every structure node to
+    exactly one placeholder character, so string index == caret offset with no
+    mapping table. That identity is what lets the symbol panel show live content and
+    hand a clicked cursor position straight back as a caret offset -- which is the
+    whole point, since :func:`plain_text` is lossy and its offsets mean nothing.
+    """
+    parts = []
+    for node in nodes or []:
+        kind = node.get("k")
+        parts.append(node.get("v", "") if kind == "t"
+                     else PLACEHOLDERS.get(kind, "▨"))
+    return "".join(parts)
 
 
 def plain_text(nodes):

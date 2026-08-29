@@ -1,11 +1,11 @@
-# Build and verify a clean portable Windows directory with PyInstaller.
+﻿# Build and verify a clean portable Windows directory with PyInstaller.
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $root
 
 $version = (& python -c "from version import VERSION; print(VERSION)").Trim()
-if ($version -ne "5.3.4") {
-    throw "Release build requires version 5.3.4, found '$version'"
+if ($version -ne "5.4.0") {
+    throw "Release build requires version 5.4.0, found '$version'"
 }
 
 # Never package checked-out runtime data or stale PyInstaller output.
