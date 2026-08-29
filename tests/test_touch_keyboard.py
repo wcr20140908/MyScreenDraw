@@ -165,8 +165,10 @@ class LaunchMechanismTests(_LauncherHarness):
         self.assertNotIn("subprocess", imported,
                          "不能用 subprocess 起键盘——CreateProcess 无法提升，永远 WinError 740")
         self.assertNotIn("CreateProcessW", attribute_calls)
-        self.assertIn("ShellExecuteW", attribute_calls,
-                      "必须经 ShellExecuteW 启动，它才会走 UAC 提升那条路")
+        # 5.4.0 起用 ShellExecuteExW 而不是 ShellExecuteW：同样走 UAC 提升那条路，
+        # 但它能带回进程句柄，从而记下我们启动的 PID——退出时才知道该关掉谁。
+        self.assertIn("ShellExecuteExW", attribute_calls,
+                      "必须经 ShellExecuteEx 启动，它才会走 UAC 提升那条路")
 
     def test_a_cold_machine_starts_the_process_before_toggling_com(self):
         """ITipInvocation 只在 TabTip 已经在跑时才注册，所以顺序不能反。"""
@@ -472,6 +474,157 @@ class DegradationTests(unittest.TestCase):
             self.assertIsInstance(touch_keyboard.show(), bool)
         finally:
             ctypes.windll = original
+
+    def test_shutdown_survives_a_broken_win32_call(self):
+        """退出路径上抛异常会把干净退出变成崩溃。"""
+        import ctypes
+
+        original = ctypes.windll
+        try:
+            ctypes.windll = None
+            closed, terminated = touch_keyboard.shutdown()
+            self.assertEqual((closed, terminated), ([], []))
+        finally:
+            ctypes.windll = original
+
+
+class ShutdownTests(unittest.TestCase):
+    """5.4.0 request: "关闭软件后，无论是tabtip还是osk键盘，都应该顺带完成关闭".
+
+    Closing the window is not enough. TabTip normally answers SC_CLOSE by re-cloaking
+    itself and keeps running, so the user is left with a keyboard that pops back up on
+    the next text field, with our app gone and nothing to dismiss it. And before this
+    release nothing called any teardown at all: F12 goes exit_requested ->
+    QApplication.quit, and main.py has no closeEvent.
+    """
+
+    def setUp(self):
+        self.closed = []
+        self.alive = set()
+        self.killed = []
+        self._saved = {name: getattr(touch_keyboard, name) for name in
+                       ("_close_all_windows", "_process_alive", "_terminate")}
+        self._grace = touch_keyboard.SHUTDOWN_GRACE_S
+        touch_keyboard.SHUTDOWN_GRACE_S = 0.0
+        touch_keyboard._close_all_windows = self._fake_close
+        touch_keyboard._process_alive = lambda pid: pid in self.alive
+        touch_keyboard._terminate = self._fake_terminate
+        self._pids = set(touch_keyboard._OUR_PIDS)
+        touch_keyboard._OUR_PIDS.clear()
+
+    def tearDown(self):
+        for name, value in self._saved.items():
+            setattr(touch_keyboard, name, value)
+        touch_keyboard.SHUTDOWN_GRACE_S = self._grace
+        touch_keyboard._OUR_PIDS.clear()
+        touch_keyboard._OUR_PIDS.update(self._pids)
+
+    def _fake_close(self):
+        self.closed.append(True)
+        return ["tabtip"]
+
+    def _fake_terminate(self, pid):
+        self.killed.append(pid)
+        self.alive.discard(pid)
+        return True
+
+    def test_shutdown_closes_the_windows(self):
+        touch_keyboard.shutdown()
+        self.assertTrue(self.closed, "退出时没有关闭键盘窗口")
+
+    def test_a_keyboard_that_ignores_the_close_is_terminated(self):
+        """TabTip 对 SC_CLOSE 通常只是重新 cloak，进程还在跑。"""
+        touch_keyboard._OUR_PIDS.add(4321)
+        self.alive.add(4321)
+        _closed, terminated = touch_keyboard.shutdown()
+        self.assertEqual(self.killed, [4321])
+        self.assertEqual(terminated, [4321])
+
+    def test_a_keyboard_that_exits_on_its_own_is_not_terminated(self):
+        touch_keyboard._OUR_PIDS.add(4321)      # 不在 alive 里＝已经自己退了
+        _closed, terminated = touch_keyboard.shutdown()
+        self.assertEqual(self.killed, [])
+        self.assertEqual(terminated, [])
+
+    def test_a_keyboard_we_did_not_start_is_left_alone(self):
+        """用户自己开着的键盘不是我们的，杀掉它比留着更糟。"""
+        self.alive.add(9999)                    # 活着，但不是我们启动的
+        touch_keyboard.shutdown()
+        self.assertEqual(self.killed, [])
+
+    def test_shutdown_forgets_the_pids_afterwards(self):
+        """留着已处理的 PID，下一次 shutdown 就会去杀一个被系统复用的 PID。"""
+        touch_keyboard._OUR_PIDS.add(4321)
+        self.alive.add(4321)
+        touch_keyboard.shutdown()
+        self.assertEqual(touch_keyboard.launched_pids(), set())
+
+    def test_shutdown_is_safe_with_nothing_launched(self):
+        closed, terminated = touch_keyboard.shutdown()
+        self.assertEqual(terminated, [])
+        self.assertIsInstance(closed, list)
+
+    def test_shutdown_clears_the_pids_even_if_closing_raises(self):
+        touch_keyboard._close_all_windows = lambda: (_ for _ in ()).throw(OSError("boom"))
+        touch_keyboard._OUR_PIDS.add(4321)
+        touch_keyboard.shutdown()
+        self.assertEqual(touch_keyboard.launched_pids(), set())
+
+    def test_launched_pids_is_a_copy(self):
+        touch_keyboard._OUR_PIDS.add(7)
+        touch_keyboard.launched_pids().clear()
+        self.assertIn(7, touch_keyboard._OUR_PIDS)
+
+
+class ShutdownWindowScopeTests(_LauncherHarness):
+    """Which windows shutdown targets, versus which hide() targets."""
+
+    def setUp(self):
+        super().setUp()
+        self.posted = []
+        import ctypes
+
+        self._user32 = ctypes.windll.user32.PostMessageW
+        ctypes.windll.user32.PostMessageW = lambda *a: self.posted.append(a) or 1
+
+    def tearDown(self):
+        import ctypes
+
+        ctypes.windll.user32.PostMessageW = self._user32
+        super().tearDown()
+
+    def test_a_cloaked_keyboard_is_still_closed_on_shutdown(self):
+        """hide() 跳过 not showing 的窗口——被 cloak 的 TabTip 正是这样躲过关闭的。"""
+        self.windows[(touch_keyboard.TABTIP_CORE_CLASS,
+                      touch_keyboard.TABTIP_CORE_TITLE)] = False    # 存在但被 cloak
+        self.assertEqual(touch_keyboard.hide(), False,
+                         "这个用例假设 hide() 会跳过被 cloak 的窗口")
+        self.assertTrue(touch_keyboard._close_all_windows(),
+                        "shutdown 必须连被 cloak 的窗口一起关")
+
+
+class ExitWiringTests(unittest.TestCase):
+    """shutdown() 得真的被退出路径调用。5.3.x 这个函数就算存在也没人调。"""
+
+    def test_shutdown_is_wired_to_about_to_quit(self):
+        """挂 aboutToQuit 而不是 closeEvent：F12 那条路（exit_requested →
+        QApplication.quit）根本不经过任何窗口的 closeEvent，而 main.py 里也没有
+        closeEvent。aboutToQuit 是所有退出路径唯一的共同出口。"""
+        import ast
+
+        source = (ROOT / "main.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        wired = False
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if (isinstance(func, ast.Attribute) and func.attr == "connect"
+                    and isinstance(func.value, ast.Attribute)
+                    and func.value.attr == "aboutToQuit"):
+                if "shutdown" in ast.dump(node):
+                    wired = True
+        self.assertTrue(wired, "退出时没有调用 touch_keyboard.shutdown()，键盘会留在桌面上")
 
 
 if __name__ == "__main__":

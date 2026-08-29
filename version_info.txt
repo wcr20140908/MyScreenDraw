@@ -1,4 +1,4 @@
-# UTF-8 version resource for PyInstaller/Windows Explorer metadata.
+﻿# UTF-8 version resource for PyInstaller/Windows Explorer metadata.
 VSVersionInfo(
   ffi=FixedFileInfo(
     filevers=(5, 3, 1, 0),
@@ -16,11 +16,11 @@ VSVersionInfo(
         '040904B0',
         [StringStruct('CompanyName', 'MyScreenDraw contributors'),
          StringStruct('FileDescription', 'MyScreenDraw classroom annotation and whiteboard'),
-         StringStruct('FileVersion', '5.3.4.0'),
+         StringStruct('FileVersion', '5.4.0.0'),
          StringStruct('InternalName', 'MyScreenDraw'),
          StringStruct('OriginalFilename', 'MyScreenDraw.exe'),
          StringStruct('ProductName', 'MyScreenDraw'),
-         StringStruct('ProductVersion', '5.3.4.0'),
+         StringStruct('ProductVersion', '5.4.0.0'),
          StringStruct('LegalCopyright', 'GPL-3.0-or-later')]
       )
     ]),
