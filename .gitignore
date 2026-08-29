@@ -43,6 +43,9 @@ env/
 # 用户数据
 data/events.jsonl*
 data/config.json
+# 测试/探针留下的配置备份。gitignore 不支持行尾注释，注释必须独占一行，
+# 否则「data/config.json.*  # 说明」会被当成含空格和井号的字面模式，一条都匹配不到。
+data/config.json.*
 data/roster.json
 data/autosave/
 # 兜底：自动保存目前写进 data/autosave/（上一行已挡住），这条防的是将来写盘路径

@@ -9,15 +9,15 @@ MyScreenDraw is a fullscreen annotation / whiteboard / math-teaching tool built 
 - **Multi-page whiteboard** with white/black board switching; export page by page to PNG / PDF / SVG / EPS
 - **Real millimetre-scaled ruler, protractor and set squares** (per-screen calibration) with live readings
 - **Random name picker, timer, presentation spotlight, calculator** — a whole lesson without switching apps
-- **Fully offline**: no network, no uploads, no account — suitable for classrooms and restricted environments
+- **Offline by default**: no account, and no data is ever uploaded. The only feature that touches the network is the **manual update check**, which is off out of the box and only fires when you click it yourself
 
-Current version **v5.4.1**. The UI follows the system language in 8 languages: English, 中文, Français, Español, Deutsch, Русский, 한국어, 日本語.
+Current version **v5.5.0**. The UI follows the system language in 8 languages: English, 中文, Français, Español, Deutsch, Русский, 한국어, 日本語.
 
 > Product screenshots are not included in the public release yet; the current local captures contain development-environment details and must not be committed to GitHub.
 
 ## Quick start
 
-1. **Get the app**: extract the portable `MyScreenDraw` folder to your Desktop, another drive, or a USB stick (no installation, no registry changes).
+1. **Get the app**: extract the portable `MyScreenDraw` folder to your Desktop, another drive, or a USB stick (no installation; the only registry write happens if you turn on "Start with Windows" in Settings — see below).
 2. **Launch**: double-click `MyScreenDraw.exe`. It creates `data/` (settings & autosave) and `exports/` (exports) beside itself on first run.
 3. **Exit**: press **F12** (global hotkey, works even on the fullscreen canvas).
 
@@ -56,6 +56,16 @@ Current version **v5.4.1**. The UI follows the system language in 8 languages: E
 - Export PNG / PDF / SVG / EPS
 - Drag a `.msd` / `.json` project file onto the main panel to open it
 
+### Settings & appearance (new in v5.5.0)
+The "Settings" button opens a settings page with five sections — appearance, interface, drawing, system, about:
+
+- **Two interchangeable UIs**: the classic text-button toolbar, and an **all-icon toolbar** that is far more compact (every icon carries a tooltip). Both stay available; switch back any time
+- **UI opacity** 35%–100%, applied to the control panels only. **The canvas and your ink are never faded** — fading those would mean the drawing got lighter, not the interface
+- **Corner radius** 0–24px, applied to panels, buttons, sub-panels, menus and sliders together
+- Light/dark theme, toolbar orientation, shape recognition, multi-touch drawing and speed-to-width all moved here
+- **Start with Windows** (off by default): writes the current user's registry Run entry; turning it off deletes it. A portable copy moved to a new folder repairs the stored path automatically
+- **Manual update check** (off by default): one check per click, version number only, no downloads, no auto-update. See "Privacy & data safety" below
+
 ## Usage
 
 ### Calibrating the ruler (important)
@@ -77,7 +87,7 @@ Tap "Click-through" so the mouse/touch passes through to the app underneath; tap
 ## FAQ
 
 **Q: Windows says "Windows protected your PC" / antivirus flags the app?**
-A: This is Windows' normal warning for **unsigned programs** — it does **not** mean your PC is infected. Click "More info → Run anyway" to use it, or run an antivirus scan to confirm — the app is **open-source and fully offline** (no network, no uploads).
+A: This is Windows' normal warning for **unsigned programs** — it does **not** mean your PC is infected. Click "More info → Run anyway" to use it, or run an antivirus scan to confirm — the app is **open-source**, so every line can be reviewed, and it is offline by default and never uploads any data. If you need a machine that stays fully off the network, leave "Check for updates" in Settings switched off (that is the factory state).
 
 Why does it appear? The distributed exe is not yet code-signed. Fully removing the prompt requires the **publisher (developer)** to purchase a code-signing certificate and sign the release — that is a distribution-trust matter, not a program-security one, and virtually every free/open-source desktop app shows the same prompt on first run. If you are unsure, you can also build it yourself from source (see [CONTRIBUTING.md](CONTRIBUTING.md)).
 
@@ -95,7 +105,13 @@ A: Yes, since v5.2.0. The pen and highlighter accept several contacts at once �
 
 ## Privacy & data safety
 
-- **Fully offline**: no network, no uploads, no update service
+- **No network by default**, and **no data is ever uploaded**. There is exactly one code path that can reach the network, described below
+- **Manual update check** (new in v5.5.0, off by default): only when you enable it in Settings *and* click "Check now" does the app send one HTTPS GET to GitHub's public endpoint `api.github.com/repos/wcr20140908/MyScreenDraw/releases/latest`, reading back nothing but a version number.
+  - No background polling, no check at startup
+  - The request carries only the app name and version (`User-Agent: MyScreenDraw/<version>`) — no machine identifier, no usage data
+  - If a newer version exists the app only asks whether to open the download page. It **never downloads, never auto-updates, and never executes anything from the network**
+  - For an environment that must stay fully offline: leave this switch off (its factory state) and the app makes no requests at all
+- **Start with Windows** (new in v5.5.0, off by default): when enabled, the app writes one value named `MyScreenDraw` under `HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run`, holding the path used to launch it. Turning the switch off deletes that value. Current user only — it never touches `HKEY_LOCAL_MACHINE`, needs no administrator rights, and changes nothing else in the system.
 - The local log (`data/events.jsonl`) may include file names — check it before sharing
 - The name list (`data/roster.json`) contains student names; treat it as personal data and never ship it with the program
 

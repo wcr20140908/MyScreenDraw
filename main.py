@@ -268,9 +268,9 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QLabel, QPushButton,
                              QVBoxLayout, QHBoxLayout, QWidget, QFrame, QGridLayout, QColorDialog, QSlider,
                              QInputDialog, QMessageBox, QMenu, QFileDialog, QLineEdit, QTextEdit, QListWidget,
                              QAbstractItemView, QSizePolicy, QListWidgetItem, QDialog, QDoubleSpinBox,
-                             QScroller, QToolTip)
+                             QScroller, QToolTip, QScrollArea)
 from PyQt6.QtCore import (Qt, QPoint, QPointF, QRectF, QTimer, QTranslator, QLibraryInfo, QLine, pyqtSignal, QLocale, QEvent,
-                          QSizeF, QMarginsF, QEventLoop, QSize, QUrl, QBuffer, QIODevice)
+                          QSizeF, QMarginsF, QEventLoop, QSize, QUrl, QBuffer, QIODevice, QThread)
 from PyQt6.QtGui import (QPainter, QPen, QColor, QFont, QPainterPath, QFontMetricsF, QTransform, QPolygonF,
                          QPixmap, QPdfWriter, QPageSize, QCursor, QGuiApplication, QIcon, QImage, QImageReader,
                          QEventPoint, QInputDevice)
@@ -298,6 +298,9 @@ TOUCH_SLIDER = 30         # 滑块控件整体最小高度（含手柄溢出）
 TOUCH_SLIDER_HANDLE = 22  # 滑块手柄直径
 TOUCH_SWATCH = 26         # 调色板色块边长
 TOUCH_HIT_SLOP = 8        # 画布上手柄/端点等命中判定的额外容差
+# 图标主面板：按钮外框仍用 TOUCH_MIN_BUTTON（触控命中面积不能因为换 UI 而缩水），
+# 图形本身留出内边距，否则图标顶到按钮边缘看起来是溢出的。
+ICON_GLYPH = 20           # 图标图形边长
 
 LOGGER = logging.getLogger("myscreendraw")
 LOG_FILE = os.path.join(DATA_DIR, "app.log")
@@ -881,6 +884,195 @@ def set_window_owner(window_id, owner_id):
     except Exception:
         pass
 
+# --- 开机自启：写当前用户的 Run 键 ---
+# 只碰 HKEY_CURRENT_USER，不碰 HKEY_LOCAL_MACHINE：后者需要管理员权限，且会给这台机器
+# 的所有账户装上自启，那不是用户在设置页里勾一个开关所应当承担的后果。
+AUTOSTART_ROOT = r"Software\Microsoft\Windows\CurrentVersion\Run"
+AUTOSTART_NAME = "MyScreenDraw"
+
+
+def autostart_command():
+    """返回写进注册表的命令行。
+
+    冻结版直接指向 exe。源码运行时用 pythonw.exe（不带控制台窗口）加脚本路径——写
+    python.exe 会在开机时弹一个黑色控制台窗口挂在那儿，用户以为中了什么东西。
+    路径一律加引号：程序装在「Program Files」这类带空格的目录下，不加引号时
+    Windows 会把它当成两个参数，自启静默失效。
+    """
+    if getattr(sys, "frozen", False):
+        return f'"{sys.executable}"'
+    launcher = sys.executable
+    candidate = os.path.join(os.path.dirname(launcher), "pythonw.exe")
+    if os.path.exists(candidate):
+        launcher = candidate
+    return f'"{launcher}" "{os.path.abspath(__file__)}"'
+
+
+def autostart_enabled():
+    """读注册表判断自启是否开着。读不到（非 Windows / 键不存在）都算关。"""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_ROOT) as key:
+            value, _ = winreg.QueryValueEx(key, AUTOSTART_NAME)
+            return bool(str(value).strip())
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return False
+    except Exception:
+        return False
+
+
+def autostart_stored_command():
+    """读回注册表里那条命令，用于判断它是否还指向当前这份程序。"""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_ROOT) as key:
+            value, _ = winreg.QueryValueEx(key, AUTOSTART_NAME)
+            return str(value)
+    except Exception:
+        return ""
+
+
+def set_autostart(enabled):
+    """开/关自启。返回 True 表示注册表操作成功。
+
+    失败不抛异常：注册表可能被组策略锁定（教室机器很常见），那种情况下应当告诉用户
+    「没设上」，而不是让程序崩在一个开关上。
+    """
+    try:
+        import winreg
+        if enabled:
+            with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, AUTOSTART_ROOT, 0,
+                                    winreg.KEY_SET_VALUE) as key:
+                winreg.SetValueEx(key, AUTOSTART_NAME, 0, winreg.REG_SZ, autostart_command())
+            return True
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_ROOT, 0,
+                            winreg.KEY_SET_VALUE) as key:
+            try:
+                winreg.DeleteValue(key, AUTOSTART_NAME)
+            except FileNotFoundError:
+                pass          # 本来就没开，视作成功
+        return True
+    except Exception as exc:
+        LOGGER.warning("开机自启设置失败: %s", exc)
+        return False
+
+
+def heal_autostart():
+    """自启开着、但记录的路径已不是当前程序时，改写成当前路径。
+
+    便携版就是一个可以随便挪的目录。用户把它从 D:\\tools 移到 E:\\教学 之后，注册表里
+    还指着旧路径——开机时那条命令找不到文件，静默失败，用户只知道「自启不管用了」。
+    程序每次启动都在运行，正是发现这件事的最好时机。
+    """
+    if not autostart_enabled():
+        return False
+    want = autostart_command()
+    if autostart_stored_command().strip() == want.strip():
+        return False
+    ok = set_autostart(True)
+    if ok:
+        LOGGER.info("开机自启路径已自愈: %s", want)
+        track_event("autostart_healed")
+    return ok
+
+
+# --- 手动检查更新 ---
+# 设计约束（刻意从严）：
+# ① 默认关闭。程序的默认状态仍然是完全不联网。
+# ② 只在用户亲手点「检查更新」时发一次请求，没有任何后台轮询、没有启动时自动检查。
+# ③ 只读取版本号，绝不下载、绝不执行任何东西。要装新版由用户自己去浏览器里下。
+# ④ 只发出「当前版本是多少」这一个隐含信息，不带机器标识、不带使用数据。
+UPDATE_API_URL = "https://api.github.com/repos/wcr20140908/MyScreenDraw/releases/latest"
+UPDATE_PAGE_URL = "https://github.com/wcr20140908/MyScreenDraw/releases/latest"
+UPDATE_TIMEOUT_S = 6.0
+
+
+def parse_version(text):
+    """把 "v5.5.0" / "5.5.0" 解析成 (5, 5, 0)；解析不了返回 None。
+
+    只认数字段，遇到 "5.5.0-beta.1" 这类预发布后缀就在第一个非数字段处停下——预发布
+    版本不该被当成比正式版更新的东西推给用户。
+    """
+    if not isinstance(text, str):
+        return None
+    cleaned = text.strip().lstrip("vV")
+    parts = []
+    for chunk in cleaned.split("."):
+        digits = ""
+        for ch in chunk:
+            if ch.isdigit():
+                digits += ch
+            else:
+                break
+        if not digits:
+            break
+        parts.append(int(digits))
+    return tuple(parts) if parts else None
+
+
+def fetch_latest_version(url=UPDATE_API_URL, timeout=UPDATE_TIMEOUT_S):
+    """取远端最新版本号，返回 (tag, error)。二者恰有一个非 None。
+
+    刻意用标准库 urllib 而不引入 requests：多一个第三方依赖就多一份供应链风险，
+    而这里只需要一次 GET。
+    """
+    import urllib.request
+    import urllib.error
+    request = urllib.request.Request(url, headers={
+        "Accept": "application/vnd.github+json",
+        # UA 只带程序名和版本，不带机器信息
+        "User-Agent": f"MyScreenDraw/{APP_VERSION}",
+    })
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            # 上限 256KB：正常响应几 KB，设上限是防止对端（或中间的劫持页）
+            # 返回一个无限流把内存吃光。
+            payload = response.read(262144)
+        data = json.loads(payload.decode("utf-8", errors="replace"))
+        tag = data.get("tag_name") or data.get("name")
+        if not isinstance(tag, str) or not tag.strip():
+            return None, "no_tag"
+        return tag.strip(), None
+    except urllib.error.HTTPError as exc:
+        # 限流要单独认出来。GitHub 未认证接口是每 IP 每小时 60 次，而本程序的典型场景
+        # 是一间教室几十台机器共用一个出口 IP——配额是按出口 IP 算的，所以「被限流」
+        # 在这里是常态而不是异常。把它混在 http_403 里，用户看到的是「检查失败：
+        # http_403」，既看不懂也无法判断该怎么办（等一会儿？还是网断了？）。
+        # 限流时 GitHub 回 403 或 429，并带 X-RateLimit-Remaining: 0。
+        try:
+            remaining = exc.headers.get("X-RateLimit-Remaining")
+        except Exception:                                    # noqa: BLE001
+            remaining = None
+        if exc.code in (403, 429) and (remaining == "0" or remaining is None):
+            return None, "rate_limited"
+        return None, f"http_{exc.code}"
+    except urllib.error.URLError as exc:
+        return None, f"net_{getattr(exc, 'reason', 'unknown')}"
+    except json.JSONDecodeError:
+        return None, "bad_json"
+    except Exception as exc:
+        return None, f"error_{type(exc).__name__}"
+
+
+class UpdateCheckWorker(QThread):
+    """在后台线程里跑那一次 GET。
+
+    必须离开 UI 线程：教室网络常常是「能连但极慢」，在 UI 线程上等 6 秒超时，
+    界面就是冻住 6 秒——这正是 5.4.1 刚修掉的那类问题（软键盘冷启动阻塞 UI），
+    不能在新功能里重犯。
+    """
+    finished_check = pyqtSignal(object, object)   # (tag, error)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+    def run(self):
+        tag, error = fetch_latest_version()
+        self.finished_check.emit(tag, error)
+
+
 # Windows 触控/手写笔手势开关（MSDN: Disabling the press and hold gesture）
 TABLET_DISABLE_PRESSANDHOLD = 0x00000001
 TABLET_DISABLE_PENTAPFEEDBACK = 0x00000008
@@ -947,6 +1139,265 @@ def make_rotate_icon(color, size=22):
     finally:
         painter.end()
     return QIcon(pixmap)
+
+
+# --- 图标 UI：全部图标程序化绘制，不引入任何图片资源 ---
+# 为什么不用字体图标 / emoji：见 make_rotate_icon 的说明——Windows 各版本字体回退
+# 不一致，缺字形就是豆腐块方框，本项目历史上已因此从 emoji 退回纯文字。为什么不用
+# .svg/.png：MyScreenDraw.spec 的 datas 只带许可证文件，加图片就得同时改打包清单，
+# 且冻结后路径解析多一层出错面。QPainter 画出来的图标任何环境完全一致，零资源依赖。
+
+def _icon_canvas(size):
+    """返回 (pixmap, painter)，painter 已开抗锯齿。调用方负责 painter.end()。"""
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    return pixmap, painter
+
+
+def _icon_pen(painter, color, size, scale=1.0):
+    pen = QPen(QColor(color), max(1.6, size / 11.0 * scale))
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    painter.setPen(pen)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    return pen
+
+
+def _icon_arrow_head(painter, color, tip, direction, head):
+    """在 tip 处画一个指向 direction（弧度）的实心三角箭头。"""
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QColor(color))
+    left = direction + math.radians(140)
+    right = direction - math.radians(140)
+    painter.drawPolygon(QPolygonF([
+        QPointF(tip.x(), tip.y()),
+        QPointF(tip.x() + head * math.cos(left), tip.y() + head * math.sin(left)),
+        QPointF(tip.x() + head * math.cos(right), tip.y() + head * math.sin(right)),
+    ]))
+
+
+def _draw_icon_pen(p, color, s):
+    """笔：斜置的笔杆 + 笔尖三角。"""
+    _icon_pen(p, color, s, 1.15)
+    p.drawLine(QPointF(s * 0.30, s * 0.70), QPointF(s * 0.72, s * 0.26))
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QColor(color))
+    p.drawPolygon(QPolygonF([                      # 笔尖
+        QPointF(s * 0.18, s * 0.82), QPointF(s * 0.34, s * 0.76), QPointF(s * 0.24, s * 0.66),
+    ]))
+    _icon_pen(p, color, s, 0.9)
+    p.drawLine(QPointF(s * 0.62, s * 0.18), QPointF(s * 0.80, s * 0.36))   # 笔帽横线
+
+
+def _draw_icon_eraser(p, color, s):
+    """橡皮：倾斜的方块 + 一道分割线。"""
+    _icon_pen(p, color, s)
+    body = QPolygonF([
+        QPointF(s * 0.22, s * 0.66), QPointF(s * 0.56, s * 0.24),
+        QPointF(s * 0.80, s * 0.44), QPointF(s * 0.46, s * 0.86),
+    ])
+    p.drawPolygon(body)
+    p.drawLine(QPointF(s * 0.34, s * 0.76), QPointF(s * 0.68, s * 0.34))
+
+
+def _draw_icon_select(p, color, s):
+    """框选：虚线矩形。"""
+    pen = QPen(QColor(color), max(1.6, s / 12.0))
+    pen.setStyle(Qt.PenStyle.DashLine)
+    pen.setDashPattern([3, 2])
+    p.setPen(pen)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawRect(QRectF(s * 0.20, s * 0.24, s * 0.60, s * 0.52))
+
+
+def _draw_icon_text(p, color, s):
+    """文本框：一个大写 T 的横竖两笔（画出来而不是写字，避免字体差异）。"""
+    _icon_pen(p, color, s, 1.2)
+    p.drawLine(QPointF(s * 0.24, s * 0.26), QPointF(s * 0.76, s * 0.26))
+    p.drawLine(QPointF(s * 0.50, s * 0.26), QPointF(s * 0.50, s * 0.78))
+
+
+def _draw_icon_shape(p, color, s):
+    """图形：三角 + 圆，表示「一组图形」。"""
+    _icon_pen(p, color, s, 0.95)
+    p.drawPolygon(QPolygonF([
+        QPointF(s * 0.20, s * 0.72), QPointF(s * 0.46, s * 0.24), QPointF(s * 0.70, s * 0.72),
+    ]))
+    p.drawEllipse(QRectF(s * 0.54, s * 0.50, s * 0.30, s * 0.30))
+
+
+def _draw_icon_tools(p, color, s):
+    """工具：三格九宫（表示一堆小工具的集合）。"""
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QColor(color))
+    cell = s * 0.17
+    for row in range(2):
+        for col in range(3):
+            p.drawRoundedRect(QRectF(s * 0.18 + col * s * 0.26, s * 0.30 + row * s * 0.26, cell, cell),
+                              cell * 0.3, cell * 0.3)
+
+
+def _draw_icon_file(p, color, s):
+    """文件：带折角的纸张。"""
+    _icon_pen(p, color, s, 0.95)
+    p.drawPolygon(QPolygonF([
+        QPointF(s * 0.28, s * 0.16), QPointF(s * 0.60, s * 0.16),
+        QPointF(s * 0.74, s * 0.32), QPointF(s * 0.74, s * 0.84), QPointF(s * 0.28, s * 0.84),
+    ]))
+    p.drawPolyline(QPolygonF([                     # 折角
+        QPointF(s * 0.60, s * 0.16), QPointF(s * 0.60, s * 0.32), QPointF(s * 0.74, s * 0.32),
+    ]))
+
+
+def _draw_icon_undo(p, color, s, mirror=False):
+    """撤销/重做：半圆弧 + 端点箭头。mirror=True 是重做。"""
+    _icon_pen(p, color, s, 1.0)
+    box = QRectF(s * 0.20, s * 0.26, s * 0.60, s * 0.46)
+    if mirror:
+        p.drawArc(box, 30 * 16, 130 * 16)
+        tip = QPointF(box.right() - box.width() * 0.06, box.center().y() - box.height() * 0.18)
+        _icon_arrow_head(p, color, tip, math.radians(115), s * 0.24)
+    else:
+        p.drawArc(box, 20 * 16, 130 * 16)
+        tip = QPointF(box.left() + box.width() * 0.06, box.center().y() - box.height() * 0.14)
+        _icon_arrow_head(p, color, tip, math.radians(65), s * 0.24)
+    _icon_pen(p, color, s, 1.0)
+    p.drawLine(QPointF(box.left() + box.width() * 0.1, box.center().y() + box.height() * 0.1),
+               QPointF(box.right() - box.width() * 0.1, box.center().y() + box.height() * 0.1))
+
+
+def _draw_icon_clear(p, color, s):
+    """清屏：一个 ✗（两条对角线），程序化画不依赖字形。"""
+    _icon_pen(p, color, s, 1.25)
+    p.drawLine(QPointF(s * 0.26, s * 0.26), QPointF(s * 0.74, s * 0.74))
+    p.drawLine(QPointF(s * 0.74, s * 0.26), QPointF(s * 0.26, s * 0.74))
+
+
+def _draw_icon_whiteboard(p, color, s):
+    """白板：一块板 + 底部支架。"""
+    _icon_pen(p, color, s, 0.95)
+    p.drawRect(QRectF(s * 0.16, s * 0.22, s * 0.68, s * 0.44))
+    p.drawLine(QPointF(s * 0.50, s * 0.66), QPointF(s * 0.50, s * 0.80))
+    p.drawLine(QPointF(s * 0.34, s * 0.84), QPointF(s * 0.66, s * 0.84))
+
+
+def _draw_icon_settings(p, color, s):
+    """设置：齿轮（八齿 + 中心孔）。"""
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QColor(color))
+    center = QPointF(s / 2.0, s / 2.0)
+    outer, inner, hole = s * 0.40, s * 0.25, s * 0.11
+    path = QPainterPath()
+    teeth = 8
+    for i in range(teeth * 2):
+        angle = math.pi * i / teeth
+        radius = outer if i % 2 == 0 else inner
+        point = QPointF(center.x() + radius * math.cos(angle), center.y() + radius * math.sin(angle))
+        if i == 0:
+            path.moveTo(point)
+        else:
+            path.lineTo(point)
+    path.closeSubpath()
+    ring = QPainterPath()
+    ring.addEllipse(center, hole, hole)
+    p.drawPath(path.subtracted(ring))
+
+
+def _draw_icon_exit(p, color, s):
+    """退出：电源符号（开口圆环 + 竖线）。"""
+    _icon_pen(p, color, s, 1.15)
+    p.drawArc(QRectF(s * 0.22, s * 0.24, s * 0.56, s * 0.56), 60 * 16, 240 * 16)
+    p.drawLine(QPointF(s / 2.0, s * 0.16), QPointF(s / 2.0, s * 0.46))
+
+
+def _draw_icon_mode(p, color, s):
+    """穿透/绘图模式：手指点击的指示（圆 + 下方短线）。"""
+    _icon_pen(p, color, s, 1.0)
+    p.drawEllipse(QRectF(s * 0.28, s * 0.20, s * 0.44, s * 0.44))
+    p.drawLine(QPointF(s * 0.50, s * 0.70), QPointF(s * 0.50, s * 0.86))
+    p.drawLine(QPointF(s * 0.30, s * 0.80), QPointF(s * 0.70, s * 0.80))
+
+
+def _draw_icon_prev(p, color, s):
+    _icon_pen(p, color, s, 1.1)
+    p.drawLine(QPointF(s * 0.62, s * 0.24), QPointF(s * 0.36, s * 0.50))
+    p.drawLine(QPointF(s * 0.36, s * 0.50), QPointF(s * 0.62, s * 0.76))
+
+
+def _draw_icon_next(p, color, s):
+    _icon_pen(p, color, s, 1.1)
+    p.drawLine(QPointF(s * 0.38, s * 0.24), QPointF(s * 0.64, s * 0.50))
+    p.drawLine(QPointF(s * 0.64, s * 0.50), QPointF(s * 0.38, s * 0.76))
+
+
+def _draw_icon_new_page(p, color, s):
+    """新页：纸张 + 加号。"""
+    _icon_pen(p, color, s, 0.9)
+    p.drawRect(QRectF(s * 0.20, s * 0.16, s * 0.42, s * 0.56))
+    _icon_pen(p, color, s, 1.1)
+    p.drawLine(QPointF(s * 0.68, s * 0.58), QPointF(s * 0.68, s * 0.88))
+    p.drawLine(QPointF(s * 0.53, s * 0.73), QPointF(s * 0.83, s * 0.73))
+
+
+def _draw_icon_board(p, color, s):
+    """板色：一半实心一半空心的方块。"""
+    _icon_pen(p, color, s, 0.9)
+    box = QRectF(s * 0.20, s * 0.24, s * 0.60, s * 0.52)
+    p.drawRect(box)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QColor(color))
+    p.drawRect(QRectF(box.left(), box.top(), box.width() / 2.0, box.height()))
+
+
+def _draw_icon_pages(p, color, s):
+    """页码/缩略图：两张叠放的纸。"""
+    _icon_pen(p, color, s, 0.9)
+    p.drawRect(QRectF(s * 0.18, s * 0.28, s * 0.42, s * 0.46))
+    p.drawRect(QRectF(s * 0.36, s * 0.18, s * 0.42, s * 0.46))
+
+
+_UI_ICONS = {
+    "mode": _draw_icon_mode,
+    "pen": _draw_icon_pen,
+    "eraser": _draw_icon_eraser,
+    "select": _draw_icon_select,
+    "text": _draw_icon_text,
+    "shape": _draw_icon_shape,
+    "tools": _draw_icon_tools,
+    "file": _draw_icon_file,
+    "undo": _draw_icon_undo,
+    "redo": lambda p, c, s: _draw_icon_undo(p, c, s, mirror=True),
+    "clear": _draw_icon_clear,
+    "whiteboard": _draw_icon_whiteboard,
+    "settings": _draw_icon_settings,
+    "exit": _draw_icon_exit,
+    "prev": _draw_icon_prev,
+    "next": _draw_icon_next,
+    "new_page": _draw_icon_new_page,
+    "board": _draw_icon_board,
+    "pages": _draw_icon_pages,
+}
+
+
+def make_ui_icon(name, color, size=22):
+    """按名字程序化绘制界面图标；未登记的名字返回空图标而不是抛异常。
+
+    返回空图标是刻意的：图标 UI 有二十来个按钮，某个名字写错不该让整个面板构造失败
+    （构造失败会走到 main 里的「窗口创建失败」弹窗，等于开不了机）。少一个图标只是
+    那颗按钮空着，其余照常可用。
+    """
+    draw = _UI_ICONS.get(name)
+    if draw is None:
+        return QIcon()
+    pixmap, painter = _icon_canvas(size)
+    try:
+        draw(painter, color, float(size))
+    finally:
+        painter.end()
+    return QIcon(pixmap)
+
 
 # --- 笔迹图形识别：把手绘的不规则笔迹拟合成标准平面图形（纯几何，零依赖） ---
 class StrokeShapeRecognizer:
@@ -6636,6 +7087,16 @@ class ControlPanel(QWidget):
 
     HEARTBEAT_MS = 500   # 置顶心跳间隔：200ms 会让分层窗口频繁重新合成产生闪烁
 
+    # 圆角：以「外框圆角」为基准值，其余部件按比例派生（见 radius_tokens）。
+    # 默认 12 必须与 5.4.x 的硬编码值一致，否则老用户升级后界面会莫名变形。
+    RADIUS_DEFAULT = 12
+    RADIUS_MIN = 0
+    RADIUS_MAX = 24
+    # 透明度：下限不给到 0，否则用户能把面板调成完全看不见，又因为看不见而
+    # 找不到设置页把它调回来——那是个不可逆的自锁。35% 仍能看清轮廓与按钮位置。
+    OPACITY_MIN = 35
+    OPACITY_MAX = 100
+
     THEMES = {
         "dark": {
             "frame": "#2d3436",
@@ -6658,7 +7119,13 @@ class ControlPanel(QWidget):
             "button_hover": "#cfd8dc",
             "text": "#1f2933",
             "label": "#006d75",
-            "accent": "#00a8a8",
+            # 5.5.0 加深了一档（原 #00a8a8）。accent 在亮色主题里同时充当两种角色：
+            # 作背景时上面压白字（ActiveTool/IconBtnActive/按下态/菜单选中），
+            # 作文字时打在浅面板上（设置页分区标题、计时器大字、迷你计时器）。
+            # #00a8a8 两个方向都不够：白字压它 2.93:1，它当文字打在 #edf2f7 上只有
+            # 2.60:1，都在 WCAG AA 粗体档 3.0 以下。加深到 #009a9a 后分别是
+            # 3.45:1 和 3.06:1，色相不变，只是深一点。
+            "accent": "#009a9a",
             "active_text": "#ffffff",
             "danger": "#d63031",
             "mode": "#e17055",
@@ -6675,6 +7142,13 @@ class ControlPanel(QWidget):
         self.color_buttons = []
         self.theme_name = "dark"
         self.theme = self.THEMES[self.theme_name]
+        # --- 外观与系统设置（全部走 collect_settings / load_settings 持久化）---
+        self.ui_mode = "classic"        # classic=文字按钮主面板 | icon=全图标主面板
+        self.ui_radius = self.RADIUS_DEFAULT
+        self.ui_opacity = 100           # 百分比；作用于浮窗，不作用于画布（否则墨迹跟着淡）
+        self.update_check_enabled = False   # 默认关闭：不联网是本程序的默认状态
+        self.settings_panel = None      # 懒建
+        self._update_worker = None
         self._bound_key = None
         self._topmost_state = None
         self._drag_offset = None
@@ -6777,9 +7251,15 @@ class ControlPanel(QWidget):
         self.wb_box.setVisible(False)
         self.toolbar_layout.addWidget(self.wb_box)
 
+        # 主题按钮不再占主栏一行：它连同「主面板旋转」「智能图形识别」一起收进设置页
+        # （见 setup_settings_panel）。这里仍然构造它，是因为 apply_theme() 会更新它的
+        # 文案，且用户在设置页里点的就是这一颗——只是它的父级在设置面板里。
         self.btn_theme = QPushButton(tr("light_theme"))
         self.btn_theme.clicked.connect(self.toggle_theme)
-        self.toolbar_layout.addWidget(self.btn_theme)
+
+        self.btn_settings = QPushButton(tr("settings"))
+        self.btn_settings.clicked.connect(self.open_settings_panel)
+        self.toolbar_layout.addWidget(self.btn_settings)
 
         self.thumbnail_panel = QWidget()
         self.thumbnail_panel.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
@@ -6802,6 +7282,9 @@ class ControlPanel(QWidget):
         self.thumbnail_panel.setStyleSheet(self.styleSheet())
 
         self.btn_exit = QPushButton(tr("exit")); self.btn_exit.clicked.connect(QApplication.quit); self.toolbar_layout.addWidget(self.btn_exit)
+
+        # 1b. 图标主面板：与文字主面板【并存】的第二套 widget 树（见 build_icon_frame）
+        self.build_icon_frame()
 
         # 2. 子菜单浮窗：独立置顶小窗（不再挤在主面板窗口里）。
         #    换内容/调尺寸/定位全部在隐藏状态下完成后再显示——半透明窗口只要不在
@@ -6897,6 +7380,8 @@ class ControlPanel(QWidget):
         self._calc_display = None
 
         self.h_layout.addWidget(self.main_frame)
+        self.h_layout.addWidget(self.icon_frame)
+        self.icon_frame.setVisible(False)      # 默认经典 UI；load_settings 里按配置切换
 
         self._syncing_thumbnails = False
         self._thumbnail_refresh_timer = QTimer(self)
@@ -6925,14 +7410,35 @@ class ControlPanel(QWidget):
         self.listener = keyboard.Listener(on_press=self.on_global_key_press); self.listener.start()
         track_event("app_started", theme=self.theme_name)
 
+    def radius_tokens(self):
+        """把「圆角」这一个用户可调值派生成样式表要用的一组半径。
+
+        只暴露一个滑块、内部按比例派生，是为了让界面在任何取值下都协调：外框最圆、
+        按钮次之、菜单项最方。各项都 clamp 到 >=0，且滑条手柄那一项永远保持圆形
+        （手柄是正方形，半径超过边长一半就没有额外效果，取 min 防止样式表出现
+        大于半边长的荒谬值）。
+        """
+        r = max(self.RADIUS_MIN, min(self.RADIUS_MAX, int(self.ui_radius)))
+        handle = TOUCH_SLIDER_HANDLE // 2
+        return {
+            "frame": r,                              # 主外框
+            "sub": max(0, round(r * 0.83)),           # 子面板（默认 12 → 10）
+            "button": max(0, round(r * 0.5)),         # 普通按钮（默认 12 → 6）
+            "mini": max(0, round(r * 0.83)),          # 迷你计时器（默认 12 → 10）
+            "item": max(0, round(r * 0.33)),          # 菜单项 / 提示（默认 12 → 4）
+            "groove": max(0, min(3, round(r * 0.25))),  # 滑轨凹槽：3px 高，别超过半高
+            "handle": handle,                        # 滑块手柄恒为圆形
+        }
+
     def apply_theme(self):
         t = self.theme
+        rad = self.radius_tokens()
         self.setStyleSheet(f"""
-            QWidget#MainFrame {{ background-color: {t["frame"]}; border-radius: 12px; border: 2px solid {t["accent"]}; }}
+            QWidget#MainFrame {{ background-color: {t["frame"]}; border-radius: {rad["frame"]}px; border: 2px solid {t["accent"]}; }}
             /* 普通按钮恢复紧凑高度：min-height 会和上下 padding【相加】，之前写成
                min-height:38 + padding:16 + margin:2，实际每颗按钮至少 56px，竖栏因此
                被拉成截图里近百像素一颗。触控命中不能靠粗暴撑高整个界面。 */
-            QPushButton {{ background-color: {t["button"]}; color: {t["text"]}; border-radius: 6px; padding: 6px 8px; font-weight: bold; border: none; margin: 1px; }}
+            QPushButton {{ background-color: {t["button"]}; color: {t["text"]}; border-radius: {rad["button"]}px; padding: 6px 8px; font-weight: bold; border: none; margin: 1px; }}
             QPushButton:hover {{ background-color: {t["button_hover"]}; }}
             QPushButton:pressed {{ background-color: {t["accent"]}; color: {t["active_text"]}; }}
             QPushButton:disabled {{ background-color: {t["button"]}; color: {t["mode_off"]}; }}
@@ -6943,20 +7449,28 @@ class ControlPanel(QWidget):
             QPushButton#ArrowBtn {{ background-color: {t["button"]}; min-width: {TOUCH_ARROW}px; max-width: {TOUCH_ARROW}px; min-height: {TOUCH_ARROW}px; max-height: {TOUCH_ARROW}px; padding: 0px; font-size: 12px; }}
             QPushButton#SquareBtn {{ min-width: {TOUCH_SQUARE}px; max-width: {TOUCH_SQUARE}px; min-height: {TOUCH_SQUARE}px; max-height: {TOUCH_SQUARE}px; padding: 0px; font-size: 15px; }}
             QPushButton#RotateBtn {{ min-width: {TOUCH_SQUARE}px; max-width: {TOUCH_SQUARE}px; min-height: {TOUCH_SQUARE}px; max-height: {TOUCH_SQUARE}px; padding: 0px; margin: 0px; background-color: transparent; border: none; }}
-            QPushButton#RotateBtn:hover {{ background-color: {t["button_hover"]}; border-radius: 6px; }}
-            QPushButton#RotateBtn:pressed {{ background-color: {t["accent"]}; border-radius: 6px; }}
+            QPushButton#RotateBtn:hover {{ background-color: {t["button_hover"]}; border-radius: {rad["button"]}px; }}
+            QPushButton#RotateBtn:pressed {{ background-color: {t["accent"]}; border-radius: {rad["button"]}px; }}
+            QPushButton#IconBtn {{ min-width: {TOUCH_MIN_BUTTON}px; max-width: {TOUCH_MIN_BUTTON}px; min-height: {TOUCH_MIN_BUTTON}px; max-height: {TOUCH_MIN_BUTTON}px; padding: 0px; margin: 1px; }}
+            QPushButton#IconBtnActive {{ min-width: {TOUCH_MIN_BUTTON}px; max-width: {TOUCH_MIN_BUTTON}px; min-height: {TOUCH_MIN_BUTTON}px; max-height: {TOUCH_MIN_BUTTON}px; padding: 0px; margin: 1px; background-color: {t["accent"]}; }}
             QLabel {{ color: {t["label"]}; font-size: 11px; padding: 2px; }}
             QLabel#TimerDisplay {{ font-size: 26px; font-weight: bold; color: {t["accent"]}; font-family: Consolas, "Microsoft YaHei"; padding: 2px 6px; }}
-            QLabel#MiniTimer {{ background-color: {t["frame"]}; border: 2px solid {t["accent"]}; border-radius: 10px; font-size: 20px; font-weight: bold; color: {t["accent"]}; font-family: Consolas, "Microsoft YaHei"; padding: 5px 16px; }}
-            QMenu {{ background-color: {t["panel"]}; color: {t["text"]}; border: 1.5px solid {t["accent"]}; border-radius: 6px; padding: 4px; }}
-            QMenu::item {{ padding: 10px 24px; border-radius: 4px; }}
+            QLabel#MiniTimer {{ background-color: {t["frame"]}; border: 2px solid {t["accent"]}; border-radius: {rad["mini"]}px; font-size: 20px; font-weight: bold; color: {t["accent"]}; font-family: Consolas, "Microsoft YaHei"; padding: 5px 16px; }}
+            QLabel#SettingsSection {{ color: {t["accent"]}; font-size: 12px; font-weight: bold; padding: 6px 2px 2px 2px; }}
+            QLabel#SettingsHint {{ color: {t["mode_off"]}; font-size: 10px; padding: 0px 2px 4px 2px; }}
+            QMenu {{ background-color: {t["panel"]}; color: {t["text"]}; border: 1.5px solid {t["accent"]}; border-radius: {rad["button"]}px; padding: 4px; }}
+            QMenu::item {{ padding: 10px 24px; border-radius: {rad["item"]}px; }}
             QMenu::item:selected {{ background-color: {t["accent"]}; color: {t["active_text"]}; }}
             QMenu::item:disabled {{ color: {t["mode_off"]}; }}
-            QToolTip {{ background-color: {t["panel"]}; color: {t["text"]}; border: 1px solid {t["accent"]}; border-radius: 4px; padding: 4px 6px; font-size: 12px; }}
-            .Sub {{ background-color: {t["panel"]}; border-radius: 10px; border: 1.5px solid {t["accent"]}; padding: 6px; }}
+            QToolTip {{ background-color: {t["panel"]}; color: {t["text"]}; border: 1px solid {t["accent"]}; border-radius: {rad["item"]}px; padding: 4px 6px; font-size: 12px; }}
+            .Sub {{ background-color: {t["panel"]}; border-radius: {rad["sub"]}px; border: 1.5px solid {t["accent"]}; padding: 6px; }}
             QSlider {{ min-height: {TOUCH_SLIDER}px; }}
-            QSlider::groove:horizontal {{ height: 6px; background: {t["button_hover"]}; border-radius: 3px; }}
-            QSlider::handle:horizontal {{ background: {t["accent"]}; width: {TOUCH_SLIDER_HANDLE}px; height: {TOUCH_SLIDER_HANDLE}px; margin: -{TOUCH_SLIDER_HANDLE // 2 - 3}px 0; border-radius: {TOUCH_SLIDER_HANDLE // 2}px; }}
+            QSlider::groove:horizontal {{ height: 6px; background: {t["button_hover"]}; border-radius: {rad["groove"]}px; }}
+            QSlider::handle:horizontal {{ background: {t["accent"]}; width: {TOUCH_SLIDER_HANDLE}px; height: {TOUCH_SLIDER_HANDLE}px; margin: -{TOUCH_SLIDER_HANDLE // 2 - 3}px 0; border-radius: {rad["handle"]}px; }}
+            QScrollArea {{ background: transparent; border: none; }}
+            QScrollBar:vertical {{ background: transparent; width: 10px; margin: 0px; }}
+            QScrollBar::handle:vertical {{ background: {t["button_hover"]}; border-radius: 5px; min-height: 30px; }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0px; }}
             QListWidget {{ background-color: {t["panel"]}; color: {t["text"]}; border: none; }}
             QColorDialog QPushButton, QColorDialog QLabel {{ font-size: 12px; }}
         """)
@@ -6964,11 +7478,15 @@ class ControlPanel(QWidget):
         for floating in (getattr(self, "menu_panel", None), getattr(self, "select_panel", None),
                          getattr(self, "mini_timer", None), getattr(self, "calc_panel", None),
                          getattr(self, "roster_panel", None), getattr(self, "thumbnail_panel", None),
-                         getattr(self, "text_panel", None)):
+                         getattr(self, "text_panel", None), getattr(self, "settings_panel", None)):
             if floating is not None:
                 floating.setStyleSheet(self.styleSheet())
         if hasattr(self, "btn_clear"):
             self.btn_clear.setStyleSheet(f"color: {t['clear']};")
+        if hasattr(self, "label_w"):
+            # 不能写死 color: white。亮色主题的 .Sub 背景是 #edf2f7，白字白底实测
+            # 对比度只有 1.13——这一行标签在亮色主题下等于消失了。跟着主题的 label 色走。
+            self.label_w.setStyleSheet(f"color: {t['label']}; font-weight: bold;")
         if hasattr(self, "btn_theme"):
             # Light mode → offer dark; dark mode → offer light.
             self.btn_theme.setText(tr("dark_theme") if self.theme_name == "light" else tr("light_theme"))
@@ -6977,6 +7495,245 @@ class ControlPanel(QWidget):
         if hasattr(self, "btn_rotate"):
             # 图标按主题重绘：亮色主题下白色箭头会看不见
             self.btn_rotate.setIcon(make_rotate_icon(t["label"], 22))
+        self.repaint_ui_icons()
+
+    # 图标主面板的按钮清单：(键, 图标名, 提示文案 key, 点击处理器属性名, 对应的经典按钮属性名)
+    # 最后一项是【状态镜像源】：经典按钮是唯一状态真相（高亮 / 可用性都写在它身上），
+    # 图标按钮只是它的投影，由 sync_icon_buttons() 单向同步过来。这样新增/修改功能时
+    # 仍然只需要维护经典按钮那一套状态逻辑，不会出现两套树各记一半、彼此不一致。
+    ICON_ACTIONS = (
+        ("mode",       "mode",       "passthrough", "toggle_mode",            "btn_mode"),
+        ("pen",        "pen",        "annotate",    "handle_annotate_click",  "btn_pen"),
+        ("eraser",     "eraser",     "eraser",      "handle_eraser_click",    "btn_eraser"),
+        ("select",     "select",     "select",      "handle_select_click",    "btn_select"),
+        ("text",       "text",       "text",        "handle_text_click",      "btn_text"),
+        ("shape",      "shape",      "shape",       "handle_shape_click",     "btn_shape"),
+        ("tools",      "tools",      "tools",       "handle_tools_click",     "btn_tools"),
+        ("file",       "file",       "file",        "handle_file_click",      "btn_file"),
+        ("undo",       "undo",       "undo",        "undo",                   "btn_undo"),
+        ("redo",       "redo",       "redo",        "redo",                   "btn_redo"),
+        ("clear",      "clear",      "clear",       "clear",                  "btn_clear"),
+        ("whiteboard", "whiteboard", "whiteboard",  "toggle_whiteboard",      "btn_whiteboard"),
+        ("settings",   "settings",   "settings",    "open_settings_panel",    "btn_settings"),
+        ("exit",       "exit",       "exit",        None,                     "btn_exit"),
+    )
+
+    # 白板控制区在图标树里的对应按钮
+    ICON_WB_ACTIONS = (
+        ("prev_page",   "prev",     "prev",      "_icon_prev_page",       "btn_prev_page"),
+        ("pages",       "pages",    "page_list", "toggle_thumbnail_panel", "page_label"),
+        ("next_page",   "next",     "next",      "_icon_next_page",       "btn_next_page"),
+        ("new_page",    "new_page", "new_page",  "new_whiteboard_page",   "btn_new_page"),
+        ("board_style", "board",    "board",     "toggle_board_style",    "btn_board_style"),
+    )
+
+    def build_icon_frame(self):
+        """构造图标主面板：与文字主面板并存的第二套 widget 树。
+
+        为什么是两棵真实的树，而不是给同一批按钮换个样子：一个 QWidget 只能有一个父级，
+        真正的「更省空间」要求两套完全不同的排布（文字栏纵向一列 150px 宽；图标栏是
+        紧凑的多列网格），而同一批按钮无法同时存在于两种排布里。代价是状态要同步，
+        这一点由 sync_icon_buttons() 单向解决——经典按钮永远是唯一真相。
+        """
+        self.icon_buttons = {}
+        self.icon_frame = QFrame()
+        self.icon_frame.setObjectName("MainFrame")
+        self.icon_layout = QVBoxLayout(self.icon_frame)
+        self.icon_layout.setContentsMargins(6, 6, 6, 6)
+        self.icon_layout.setSpacing(2)
+        self.icon_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+        # 标题行：只放一个旋转键。图标 UI 的卖点是省空间，标题文字会把宽度拉回去。
+        icon_title = QHBoxLayout(); icon_title.setSpacing(2)
+        self.icon_btn_rotate = QPushButton()
+        self.icon_btn_rotate.setObjectName("RotateBtn")
+        self.icon_btn_rotate.setFlat(True)
+        self.icon_btn_rotate.setIconSize(QSize(20, 20))
+        self.icon_btn_rotate.setIcon(make_rotate_icon(self.theme["label"], 22))
+        self.icon_btn_rotate.setAccessibleName(tr("rotate"))
+        self.icon_btn_rotate.clicked.connect(self.toggle_orientation)
+        icon_title.addStretch(1)
+        icon_title.addWidget(self.icon_btn_rotate)
+        icon_title.addStretch(1)
+        self.icon_layout.addLayout(icon_title)
+
+        self.icon_grid = QGridLayout()
+        self.icon_grid.setContentsMargins(0, 0, 0, 0)
+        self.icon_grid.setSpacing(2)
+        for key, icon_name, tip_key, handler_name, mirror_name in self.ICON_ACTIONS:
+            btn = QPushButton()
+            btn.setObjectName("IconBtn")
+            btn.setIconSize(QSize(ICON_GLYPH, ICON_GLYPH))
+            btn.setIcon(make_ui_icon(icon_name, self.theme["text"], ICON_GLYPH))
+            # 纯图标界面必须有提示，否则用户认不出哪颗是哪颗。ToolTip 的遮挡问题
+            # 由 _raise_tooltip() 处理（它会把气泡抬到全屏画布之上）。
+            btn.setToolTip(tr(tip_key))
+            btn.setAccessibleName(tr(tip_key))
+            btn.setProperty("icon_name", icon_name)
+            if handler_name is None:            # exit 直接连 QApplication.quit
+                btn.clicked.connect(QApplication.quit)
+            else:
+                btn.clicked.connect(getattr(self, handler_name))
+            # 点完立刻把状态投影一遍：不等心跳，用户看到的高亮变化才是即时的
+            btn.clicked.connect(self.sync_icon_buttons)
+            self.icon_buttons[key] = btn
+        self.icon_layout.addLayout(self.icon_grid)
+
+        # 图标树自己的白板控制区（wb_box 属于经典树，一个 widget 不能有两个父级）
+        self.icon_wb_box = QWidget()
+        self.icon_wb_grid = QGridLayout(self.icon_wb_box)
+        self.icon_wb_grid.setContentsMargins(0, 0, 0, 0)
+        self.icon_wb_grid.setSpacing(2)
+        for key, icon_name, tip_key, handler_name, mirror_name in self.ICON_WB_ACTIONS:
+            btn = QPushButton()
+            btn.setObjectName("IconBtn")
+            btn.setIconSize(QSize(ICON_GLYPH, ICON_GLYPH))
+            btn.setIcon(make_ui_icon(icon_name, self.theme["text"], ICON_GLYPH))
+            btn.setToolTip(tr(tip_key))
+            btn.setAccessibleName(tr(tip_key))
+            btn.setProperty("icon_name", icon_name)
+            btn.clicked.connect(getattr(self, handler_name))
+            btn.clicked.connect(self.sync_icon_buttons)
+            self.icon_buttons[key] = btn
+        self.icon_wb_box.setVisible(False)
+        self.icon_layout.addWidget(self.icon_wb_box)
+        self._layout_icon_grid()
+
+    def _relayout_icon_frame(self, orientation):
+        """图标面板跟着方向换排布：竖版纵向堆叠、横版横向一条。
+
+        和经典面板一样要把旧布局交给临时 QWidget 接管——直接给同一个 widget 装第二个
+        布局，Qt 只会打印警告并保留旧布局，表现就是「切了方向图标栏没变」。
+        """
+        if getattr(self, "icon_frame", None) is None:
+            return
+        items = []
+        while self.icon_layout.count():
+            item = self.icon_layout.takeAt(0)
+            widget, sub = item.widget(), item.layout()
+            if widget is not None:
+                items.append(("widget", widget))
+            elif sub is not None:
+                items.append(("layout", sub))
+        QWidget().setLayout(self.icon_layout)
+        new_layout = QHBoxLayout(self.icon_frame) if orientation == "landscape" else QVBoxLayout(self.icon_frame)
+        new_layout.setContentsMargins(6, 6, 6, 6)
+        new_layout.setSpacing(2)
+        new_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter if orientation == "landscape"
+                                else Qt.AlignmentFlag.AlignTop)
+        for kind, obj in items:
+            if kind == "widget":
+                new_layout.addWidget(obj)
+            else:
+                new_layout.addLayout(obj)
+        self.icon_layout = new_layout
+        self._layout_icon_grid()
+
+    def _icon_prev_page(self):
+        self.switch_whiteboard_page(-1)
+
+    def _icon_next_page(self):
+        self.switch_whiteboard_page(1)
+
+    def _layout_icon_grid(self):
+        """按当前方向重排图标网格：竖版 3 列、横版 1 行。"""
+        for grid in (self.icon_grid, self.icon_wb_grid):
+            while grid.count():
+                grid.takeAt(0)
+        main_keys = [key for key, *_ in self.ICON_ACTIONS]
+        wb_keys = [key for key, *_ in self.ICON_WB_ACTIONS]
+        if self.orientation == "landscape":
+            for i, key in enumerate(main_keys):
+                self.icon_grid.addWidget(self.icon_buttons[key], 0, i)
+            for i, key in enumerate(wb_keys):
+                self.icon_wb_grid.addWidget(self.icon_buttons[key], 0, i)
+        else:
+            cols = 3
+            for i, key in enumerate(main_keys):
+                self.icon_grid.addWidget(self.icon_buttons[key], i // cols, i % cols)
+            for i, key in enumerate(wb_keys):
+                self.icon_wb_grid.addWidget(self.icon_buttons[key], i // cols, i % cols)
+        for key in main_keys + wb_keys:
+            self.icon_buttons[key].setVisible(True)
+
+    def repaint_ui_icons(self):
+        """主题变了就按新的文字色重绘所有图标（亮色主题下白色图标看不见）。"""
+        buttons = getattr(self, "icon_buttons", None)
+        if not buttons:
+            return
+        for btn in buttons.values():
+            name = btn.property("icon_name")
+            if name:
+                btn.setIcon(make_ui_icon(name, self.theme["text"], ICON_GLYPH))
+        if getattr(self, "icon_btn_rotate", None) is not None:
+            self.icon_btn_rotate.setIcon(make_rotate_icon(self.theme["label"], 22))
+
+    def sync_icon_buttons(self):
+        """把经典按钮的状态单向投影到图标按钮上。
+
+        经典按钮是唯一状态真相：高亮（objectName == "ActiveTool"）、可用性
+        （isEnabled）、可见性都写在它身上，散落在 set_active_tool / update_history_ui /
+        update_whiteboard_ui 等十几处。图标树不参与这些逻辑，只在这里读一遍、投影一遍。
+
+        这样做的关键好处：以后改任何功能仍然只动经典那一套，不存在「两棵树各写一半」
+        的漂移。代价是投影必须在每个状态变化后被调用——所以除了各处显式调用，
+        heartbeat_refresh() 里还兜一次底。
+        """
+        buttons = getattr(self, "icon_buttons", None)
+        if not buttons:
+            return
+        for key, icon_name, tip_key, handler_name, mirror_name in self.ICON_ACTIONS + self.ICON_WB_ACTIONS:
+            btn = buttons.get(key)
+            source = getattr(self, mirror_name, None)
+            if btn is None or source is None:
+                continue
+            btn.setEnabled(source.isEnabled())
+            active = source.objectName() == "ActiveTool"
+            want = "IconBtnActive" if active else "IconBtn"
+            if btn.objectName() != want:
+                btn.setObjectName(want)
+                btn.setStyle(btn.style())        # objectName 变了必须重解样式表
+            # 提示跟着经典按钮的文案走：模式键在「穿透/绘图」之间来回，白板键在
+            # 「进入白板/退出白板」之间来回，写死 tr(key) 会让提示停在旧文案上。
+            text = source.text().strip()
+            if text and key not in ("pages",):
+                btn.setToolTip(text)
+                btn.setAccessibleName(text)
+        # 页码按钮显示的是「3/7」这种文字，图标之外还要把页码带上
+        page_btn = buttons.get("pages")
+        if page_btn is not None and getattr(self, "page_label", None) is not None:
+            label = self.page_label.text().strip()
+            page_btn.setToolTip(trf("page_of", value=label) if label else tr("page_list"))
+        # 白板控制区的显隐跟着经典的 wb_box。
+        # 这里【必须】用 isHidden() 而不是 isVisible()：Qt 的 isVisible() 还要求所有祖先
+        # 可见，而图标模式下 main_frame 整个是隐藏的，wb_box 的 isVisible() 恒为 False——
+        # 用它来投影的话，图标模式下进白板永远看不到翻页栏。isHidden() 只反映「这个控件
+        # 自己有没有被显式隐藏」，那才是 update_whiteboard_ui() 写进去的那个意图。
+        if getattr(self, "wb_box", None) is not None and getattr(self, "icon_wb_box", None) is not None:
+            want_visible = not self.wb_box.isHidden()
+            if self.icon_wb_box.isHidden() == want_visible:
+                self.icon_wb_box.setVisible(want_visible)
+                if self.ui_mode == "icon":
+                    self._resize_to_content()
+
+    def set_ui_mode(self, mode, persist=True):
+        """在文字主面板与图标主面板之间切换。"""
+        if mode not in ("classic", "icon"):
+            return
+        if mode == self.ui_mode and self.main_frame.isVisible() == (mode == "classic"):
+            return
+        self.ui_mode = mode
+        self.main_frame.setVisible(mode == "classic")
+        self.icon_frame.setVisible(mode == "icon")
+        self.sync_icon_buttons()
+        self._resize_to_content()
+        # 子菜单锚点换了一整套按钮，已展开的子菜单要重新定位到新按钮旁
+        if getattr(self, "menu_panel", None) is not None and self.menu_panel.isVisible():
+            self.position_menu_panel()
+        self.heartbeat_refresh()
+        if persist:
+            self.save_settings()
+        track_event("ui_mode_changed", mode=mode)
 
     def _layout_wb_box(self):
         """白板控制区始终保持紧凑两行。
@@ -7178,7 +7935,10 @@ class ControlPanel(QWidget):
         self.color_preview = QWidget(); self.color_preview.setFixedHeight(6); self.draw_sub_layout.addWidget(self.color_preview)
 
         # 粗细调节 (滑轨+箭头回归)
-        self.label_w = QLabel(trf("width_value", value=4)); self.label_w.setStyleSheet("color: white; font-weight: bold;"); self.draw_sub_layout.addWidget(self.label_w)
+        self.label_w = QLabel(trf("width_value", value=4))
+        # 颜色交给 apply_theme() 统一下发，这里不写死——写死成白色时亮色主题下白字白底
+        self.label_w.setStyleSheet(f"color: {self.theme['label']}; font-weight: bold;")
+        self.draw_sub_layout.addWidget(self.label_w)
         s_row = QHBoxLayout(); s_row.setSpacing(2)
         btn_d = QPushButton("▼"); btn_d.setObjectName("ArrowBtn"); btn_d.clicked.connect(lambda: self.pen_slider.setValue(self.pen_slider.value()-1))
         self.pen_slider = QSlider(Qt.Orientation.Horizontal); self.pen_slider.setRange(1, 40); self.pen_slider.setValue(4); self.pen_slider.setFixedWidth(80)
@@ -7318,10 +8078,36 @@ class ControlPanel(QWidget):
         self.aid_sub_layout.addWidget(QLabel(tr("aid_hint")))
 
     def on_smart_toggle(self):
-        enabled = self.btn_smart_toggle.isChecked()
+        # 批注子面板那颗是 checkable 按钮，它的勾选状态就是用户刚点出来的意图
+        self.set_smart_shapes(self.btn_smart_toggle.isChecked())
+
+    def toggle_smart_shapes(self):
+        """设置页那颗按钮的入口：取反当前真实状态。
+
+        两个入口（批注子面板 / 设置页）都收敛到 set_smart_shapes，共用同一个状态。
+        """
+        if not self.canvas:
+            return
+        self.set_smart_shapes(not self.canvas.smart_shapes_enabled)
+
+    def set_smart_shapes(self, enabled):
+        """智能识别图形的唯一写入点。
+
+        btn_smart_toggle 是 checkable 的，所以从设置页改状态时必须一并把它的勾选状态
+        同步过去——只改文案不改 checked，下次用户点批注面板那颗时 isChecked() 返回的是
+        过期值，开关会「点一下没反应」。
+        """
+        enabled = bool(enabled)
+        if not self.canvas:
+            return
         self.canvas.smart_shapes_enabled = enabled
         self.canvas.dash_chain = None
+        self.btn_smart_toggle.blockSignals(True)
+        self.btn_smart_toggle.setChecked(enabled)
+        self.btn_smart_toggle.blockSignals(False)
         self.btn_smart_toggle.setText(tr("smart_shapes_on") if enabled else tr("smart_shapes_off"))
+        self.sync_settings_panel()
+        self.save_settings()
         track_event("smart_shapes_toggled", enabled=enabled)
 
     # --- 计时器 ---
@@ -8122,6 +8908,7 @@ class ControlPanel(QWidget):
         for btn in self.tool_buttons():
             btn.setObjectName("ActiveTool" if btn == active_button else "")
             btn.setStyle(btn.style())
+        self.sync_icon_buttons()      # 高亮变了，图标树跟上
 
     def _resize_to_content(self):
         """子面板显隐后立即按内容收紧窗口并整窗重绘。
@@ -8134,7 +8921,9 @@ class ControlPanel(QWidget):
         if layout:
             # 嵌套布局的 sizeHint 有缓存，白板区显隐后必须逐层失效再重算，
             # 否则窗口只会变大不会缩回
-            for nested in (getattr(self, "wb_grid", None), getattr(self, "toolbar_layout", None), layout):
+            for nested in (getattr(self, "wb_grid", None), getattr(self, "toolbar_layout", None),
+                           getattr(self, "icon_grid", None), getattr(self, "icon_wb_grid", None),
+                           getattr(self, "icon_layout", None), layout):
                 if nested:
                     nested.invalidate()
                     nested.activate()
@@ -8189,6 +8978,7 @@ class ControlPanel(QWidget):
         self.sync_tool_highlight()
         for btn in self.tool_buttons():
             btn.setStyle(btn.style())
+        self.sync_icon_buttons()
 
     def sync_selection_controls(self):
         if hasattr(self, "select_label"):
@@ -8432,9 +9222,21 @@ class ControlPanel(QWidget):
         "file_sub": "btn_file", "timer_sub": "btn_tools",
     }
 
+    # 经典按钮属性名 → 图标按钮键。图标 UI 下子菜单要对齐【图标】按钮，
+    # 否则锚点指向的是隐藏着的经典按钮，位置全落在窗口左上角。
+    ICON_ANCHOR_KEYS = {
+        "btn_pen": "pen", "btn_eraser": "eraser", "btn_select": "select",
+        "btn_text": "text", "btn_shape": "shape", "btn_tools": "tools", "btn_file": "file",
+    }
+
     def sub_anchor_button(self, target):
         for name, button_name in self.SUB_ANCHORS.items():
             if getattr(self, name, None) is target:
+                if self.ui_mode == "icon":
+                    key = self.ICON_ANCHOR_KEYS.get(button_name)
+                    icon_btn = getattr(self, "icon_buttons", {}).get(key) if key else None
+                    if icon_btn is not None:
+                        return icon_btn
                 return getattr(self, button_name, None)
         return None
 
@@ -8476,6 +9278,7 @@ class ControlPanel(QWidget):
                 new_layout.addLayout(obj)
         self.toolbar_layout = new_layout
         self._layout_wb_box()      # 白板控制区跟着换行/换列，否则横版下文字被压掉
+        self._relayout_icon_frame(orientation)
         # 竖版：固定宽度、高度自适应；横版：宽度自适应、高度按内容收紧。
         # 横版原来写死 setFixedHeight(70)：白板控制区一显示就要两行按钮的高度，
         # 硬压在 70px 里会把「上页/下页/新页/黑板」的字裁掉，所以改由内容决定高度。
@@ -8485,6 +9288,7 @@ class ControlPanel(QWidget):
         self.main_frame.setMaximumWidth(16777215)
         if orientation == "portrait":
             self.main_frame.setFixedWidth(150)
+        # 图标面板不固定宽度：它的宽度由 3 列图标决定（约 110px），套用 150 会白留一截
         self.title_label.setText(f" ⠿ {tr('app')} {APP_VERSION}")
         self._resize_to_content()                        # 内部会 clamp_into_screen 收回屏幕
         track_event("orientation_set", orientation=orientation)
@@ -8536,6 +9340,7 @@ class ControlPanel(QWidget):
             return
         self.btn_undo.setEnabled(bool(self.canvas.undo_stack))
         self.btn_redo.setEnabled(bool(self.canvas.redo_stack))
+        self.sync_icon_buttons()      # 可用性变了，图标树跟上
 
     def clear(self):
         if not (self.canvas.all_segments or self.canvas.text_items or self.canvas.shape_items or self.canvas.image_items):
@@ -8624,6 +9429,387 @@ class ControlPanel(QWidget):
                 self._topmost_error = True
                 LOGGER.exception("窗口层级更新失败")
 
+    # --- 设置页 ---
+    def open_settings_panel(self):
+        """打开设置面板（懒建）。"""
+        self.show_only_sub(None)
+        if self.settings_panel is None:
+            self.build_settings_panel()
+        self.sync_settings_panel()
+        panel = self.settings_panel
+        screen = self.screen_geometry(self) or QApplication.primaryScreen().availableGeometry()
+        # 高度封顶在屏幕可用高度的 88%：设置项不少，1080p 上完整展开会超出屏幕，
+        # 内部是 QScrollArea，封顶后自然出现滚动条而不是把底部按钮顶到屏幕外。
+        # 用 setMaximumHeight 而不是 setFixedHeight：换到更高的屏幕、或圆角变化让
+        # 内容变矮时，adjustSize 还能把它收回去；固定住就永远是第一次那个高度。
+        cap = int(screen.height() * 0.88)
+        panel.setMaximumHeight(cap)
+        panel.adjustSize()
+        # adjustSize 之后还要按内容高度再撑一次。QScrollArea 在 widgetResizable
+        # 模式下的 sizeHint 跟里面装了多少东西无关（Qt 给的是一个很小的默认值），
+        # 所以光靠 adjustSize，窗口会停在一个偏矮的高度上：实屏上量到的是窗口
+        # 424px、可用高度 783px、封顶 689px，而滚动条却还有 343px 可滚——屏幕明明
+        # 有地方，用户却得滚动才能点到「立即检查」。这里把内容的真实高度加回来，
+        # 仍然受 cap 约束，装不下才出现滚动条。
+        scroll = getattr(self, "settings_scroll", None)
+        if scroll is not None and scroll.widget() is not None:
+            content = scroll.widget().sizeHint().height() + 2 * scroll.frameWidth()
+            chrome = max(0, panel.height() - scroll.height())   # 标题栏、边距等
+            panel.resize(panel.width(), min(cap, content + chrome))
+        panel.move(screen.center().x() - panel.width() // 2,
+                   max(screen.top() + 8, screen.center().y() - panel.height() // 2))
+        panel.show()
+        self.apply_window_opacity()      # 新建的窗口要立刻套上当前透明度
+        self.raise_floating(panel)
+        self.heartbeat_refresh()
+        track_event("settings_opened")
+
+    def build_settings_panel(self):
+        """构造设置面板。
+
+        分区：外观（主题 / UI 模式 / 透明度 / 圆角）、面板（方向）、绘制（智能图形、
+        多指书写、速度粗细）、系统（开机自启、检查更新）、关于。
+
+        「智能识别图形」在这里和批注子面板里【各有一颗按钮】，两颗都连到同一个
+        toggle_smart_shapes，共用同一个状态。理由：设置页是「找得到」的位置，
+        而批注面板里那颗是画的过程中随手就能切的位置——两种需求都真实存在。
+        """
+        self.settings_panel, layout = self._make_tool_window(tr("settings"))
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        inner = QWidget()
+        form = QVBoxLayout(inner)
+        form.setContentsMargins(2, 2, 2, 2)
+        form.setSpacing(3)
+        form.setAlignment(Qt.AlignmentFlag.AlignTop)
+        try:      # 触屏：手指按住内容直接甩动，而不是去够那条 10px 的滚动条
+            QScroller.grabGesture(scroll.viewport(), QScroller.ScrollerGestureType.TouchGesture)
+        except Exception:
+            pass
+
+        def section(key):
+            label = QLabel(tr(key))
+            label.setObjectName("SettingsSection")
+            form.addWidget(label)
+
+        def hint(text):
+            label = QLabel(text)
+            label.setObjectName("SettingsHint")
+            label.setWordWrap(True)
+            form.addWidget(label)
+
+        # ---------- 外观 ----------
+        section("settings_appearance")
+        form.addWidget(self.btn_theme)          # 主题按钮从主栏搬到这里
+
+        ui_row = QHBoxLayout(); ui_row.setSpacing(3)
+        self.btn_ui_classic = QPushButton(tr("ui_classic"))
+        self.btn_ui_classic.clicked.connect(lambda: self.set_ui_mode("classic"))
+        self.btn_ui_icon = QPushButton(tr("ui_icon"))
+        self.btn_ui_icon.clicked.connect(lambda: self.set_ui_mode("icon"))
+        ui_row.addWidget(self.btn_ui_classic)
+        ui_row.addWidget(self.btn_ui_icon)
+        form.addWidget(QLabel(tr("ui_mode")))
+        form.addLayout(ui_row)
+
+        self.opacity_value_label = QLabel(trf("opacity_value", value=self.ui_opacity))
+        form.addWidget(self.opacity_value_label)
+        self.ui_opacity_slider = QSlider(Qt.Orientation.Horizontal)
+        self.ui_opacity_slider.setRange(self.OPACITY_MIN, self.OPACITY_MAX)
+        self.ui_opacity_slider.setValue(self.ui_opacity)
+        self.ui_opacity_slider.valueChanged.connect(self.set_ui_opacity)
+        form.addWidget(self.ui_opacity_slider)
+        hint(tr("opacity_hint"))
+
+        self.radius_value_label = QLabel(trf("radius_value", value=self.ui_radius))
+        form.addWidget(self.radius_value_label)
+        self.ui_radius_slider = QSlider(Qt.Orientation.Horizontal)
+        self.ui_radius_slider.setRange(self.RADIUS_MIN, self.RADIUS_MAX)
+        self.ui_radius_slider.setValue(self.ui_radius)
+        self.ui_radius_slider.valueChanged.connect(self.set_ui_radius)
+        form.addWidget(self.ui_radius_slider)
+
+        # ---------- 主面板 ----------
+        section("settings_panel_group")
+        orient_row = QHBoxLayout(); orient_row.setSpacing(3)
+        self.btn_orient_portrait = QPushButton(tr("portrait"))
+        self.btn_orient_portrait.clicked.connect(lambda: self._set_orientation_from_settings("portrait"))
+        self.btn_orient_landscape = QPushButton(tr("landscape"))
+        self.btn_orient_landscape.clicked.connect(lambda: self._set_orientation_from_settings("landscape"))
+        orient_row.addWidget(self.btn_orient_portrait)
+        orient_row.addWidget(self.btn_orient_landscape)
+        form.addLayout(orient_row)
+
+        # ---------- 绘制 ----------
+        section("settings_drawing")
+        self.btn_settings_smart = QPushButton(tr("smart_shapes_on"))
+        self.btn_settings_smart.clicked.connect(self.toggle_smart_shapes)
+        form.addWidget(self.btn_settings_smart)
+        self.btn_settings_multitouch = QPushButton(tr("multitouch_on"))
+        self.btn_settings_multitouch.clicked.connect(self.toggle_multitouch)
+        form.addWidget(self.btn_settings_multitouch)
+        self.btn_settings_speed_width = QPushButton(tr("speed_width_on"))
+        self.btn_settings_speed_width.clicked.connect(self.toggle_speed_width)
+        form.addWidget(self.btn_settings_speed_width)
+
+        # ---------- 系统 ----------
+        section("settings_system")
+        self.btn_autostart = QPushButton(tr("autostart_off"))
+        self.btn_autostart.clicked.connect(self.toggle_autostart)
+        form.addWidget(self.btn_autostart)
+        hint(tr("autostart_hint"))
+
+        self.btn_update_toggle = QPushButton(tr("update_check_off"))
+        self.btn_update_toggle.clicked.connect(self.toggle_update_check)
+        form.addWidget(self.btn_update_toggle)
+        self.btn_check_update = QPushButton(tr("check_update_now"))
+        self.btn_check_update.clicked.connect(self.check_for_updates)
+        form.addWidget(self.btn_check_update)
+        self.update_status_label = QLabel("")
+        self.update_status_label.setObjectName("SettingsHint")
+        self.update_status_label.setWordWrap(True)
+        form.addWidget(self.update_status_label)
+        hint(tr("update_hint"))
+
+        # ---------- 关于 ----------
+        section("settings_about")
+        about = QLabel(trf("about_version", value=APP_VERSION))
+        about.setWordWrap(True)
+        form.addWidget(about)
+
+        scroll.setWidget(inner)
+        layout.addWidget(scroll)
+        # 留着引用：open_settings_panel 要按内容真实高度决定窗口高度。
+        self.settings_scroll = scroll
+        self.settings_panel.setMinimumWidth(300)
+        self.settings_panel.setStyleSheet(self.styleSheet())
+
+    def _set_orientation_from_settings(self, orientation):
+        self.set_orientation(orientation)
+        self.sync_settings_panel()
+        self.save_settings()
+
+    def sync_settings_panel(self):
+        """把当前真实状态投影到设置页控件上（设置页是视图，不是状态所有者）。
+
+        用 getattr 取 settings_panel：本方法会被 set_ui_radius/set_ui_opacity 调用，
+        而那两个在构造期（属性还没赋上时）也可能被调到。
+        """
+        if getattr(self, "settings_panel", None) is None:
+            return
+        cv = self.canvas
+
+        def mark(button, active):
+            want = "ActiveTool" if active else ""
+            if button.objectName() != want:
+                button.setObjectName(want)
+                button.setStyle(button.style())
+
+        mark(self.btn_ui_classic, self.ui_mode == "classic")
+        mark(self.btn_ui_icon, self.ui_mode == "icon")
+        mark(self.btn_orient_portrait, self.orientation == "portrait")
+        mark(self.btn_orient_landscape, self.orientation == "landscape")
+
+        for slider, value in ((self.ui_opacity_slider, self.ui_opacity),
+                              (self.ui_radius_slider, self.ui_radius)):
+            slider.blockSignals(True)
+            slider.setValue(int(value))
+            slider.blockSignals(False)
+        self.opacity_value_label.setText(trf("opacity_value", value=self.ui_opacity))
+        self.radius_value_label.setText(trf("radius_value", value=self.ui_radius))
+
+        if cv is not None:
+            smart = bool(cv.smart_shapes_enabled)
+            self.btn_settings_smart.setText(tr("smart_shapes_on") if smart else tr("smart_shapes_off"))
+            mark(self.btn_settings_smart, smart)
+            multi = bool(cv.smart_multitouch_enabled)
+            self.btn_settings_multitouch.setText(tr("multitouch_on") if multi else tr("multitouch_off"))
+            mark(self.btn_settings_multitouch, multi)
+            speed = bool(cv.speed_width_enabled)
+            self.btn_settings_speed_width.setText(tr("speed_width_on") if speed else tr("speed_width_off"))
+            mark(self.btn_settings_speed_width, speed)
+
+        on = autostart_enabled()
+        self.btn_autostart.setText(tr("autostart_on") if on else tr("autostart_off"))
+        mark(self.btn_autostart, on)
+
+        allowed = bool(self.update_check_enabled)
+        self.btn_update_toggle.setText(tr("update_check_on") if allowed else tr("update_check_off"))
+        mark(self.btn_update_toggle, allowed)
+        # 更新检查关着的时候，「立即检查」不可点——避免出现「我明明关了它却联网」
+        self.btn_check_update.setEnabled(allowed)
+
+    def toggle_multitouch(self):
+        """多指书写开关。5.4.x 之前它只能从配置文件里改，界面上没有入口。"""
+        if not self.canvas:
+            return
+        self.canvas.smart_multitouch_enabled = not self.canvas.smart_multitouch_enabled
+        self.sync_settings_panel()
+        self.save_settings()
+        track_event("multitouch_toggled", enabled=self.canvas.smart_multitouch_enabled)
+
+    def toggle_speed_width(self):
+        """速度→粗细开关。同上，之前没有界面入口。"""
+        if not self.canvas:
+            return
+        self.canvas.speed_width_enabled = not self.canvas.speed_width_enabled
+        self.sync_settings_panel()
+        self.save_settings()
+        track_event("speed_width_toggled", enabled=self.canvas.speed_width_enabled)
+
+    def toggle_autostart(self):
+        """开/关开机自启（写当前用户的 Run 键）。
+
+        先读注册表的真实状态再取反，而不是维护一个自己的布尔值：用户可能在任务管理器
+        的启动项里、或用别的工具关掉了它，我们记的值就过期了。注册表是唯一真相。
+        """
+        want = not autostart_enabled()
+        ok = set_autostart(want)
+        self.sync_settings_panel()
+        if not ok:
+            # 设置失败要说出来。注册表可能被组策略锁住（教室机器常见），
+            # 静默失败会让用户以为开了，下次开机才发现没有。
+            self.update_status_label.setText(tr("autostart_failed"))
+        else:
+            self.update_status_label.setText(tr("autostart_saved") if want else "")
+        track_event("autostart_toggled", enabled=want, ok=ok)
+
+    def toggle_update_check(self):
+        self.update_check_enabled = not self.update_check_enabled
+        self.sync_settings_panel()
+        self.save_settings()
+        track_event("update_check_toggled", enabled=self.update_check_enabled)
+
+    def check_for_updates(self):
+        """用户亲手点了「立即检查」才会走到这里，发一次 GET，只读版本号。"""
+        if not self.update_check_enabled:
+            return
+        if self._update_worker is not None and self._update_worker.isRunning():
+            return          # 已经在查了，别叠第二个请求
+        self.btn_check_update.setEnabled(False)
+        self.update_status_label.setText(tr("update_checking"))
+        worker = UpdateCheckWorker(self)
+        worker.finished_check.connect(self._on_update_result)
+        # 线程对象要留着引用：局部变量出作用域被回收会导致 QThread 未结束就析构
+        self._update_worker = worker
+        worker.start()
+        track_event("update_check_started")
+
+    def _on_update_result(self, tag, error):
+        self.btn_check_update.setEnabled(bool(self.update_check_enabled))
+        if error == "rate_limited":
+            # 不用 update_failed 那句「检查失败：xxx」。被限流不是失败，是「现在问不了，
+            # 过会儿再问」，而且用户什么都不用修——照着「检查失败」的措辞，人会去翻网络设置。
+            self.update_status_label.setText(tr("update_rate_limited"))
+            track_event("update_check_rate_limited")
+            return
+        if error:
+            self.update_status_label.setText(trf("update_failed", detail=str(error)))
+            track_event("update_check_failed", error=str(error))
+            return
+        remote = parse_version(tag)
+        local = parse_version(APP_VERSION)
+        if remote is None or local is None:
+            self.update_status_label.setText(trf("update_failed", detail="bad_version"))
+            return
+        if remote > local:
+            self.update_status_label.setText(trf("update_available", value=str(tag)))
+            self._offer_update_page(tag)
+        else:
+            self.update_status_label.setText(tr("update_current"))
+        track_event("update_check_done", remote=str(tag), newer=bool(remote > local))
+
+    def stop_update_worker(self):
+        """退出前等检查更新的线程收尾。
+
+        wait 给 2 秒上限：请求本身有 6 秒超时，但退出时不该让用户对着一个不消失的
+        窗口等 6 秒。超时就放弃等待——线程只做一次只读 HTTP GET，没有需要回滚的副作用。
+        """
+        worker = self._update_worker
+        if worker is None:
+            return
+        try:
+            if worker.isRunning():
+                worker.wait(2000)
+        except RuntimeError:
+            pass
+        self._update_worker = None
+
+    def _offer_update_page(self, tag):
+        """发现新版本：问一句，用户同意才打开浏览器。不下载、不执行任何东西。"""
+        box = QMessageBox(self)
+        box.setWindowTitle(tr("settings"))
+        box.setText(trf("update_available", value=str(tag)))
+        box.setInformativeText(tr("update_open_page"))
+        box.setStandardButtons(QMessageBox.StandardButton.Open | QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        box.setStyleSheet(self.styleSheet())
+        self.timer.stop()          # 弹窗期间停心跳，避免置顶重排把它压下去
+        try:
+            if box.exec() == QMessageBox.StandardButton.Open:
+                import webbrowser
+                webbrowser.open(UPDATE_PAGE_URL)
+                track_event("update_page_opened")
+        finally:
+            self.timer.start(self.HEARTBEAT_MS)
+
+    def opacity_targets(self):
+        """哪些窗口跟随透明度设置。
+
+        全屏画布【必须排除】：它是墨迹本身的载体，对它设 windowOpacity 会把用户画的
+        线一起淡掉——那不是「界面半透明」，那是「墨水变淡」。透明度只作用于操作界面。
+
+        与 floating_stack() 的区别：那个按可见性过滤（用于排 Z 序），这里要连隐藏的
+        窗口一起设，否则一个面板在调整透明度时正好是隐藏的，下次显示出来就是不透明的。
+        """
+        return [w for w in (
+            self, getattr(self, "menu_panel", None), getattr(self, "select_panel", None),
+            getattr(self, "mini_timer", None), getattr(self, "calc_panel", None),
+            getattr(self, "roster_panel", None), getattr(self, "thumbnail_panel", None),
+            getattr(self, "text_panel", None), getattr(self, "settings_panel", None),
+        ) if w is not None]
+
+    def apply_window_opacity(self):
+        """把 ui_opacity 下发到所有操作界面窗口。
+
+        用 setWindowOpacity（整窗 alpha，Windows 下走 WS_EX_LAYERED）而不是在样式表里
+        写 rgba()：样式表只能改我们自己画的背景色，按钮文字、图标、滑块这些子控件不会
+        跟着透明，结果是「框半透明、里面的字不透明」。整窗 alpha 是一致的。
+
+        每次心跳都会调用，所以这里必须便宜：值没变就直接返回。setWindowOpacity 在
+        Windows 上会触发整窗重新合成，每 500ms 无条件调一次会看到闪烁。
+        """
+        target = max(self.OPACITY_MIN, min(self.OPACITY_MAX, int(self.ui_opacity))) / 100.0
+        for window in self.opacity_targets():
+            try:
+                # Qt 内部把 alpha 量化成 8bit，读回来会有 ~0.004 的误差，
+                # 用 round 到 3 位比较，否则永远判定为「变了」而每次都重设。
+                if round(window.windowOpacity(), 3) != round(target, 3):
+                    window.setWindowOpacity(target)
+            except RuntimeError:
+                continue      # 窗口已被回收（懒建面板可能已经析构）
+
+    def set_ui_opacity(self, value, persist=True):
+        self.ui_opacity = max(self.OPACITY_MIN, min(self.OPACITY_MAX, int(value)))
+        self.apply_window_opacity()
+        # 走 sync_settings_panel 而不是只改标签：滑块位置也要跟上。程序里改值的路
+        # 不止「用户拖滑块」一条（load_settings、钳制到上下限都会改），只更新文字会
+        # 让滑块停在旧位置，下一次拖动从那个错的位置起跳。
+        # 它内部对滑块 blockSignals，不会反过来再触发本方法。
+        self.sync_settings_panel()
+        if persist:
+            self.save_settings()
+
+    def set_ui_radius(self, value, persist=True):
+        self.ui_radius = max(self.RADIUS_MIN, min(self.RADIUS_MAX, int(value)))
+        self.apply_theme()          # 圆角是样式表的一部分，重新下发即生效
+        self.sync_settings_panel()
+        if persist:
+            self.save_settings()
+
     def floating_stack(self):
         """浮窗的期望层级，从最上到最下。
 
@@ -8696,6 +9882,11 @@ class ControlPanel(QWidget):
 
     def heartbeat_refresh(self):
         self.bind_topmost_stack()
+        # 图标树的状态投影在这里兜底：显式调用点覆盖了所有已知的状态变化路径，但
+        # 兜一次底的代价只是每 500ms 读十几个 isEnabled/objectName，换来的是「以后
+        # 有人新增了一处状态变化却忘了调 sync」时，界面最多错半秒而不是一直错。
+        self.sync_icon_buttons()
+        self.apply_window_opacity()
         # 置顶重排会把主面板重新激活，从而抢走文字输入控件的键盘焦点。心跳每 500ms
         # 跑一次，所以文字面板打开后不到半秒键盘就失效了——报告里的「键盘根本无法
         # 输入任何内容」正是这么来的。只要文字面板还开着，就把焦点还回去。
@@ -8842,6 +10033,12 @@ class ControlPanel(QWidget):
             "text_font_size": int(cv.text_font_size),
             "drawing_mode": bool(cv.is_drawing_mode),
             "ruler_calibrations": normalize_calibrations(cv.ruler_calibrations),
+            # 5.5.0 外观与系统设置。注意：开机自启【不在这里】——它的真相在注册表里，
+            # 存一份到配置文件就会出现「两处不一致该信谁」的问题。
+            "ui_mode": self.ui_mode,
+            "ui_radius": int(self.ui_radius),
+            "ui_opacity": int(self.ui_opacity),
+            "update_check_enabled": bool(self.update_check_enabled),
         }
 
     def save_settings(self):
@@ -8952,6 +10149,7 @@ class ControlPanel(QWidget):
             self.select_width_slider.blockSignals(True)
             self.select_width_slider.setValue(max(1, min(40, int(cv.pen_width))))
             self.select_width_slider.blockSignals(False)
+        self.sync_settings_panel()
         self.update_magnifier_ui()
         self.update_timer_ui()
         self.update_shape_buttons()
@@ -9055,11 +10253,11 @@ class ControlPanel(QWidget):
                 self.btn_smart_toggle.blockSignals(False)
                 cv.smart_shapes_enabled = smart
                 self.btn_smart_toggle.setText(tr("smart_shapes_on") if smart else tr("smart_shapes_off"))
-            # 多指书写开关目前没有界面入口，只从配置读取；缺省保持开启。
+            # 多指书写：5.5.0 起设置页里有开关了（之前只能改配置文件）；缺省保持开启。
             multitouch = settings.get("smart_multitouch")
             if isinstance(multitouch, bool):
                 cv.smart_multitouch_enabled = multitouch
-            # 速度→宽度同样只从配置读取，缺省保持开启
+            # 速度→宽度同上，5.5.0 起设置页可调；缺省保持开启
             speed_width = settings.get("speed_width")
             if isinstance(speed_width, bool):
                 cv.speed_width_enabled = speed_width
@@ -9100,6 +10298,23 @@ class ControlPanel(QWidget):
             if isinstance(px, int) and isinstance(py, int):
                 self._saved_pos = (px, py)
             self._saved_screen = settings.get("panel_screen") if isinstance(settings.get("panel_screen"), str) else None
+
+            # --- 5.5.0 外观设置 ---
+            # 顺序有讲究：圆角先于 UI 模式。set_ui_mode 会切换可见的那棵树并
+            # _resize_to_content()，圆角在那之后再改就要多一次重排。
+            radius = settings.get("ui_radius")
+            if isinstance(radius, int) and not isinstance(radius, bool):
+                self.set_ui_radius(radius, persist=False)
+            opacity = settings.get("ui_opacity")
+            if isinstance(opacity, int) and not isinstance(opacity, bool):
+                self.set_ui_opacity(opacity, persist=False)
+            ui_mode = settings.get("ui_mode")
+            if ui_mode in ("classic", "icon"):
+                self.set_ui_mode(ui_mode, persist=False)
+            update_check = settings.get("update_check_enabled")
+            if isinstance(update_check, bool):
+                self.update_check_enabled = update_check
+
             self.sync_settings_ui()
             track_event("settings_loaded", tool=cv.draw_state, theme=self.theme_name)
         except Exception as e:
@@ -10749,6 +11964,12 @@ if __name__ == "__main__":
     # 不关的后果是我们已经退了，TabTip/osk 还占着屏幕，用户下一次点任何输入框它
     # 又弹出来，而能收它的程序已经不在了。
     app.aboutToQuit.connect(lambda: touch_keyboard.shutdown())
+    # 检查更新的线程也挂在这条出口上。QThread 还在跑就退出主线程，Qt 会打印
+    # "QThread: Destroyed while thread is still running" 并可能直接崩在析构里。
+    app.aboutToQuit.connect(pnl.stop_update_worker)
+    # 自启命令自愈：绿色版被搬到别的目录后，注册表里那条命令指向的是旧路径，
+    # 开机时静默失效。只在用户开着自启时才纠正，关着的情况下绝不去写注册表。
+    heal_autostart()
     pnl.update_whiteboard_ui()
     pnl.update_history_ui()
     # Prefer the screen the panel will live on; fall back to primary.
