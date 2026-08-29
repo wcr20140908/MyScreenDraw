@@ -1,4 +1,4 @@
-﻿# Build and verify a clean portable Windows directory with PyInstaller.
+# Build and verify a clean portable Windows directory with PyInstaller.
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $root
@@ -21,10 +21,17 @@ foreach ($path in @("build", "dist")) {
 # tier is worse -- it hijacks the screen by design and must never start unasked.
 $previousPlatform = $env:QT_QPA_PLATFORM
 $env:QT_QPA_PLATFORM = "offscreen"
+# Windows PowerShell 5.1 turns each stderr line from a native exe into an ErrorRecord,
+# so under $ErrorActionPreference = "Stop" a harmless warning aborts the build before
+# $LASTEXITCODE is ever read -- and offscreen Qt always warns about the font directory.
+# unittest reports its verdict through the exit code, so let that decide, not stderr.
+$previousErrorAction = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
 try {
     python -m unittest discover -s tests
     $testsExit = $LASTEXITCODE
 } finally {
+    $ErrorActionPreference = $previousErrorAction
     $env:QT_QPA_PLATFORM = $previousPlatform
 }
 if ($testsExit -ne 0) {
