@@ -625,5 +625,500 @@ class UpdateCheckTests(_PanelCase):
                       "QThread 还在跑就退出会崩在析构里")
 
 
+class SettingsAppearanceTests(_PanelCase):
+    """设置页自己长什么样——两条都是实屏上被用户看出来的，纯逻辑测试测不到。
+
+    1. **背景色**。``QScrollArea.setWidget()`` 会把内容 widget 的 autoFillBackground
+       打开，它于是拿调色板默认灰（#efefef）铺满滚动区，盖掉 MainFrame 的主题底色。
+       暗色主题下这块浅灰非常刺眼；亮色主题下 #efefef 和 #f7f9fb 只差一点，所以
+       这个 bug 长期只在暗色下被看见。断言必须落在【像素】上：objectName、
+       stylesheet 字符串都是「设置对了」的证据，不是「画出来对了」的证据。
+    2. **二选一按钮的高亮**。``set_ui_mode`` 原来不通知设置页，于是界面真的换了、
+       高亮却钉在左边那颗上，看起来就是「不管选哪个都高亮左边」。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._theme_before = self.panel.theme_name
+        self.panel.open_settings_panel()
+
+    def tearDown(self):
+        if self.panel.theme_name != self._theme_before:
+            self.panel.toggle_theme()
+
+    def _use_theme(self, name):
+        if self.panel.theme_name != name:
+            self.panel.toggle_theme()
+        self.assertEqual(self.panel.theme_name, name)
+        self.app.processEvents()
+
+    def _panel_pixel(self, point):
+        from PyQt6.QtGui import QImage
+        shot = self.panel.settings_panel.grab().toImage()
+        self.assertFalse(shot.isNull(), "抓不到设置页")
+        self.assertGreater(shot.width(), 8, "抓下来的图不成形，量什么都不算数")
+        self.assertTrue(shot.rect().contains(point),
+                        f"采样点 {point.x()},{point.y()} 落在图({shot.width()}x"
+                        f"{shot.height()})外面——量的是空气")
+        del QImage
+        return shot.pixelColor(point).name().lower()
+
+    def _gap_point(self):
+        """「文字」和「图标」两颗按钮之间那道 3px 间隙——这一点必定是背景。
+
+        不取窗口角落：MainFrame 有 2px 描边加圆角，角落像素合法地是边框色或
+        透明，拿它当背景量会得出一个「看着不对但其实没错」的颜色。
+        """
+        from PyQt6.QtCore import QPoint
+        left, right = self.panel.btn_ui_classic, self.panel.btn_ui_icon
+        host = self.panel.settings_panel
+        a = left.mapTo(host, QPoint(left.width() - 1, left.height() // 2))
+        b = right.mapTo(host, QPoint(0, right.height() // 2))
+        self.assertGreater(b.x() - a.x(), 0, "两颗按钮没有并排，间隙采样无效")
+        return QPoint((a.x() + b.x()) // 2, (a.y() + b.y()) // 2)
+
+    def test_settings_background_follows_the_theme(self):
+        """暗色主题下设置页背景必须是主题的 frame 色，不能是调色板默认灰。"""
+        self._use_theme("dark")
+        want = self.main.ControlPanel.THEMES["dark"]["frame"].lower()
+        got = self._panel_pixel(self._gap_point())
+        self.assertEqual(got, want,
+                         f"暗色下设置页背景是 {got}，应为主题 frame {want}")
+        self.assertNotEqual(got, "#efefef", "又变回 Qt 调色板默认灰了")
+
+    def test_light_theme_background_also_follows_the_theme(self):
+        """亮色下也得对。这条容易漏：#efefef 和 #f7f9fb 肉眼几乎分不出。"""
+        self._use_theme("light")
+        want = self.main.ControlPanel.THEMES["light"]["frame"].lower()
+        got = self._panel_pixel(self._gap_point())
+        self.assertEqual(got, want,
+                         f"亮色下设置页背景是 {got}，应为主题 frame {want}")
+
+    def test_background_survives_a_theme_switch(self):
+        """换主题会重新下发样式表。修复不能只在「刚建好」那一刻成立。"""
+        self._use_theme("dark")
+        self._use_theme("light")
+        self._use_theme("dark")
+        want = self.main.ControlPanel.THEMES["dark"]["frame"].lower()
+        self.assertEqual(self._panel_pixel(self._gap_point()), want,
+                         "来回换过主题之后背景又跑了")
+
+    def test_background_survives_a_radius_change(self):
+        """拖圆角滑块也会重新下发样式表，同上。"""
+        self._use_theme("dark")
+        self.panel.set_ui_radius(self.panel.RADIUS_MAX, persist=False)
+        self.app.processEvents()
+        want = self.main.ControlPanel.THEMES["dark"]["frame"].lower()
+        self.assertEqual(self._panel_pixel(self._gap_point()), want,
+                         "调过圆角之后背景又跑了")
+
+    def test_the_transparent_rule_does_not_flatten_the_buttons(self):
+        """让内容区透明的那条规则不能把按钮底色一起弄透明。
+
+        这是给「让滚动区里一切都透明」的几种顺手写法留的绊子。实测 `QScrollArea *`、
+        `QScrollArea QWidget`、全局 `QWidget` 都会把【非高亮】按钮打成 frame 色，而
+        高亮那颗带 `#ActiveTool`、objectName 特异性更高反倒顶住了——于是界面看起来
+        变成「所有按钮都高亮」。关键是：打穿之后，上面那几条背景断言【照样全绿】，
+        所以必须单独盯按钮底色。
+        （`QScrollArea > QWidget > QWidget` 在 Qt6 下实测不打穿，精确类匹配优先于
+        基类匹配；但那依赖优先级规则，所以正式代码仍按 objectName 点名。）
+        """
+        from PyQt6.QtCore import QPoint
+        self._use_theme("dark")
+        theme = self.main.ControlPanel.THEMES["dark"]
+        button = self.panel.btn_ui_icon          # 非高亮那颗
+        host = self.panel.settings_panel
+        # 贴着左内边取点：按钮正中是字形，量到的会是文字色而不是底色
+        point = button.mapTo(host, QPoint(4, button.height() // 2))
+        got = self._panel_pixel(point)
+        self.assertEqual(got, theme["button"].lower(),
+                         f"按钮底色是 {got}，应为 {theme['button']}；"
+                         f"要是等于 frame {theme['frame']} 就是被那条透明规则打穿了")
+
+    def test_clicking_icon_moves_the_highlight(self):
+        """照用户的动作来：点按钮本体，不是直接调 set_ui_mode。"""
+        self.panel.set_ui_mode("classic", persist=False)
+        self.panel.btn_ui_icon.click()
+        self.app.processEvents()
+        self.assertEqual(self.panel.ui_mode, "icon")
+        self.assertEqual(self.panel.btn_ui_icon.objectName(), "ActiveTool",
+                         "切到图标了，图标那颗却没高亮")
+        self.assertEqual(self.panel.btn_ui_classic.objectName(), "",
+                         "高亮还赖在左边那颗「文字」上")
+
+    def test_clicking_classic_moves_the_highlight_back(self):
+        self.panel.set_ui_mode("icon", persist=False)
+        self.panel.btn_ui_classic.click()
+        self.app.processEvents()
+        self.assertEqual(self.panel.ui_mode, "classic")
+        self.assertEqual(self.panel.btn_ui_classic.objectName(), "ActiveTool")
+        self.assertEqual(self.panel.btn_ui_icon.objectName(), "")
+
+    def test_highlight_is_painted_not_just_named(self):
+        """高亮要真画出来。objectName 对了但没重绘，用户还是看不见变化。"""
+        from PyQt6.QtCore import QPoint
+        self._use_theme("dark")
+        accent = self.main.ControlPanel.THEMES["dark"]["accent"].lower()
+        host = self.panel.settings_panel
+        self.panel.set_ui_mode("classic", persist=False)
+        self.panel.btn_ui_icon.click()
+        self.app.processEvents()
+        icon_btn = self.panel.btn_ui_icon
+        point = icon_btn.mapTo(host, QPoint(4, icon_btn.height() // 2))
+        self.assertEqual(self._panel_pixel(point), accent,
+                         "图标那颗按钮的底色没变成强调色——objectName 改了但没重绘")
+
+    def test_loading_icon_mode_from_config_marks_the_right_button(self):
+        """从配置里读出 icon 模式时高亮也要对——这条走的是 persist=False 那条路径。"""
+        self.panel.set_ui_mode("classic", persist=False)
+        self.panel.set_ui_mode("icon", persist=False)
+        self.app.processEvents()
+        self.assertEqual(self.panel.btn_ui_icon.objectName(), "ActiveTool")
+        self.assertEqual(self.panel.btn_ui_classic.objectName(), "")
+
+
+class SettingsPlacementTests(_PanelCase):
+    """设置页要避着主面板弹，跟子菜单一个规矩。
+
+    这条缺陷是实屏量出来的，代码审查看不见：设置页原先是屏幕居中弹出，而主面板常
+    停在屏幕中间偏左，两者大面积相交。被压住的那半边点下去是主面板在收事件，用户
+    看到的是「点不动」。
+
+    为什么不是靠窗口层级解决：设置页和主面板都是置顶 Tool 窗口，把设置页挂进
+    owner 链去争高低，实测会被心跳里的 owner 重绑带着一起隐藏（Hide 事件里一个
+    Python 栈帧都没有，是原生侧动作）——那比原来的毛病严重得多。摆开就不必争。
+
+    让位允许把设置页压矮，不是只挑方向：横版主面板宽到溢出屏幕，左右无地，停在
+    屏幕中间高度时上下也塞不下整页。矮一点只是多滚两下，压住则是点不动。
+    """
+
+    def _open(self):
+        self.panel.open_settings_panel()
+        self.app.processEvents()
+        return self.panel.settings_panel
+
+    def _overlap(self):
+        sp = self.panel.settings_panel.geometry()
+        return self.panel.frameGeometry().intersected(sp)
+
+    def test_settings_panel_does_not_overlap_the_main_panel(self):
+        sp = self._open()
+        ov = self._overlap()
+        self.assertTrue(ov.isEmpty(),
+                        f"设置页和主面板重叠 {ov.width()}x{ov.height()}，"
+                        f"重叠区里的按钮点下去会被主面板收走。"
+                        f"设置页 {sp.geometry()} 主面板 {self.panel.frameGeometry()}")
+
+    def test_it_dodges_wherever_the_main_panel_sits(self):
+        """主面板挪到屏幕各处都不能被压住——包括正中间那个最坏位置。"""
+        from PyQt6.QtWidgets import QApplication
+        screen = self.panel.screen_geometry(self.panel) or \
+            QApplication.primaryScreen().availableGeometry()
+        spots = {
+            "左上": (screen.left() + 4, screen.top() + 4),
+            "正中": (screen.center().x() - self.panel.width() // 2,
+                     screen.center().y() - self.panel.height() // 2),
+            "右上": (screen.right() - self.panel.width() - 4, screen.top() + 4),
+            "左下": (screen.left() + 4, screen.bottom() - self.panel.height() - 4),
+        }
+        for name, (x, y) in spots.items():
+            with self.subTest(主面板位置=name):
+                self.panel.move(x, y)
+                self.app.processEvents()
+                self._open()
+                ov = self._overlap()
+                self.assertTrue(ov.isEmpty(),
+                                f"主面板在{name}时重叠 {ov.width()}x{ov.height()}")
+
+    def test_it_stays_inside_the_screen(self):
+        """避让不能把设置页甩到屏幕外——那是彻底点不到，比压住更糟。
+
+        必须把主面板挪遍四角再各查一次，只查正中间是不够的：主面板贴在右上角时，
+        右侧空地只剩几 px，如果少了「空地够不够宽」那道判断，设置页会被塞进那条
+        窄缝、整块甩到屏幕右外侧。那种情况下它和主面板并不相交，查重叠的那几条
+        测试一条都不会红（变异实测：丙-3 全绿），只有查屏幕边界才抓得住。
+        """
+        from PyQt6.QtWidgets import QApplication
+        screen = self.panel.screen_geometry(self.panel) or \
+            QApplication.primaryScreen().availableGeometry()
+        w, h = self.panel.width(), self.panel.height()
+        spots = {
+            "正中": (screen.center().x() - w // 2, screen.center().y() - h // 2),
+            "右上": (screen.right() - w - 4, screen.top() + 4),
+            "右下": (screen.right() - w - 4, screen.bottom() - h - 4),
+            "左上": (screen.left() + 4, screen.top() + 4),
+            "左下": (screen.left() + 4, screen.bottom() - h - 4),
+            "贴右边": (screen.right() - w, screen.center().y() - h // 2),
+        }
+        for name, (x, y) in spots.items():
+            with self.subTest(主面板位置=name):
+                self.panel.move(x, y)
+                self.app.processEvents()
+                geo = self._open().geometry()
+                self.assertGreaterEqual(geo.left(), screen.left(),
+                                        f"主面板在{name}时设置页左边越出屏幕 {geo}")
+                self.assertGreaterEqual(geo.top(), screen.top(),
+                                        f"主面板在{name}时设置页上边越出屏幕 {geo}")
+                self.assertLessEqual(geo.right(), screen.right(),
+                                     f"主面板在{name}时设置页右边越出屏幕 {geo}")
+                self.assertLessEqual(geo.bottom(), screen.bottom(),
+                                     f"主面板在{name}时设置页下边越出屏幕 {geo}")
+
+    def test_landscape_orientation_also_dodges(self):
+        """横版是最坏的场景：让位必须允许把设置页压矮，光挑方向不够。
+
+        实测横版主面板宽 885，比 800 宽的屏还宽（它本身就左右溢出），所以左右两侧
+        一寸空地都没有。主面板又常被拖到屏幕中间高度，上下各剩三百来 px，也塞不下
+        686 高的设置页——四个方向全军覆没，只挑方向的话必然退回 clamp，也就是压在
+        主面板身上（这一版最早就是这么失败的，重叠 300x54）。
+
+        所以判据是「不重叠 + 不出屏 + 高度还够用」，而不是「高度保持不变」。设置页
+        内部是 QScrollArea，矮一点只是多滚两下。
+        """
+        from PyQt6.QtWidgets import QApplication
+        screen = self.panel.screen_geometry(self.panel) or \
+            QApplication.primaryScreen().availableGeometry()
+        self.panel.set_orientation("landscape")
+        self.app.processEvents()
+        try:
+            # 挪到屏幕中间高度，逼出「上下都不宽裕」的那一档
+            self.panel.move(screen.center().x() - self.panel.width() // 2,
+                            screen.center().y() - self.panel.height() // 2)
+            self.app.processEvents()
+            sp = self._open()
+            ov = self._overlap()
+            geo = sp.geometry()
+            self.assertTrue(ov.isEmpty(),
+                            f"横版下重叠 {ov.width()}x{ov.height()}，"
+                            f"设置页 {geo} 主面板 {self.panel.frameGeometry()}")
+            self.assertGreaterEqual(geo.top(), screen.top(), f"越出屏幕上边 {geo}")
+            self.assertLessEqual(geo.bottom(), screen.bottom(), f"越出屏幕下边 {geo}")
+            self.assertGreaterEqual(geo.height(), self.panel.DODGE_MIN_HEIGHT,
+                                    f"为了让位把设置页压到 {geo.height()}px，没法用了")
+        finally:
+            self.panel.set_orientation("portrait")
+            self.app.processEvents()
+
+    def test_shrinking_to_fit_keeps_the_content_reachable(self):
+        """压矮之后内容不能就此丢掉——得靠滚动条还能滚到底部那几颗键。"""
+        from PyQt6.QtWidgets import QApplication
+        from PyQt6.QtCore import Qt
+        screen = self.panel.screen_geometry(self.panel) or \
+            QApplication.primaryScreen().availableGeometry()
+        self.panel.set_orientation("landscape")
+        self.app.processEvents()
+        try:
+            self.panel.move(screen.center().x() - self.panel.width() // 2,
+                            screen.center().y() - self.panel.height() // 2)
+            self.app.processEvents()
+            sp = self._open()
+            scroll = self.panel.settings_scroll
+            bar = scroll.verticalScrollBar()
+            content = scroll.widget().sizeHint().height()
+            if content > scroll.viewport().height():
+                # 光看 bar.maximum() 抓不住毛病：把竖向滚动条设成 ScrollBarAlwaysOff，
+                # Qt 照样维护 maximum、setValue 照样能滚——代码滚得动，手滚不动。
+                # 变异实测（丙-8）这条全绿。所以判据得是「这根条子用户看得见」。
+                self.assertGreater(bar.maximum(), 0,
+                                   "窗口被压矮、内容装不下，滚动条却滚不动，"
+                                   "底部的设置项就永远点不到")
+                self.assertNotEqual(
+                    scroll.verticalScrollBarPolicy(),
+                    Qt.ScrollBarPolicy.ScrollBarAlwaysOff,
+                    "内容装不下却把竖向滚动条关了，用户没有任何办法滚到底部")
+                self.assertTrue(bar.isVisible(),
+                                "内容装不下，竖向滚动条却不出现，用户滚不动")
+            # 无论压没压矮，底部那颗键都得能滚进视野
+            bar.setValue(bar.maximum())
+            self.app.processEvents()
+            btn = self.panel.btn_check_update
+            top_in_view = btn.mapTo(scroll.viewport(), btn.rect().topLeft()).y()
+            self.assertLess(top_in_view, scroll.viewport().height(),
+                            f"滚到底了「立即检查」还在视野外（y={top_in_view}，"
+                            f"视野高 {scroll.viewport().height()}），设置页 {sp.geometry()}")
+        finally:
+            self.panel.set_orientation("portrait")
+            self.app.processEvents()
+
+    def test_it_never_shrinks_below_the_usable_floor(self):
+        """空地只剩一条缝时宁可退回原高度，也不能摆出一个几十 px 高的窗口。
+
+        这一条必须自己伪造一块小屏幕。离屏跑的是 800x800，而竖版主面板 394 高、
+        横版 54 高——上下两侧总是有一侧剩 240px 以上，下限根本触发不到（变异实测：
+        把 DODGE_MIN_HEIGHT 改成 1，在真实屏幕尺寸下一条测试都不红）。下限真正管
+        的是矮屏：把屏幕缩到 400x400、主面板 394 高，上下就都只剩十几 px 了。
+        """
+        from PyQt6.QtCore import QRect
+        # 这个 200 是写死的，不能读 self.panel.DODGE_MIN_HEIGHT：那样把常量改小，
+        # 判据会跟着一起松掉，变异照样全绿（丙-4 第一版就是这么漏的）。这里问的是
+        # 「摆出来的窗口还能用吗」，那是产品判据，不该由被测代码自己定义。
+        usable = 200
+        fake = QRect(0, 0, 400, 400)
+        real_geo = self.panel.screen_geometry
+        real_rect = self.panel.geometry()
+        # 主面板 150x394 摆在 y=20：上方空地 13px（正数但远不够用），下方是负数，
+        # 左右两侧都不到 300 宽——四块空地全废，只能退回原高度。
+        self.panel.setGeometry(100, 20, 150, 394)
+        self.panel.screen_geometry = lambda *_a, **_k: fake
+        try:
+            self.app.processEvents()
+            x, y, height = self.panel._dodge_main_panel(300, 600, gap=8)
+            self.assertGreaterEqual(
+                height, usable,
+                f"让位让出了一条 {height}px 高的缝，那还不如不让。"
+                f"落点 ({x},{y}) 主面板 {self.panel.frameGeometry()} 屏幕 {fake}")
+            # 这块屏幕上四个方向都不够，唯一正确的答案是原样退回
+            self.assertEqual(height, 600,
+                             f"四块空地都不够用，却还是压矮到 {height}px 摆了出去")
+        finally:
+            self.panel.screen_geometry = real_geo
+            self.panel.setGeometry(real_rect)
+            self.app.processEvents()
+
+    def test_anchor_follows_the_ui_mode(self):
+        """图标模式下锚点要换成图标树里那颗设置键，否则退化成对齐整个主面板。"""
+        self.panel.set_ui_mode("classic", persist=False)
+        self.assertIs(self.panel.anchor_for("btn_settings"), self.panel.btn_settings)
+        self.panel.set_ui_mode("icon", persist=False)
+        icon_btn = self.panel.icon_buttons.get("settings")
+        self.assertIsNotNone(icon_btn, "图标树里没有设置键，锚点表对不上")
+        self.assertIs(self.panel.anchor_for("btn_settings"), icon_btn)
+
+    def test_icon_mode_dodges_too(self):
+        self.panel.set_ui_mode("icon", persist=False)
+        self.app.processEvents()
+        self._open()
+        ov = self._overlap()
+        self.assertTrue(ov.isEmpty(), f"图标模式下重叠 {ov.width()}x{ov.height()}")
+
+    def test_submenu_anchoring_still_works(self):
+        """抽出 anchor_for 之后，子菜单的锚点解析不能跟着坏掉。"""
+        target = self.panel.draw_sub
+        self.assertIs(self.panel.sub_anchor_button(target), self.panel.btn_pen)
+        self.panel.set_ui_mode("icon", persist=False)
+        self.assertIs(self.panel.sub_anchor_button(target),
+                      self.panel.icon_buttons.get("pen"))
+
+    def test_reopening_keeps_it_clear(self):
+        """关掉再开、以及主面板挪过位置之后再开，都要重新避让。"""
+        self._open()
+        self.panel.settings_panel.hide()
+        self.app.processEvents()
+        moved = self.panel.settings_panel.pos()
+        self.panel.move(self.panel.x() + 120, self.panel.y() + 60)
+        self.app.processEvents()
+        self._open()
+        self.assertTrue(self._overlap().isEmpty(), "主面板挪过之后再开又压上了")
+        self.assertNotEqual(self.panel.settings_panel.pos(), moved,
+                            "主面板都挪了 120px，设置页却停在老位置，说明落点没重算")
+
+    def test_switching_ui_mode_re_dodges(self):
+        """在设置页里换 UI 模式，主面板尺寸跟着变，设置页必须重新让位。
+
+        实屏抓到的原样：图标模式下主面板 122x230，设置页避到 x=799 刚好让开；在设置
+        页里点「文字」，主面板变成 150x442（右缘 799→820），设置页却还停在 799，压出
+        一条 21x442 的重叠。落点原先只在 open 那一刻算一次，之后主面板还会变。
+
+        这一条是「设置页开着的时候」才成立，所以离屏也测得到——不需要真屏幕，只要
+        主面板尺寸真的变了。而这两颗开关本身就长在设置页里，用户从这儿改是常态。
+        """
+        for first, second in (("icon", "classic"), ("classic", "icon")):
+            with self.subTest(从=first, 到=second):
+                self.panel.set_ui_mode(first, persist=False)
+                self.app.processEvents()
+                self._open()
+                self.assertTrue(self._overlap().isEmpty(), f"{first} 模式下开就压上了")
+                before = self.panel.frameGeometry().size()
+                self.panel.set_ui_mode(second, persist=False)
+                self.app.processEvents()
+                self.assertNotEqual(before, self.panel.frameGeometry().size(),
+                                    "主面板尺寸没变，这条测的前提不成立")
+                ov = self._overlap()
+                self.assertTrue(ov.isEmpty(),
+                                f"{first}→{second} 之后重叠 {ov.width()}x{ov.height()}；"
+                                f"设置页 {self.panel.settings_panel.geometry()}，"
+                                f"主面板 {self.panel.frameGeometry()}")
+
+    def test_switching_orientation_re_dodges(self):
+        """换方向的尺寸变化比换 UI 模式更大（竖版 150 宽 ↔ 横版几百宽）。
+
+        主面板必须先挪离 y=0：贴顶时竖版让位把设置页开在 y≈190，而横版主面板只有
+        54px 高、占 y=0..53，两者本来就错开，压不上——这条测试的第一版就停在 @0,0，
+        变异（删掉换方向后的重新让位）照样全绿。挪到竖直居中之后，横版那道横条正好
+        扫过设置页所在的高度，不重新让位就是 300x54 的重叠（实测）。
+        """
+        screen = self.panel.screen_geometry(self.panel)
+        self.panel.set_orientation("portrait")
+        self.app.processEvents()
+        self.panel.move(screen.left(), screen.center().y() - 200)
+        self.app.processEvents()
+        self._open()
+        self.assertTrue(self._overlap().isEmpty(), "竖版下开就压上了")
+        self.panel.set_orientation("landscape")
+        self.app.processEvents()
+        ov = self._overlap()
+        self.assertTrue(ov.isEmpty(),
+                        f"转横版之后重叠 {ov.width()}x{ov.height()}；"
+                        f"设置页 {self.panel.settings_panel.geometry()}，"
+                        f"主面板 {self.panel.frameGeometry()}")
+        self.panel.set_orientation("portrait")
+        self.app.processEvents()
+        self.assertTrue(self._overlap().isEmpty(), "转回竖版之后又压上了")
+
+    def test_dragging_the_main_panel_takes_the_settings_page_along(self):
+        """拖动主面板时设置页要跟着让位，跟子菜单同一个规矩（用户原话）。
+
+        走 mouseMoveEvent 真事件，不直接调 reposition_settings_panel——后者是实现
+        细节，测它等于测「我调了我自己」。这里问的是「拖的时候会不会跟」。
+        """
+        from PyQt6.QtCore import QPoint, QPointF, Qt
+        from PyQt6.QtGui import QMouseEvent
+        self.panel.set_orientation("portrait")
+        self.app.processEvents()
+        self._open()
+        start = self.panel.pos()
+        self.panel._drag_offset = QPoint(10, 10)
+        before = self.panel.settings_panel.pos()
+        target = QPointF(start.x() + 260 + 10, start.y() + 40 + 10)
+        ev = QMouseEvent(QMouseEvent.Type.MouseMove, QPointF(10, 10), target,
+                         Qt.MouseButton.NoButton, Qt.MouseButton.LeftButton,
+                         Qt.KeyboardModifier.NoModifier)
+        self.panel.mouseMoveEvent(ev)
+        self.app.processEvents()
+        self.panel._drag_offset = None
+        self.assertNotEqual(self.panel.pos(), start, "主面板没被拖动，前提不成立")
+        ov = self._overlap()
+        self.assertTrue(ov.isEmpty(),
+                        f"拖完之后重叠 {ov.width()}x{ov.height()}；设置页停在老位置了")
+        self.assertNotEqual(self.panel.settings_panel.pos(), before,
+                            "主面板拖走了，设置页一动不动——它没跟着让位")
+
+    def test_re_dodging_can_grow_back(self):
+        """让位压矮过之后，挪到宽裕的地方要能长回去，不能越摆越矮。
+
+        这一条防的是「拿 panel.height() 再算一遍想要多高」：那时窗口已经被上一次
+        让位压矮了，再算只会更矮，反复摆位就单调递减收不回来。所以想要的高度必须
+        在打开时记下来，之后每次让位都拿那个原始值去要。
+        """
+        from PyQt6.QtCore import QRect
+        from unittest import mock
+        self.panel.set_orientation("landscape")
+        self.app.processEvents()
+        # 先制造一次「被压矮」：横版主面板停在屏幕中间高度，上下都塞不下整页
+        screen = self.panel.screen_geometry(self.panel)
+        self.panel.move(screen.left(), screen.center().y() - self.panel.height() // 2)
+        self.app.processEvents()
+        self._open()
+        squeezed = self.panel.settings_panel.height()
+        # 再挪到贴顶：下方一整片空地，页面应该长回去
+        self.panel.move(screen.left(), screen.top())
+        self.app.processEvents()
+        self.panel.reposition_settings_panel()
+        self.app.processEvents()
+        grown = self.panel.settings_panel.height()
+        self.assertGreater(grown, squeezed,
+                           f"压矮到 {squeezed}px 之后挪到宽裕处仍是 {grown}px，长不回来")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
