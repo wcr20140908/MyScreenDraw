@@ -7468,6 +7468,16 @@ class ControlPanel(QWidget):
             QSlider::groove:horizontal {{ height: 6px; background: {t["button_hover"]}; border-radius: {rad["groove"]}px; }}
             QSlider::handle:horizontal {{ background: {t["accent"]}; width: {TOUCH_SLIDER_HANDLE}px; height: {TOUCH_SLIDER_HANDLE}px; margin: -{TOUCH_SLIDER_HANDLE // 2 - 3}px 0; border-radius: {rad["handle"]}px; }}
             QScrollArea {{ background: transparent; border: none; }}
+            /* 设置页滚动区的内容 widget 必须透明，否则它会拿调色板默认灰铺满、盖掉
+               MainFrame 的主题底色（见 build_settings_panel 那段注释）。
+               这里按 objectName 点名，是因为「让滚动区里一切都透明」的几种顺手写法
+               实测会把按钮底色一起打穿：`QScrollArea *`、`QScrollArea QWidget`、
+               全局 `QWidget` 三种都让非高亮按钮变成了 frame 色（而高亮那颗因为带
+               `#ActiveTool` 的 objectName 特异性更高，反倒顶住了）——结果是看起来
+               「所有按钮都高亮」。`QScrollArea > QWidget > QWidget` 在 Qt6 下实测
+               不打穿（精确类匹配优先于基类匹配），但它依赖这条优先级规则，而按
+               objectName 点名只命中一个 widget，不依赖任何优先级。 */
+            QWidget#SettingsContent {{ background: transparent; }}
             QScrollBar:vertical {{ background: transparent; width: 10px; margin: 0px; }}
             QScrollBar::handle:vertical {{ background: {t["button_hover"]}; border-radius: 5px; min-height: 30px; }}
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0px; }}
@@ -7731,6 +7741,16 @@ class ControlPanel(QWidget):
         if getattr(self, "menu_panel", None) is not None and self.menu_panel.isVisible():
             self.position_menu_panel()
         self.heartbeat_refresh()
+        # 设置页上那两颗「文字 / 图标」按钮要跟着换高亮。这一句原来漏了，实屏表现是：
+        # 界面确实换了，但高亮永远钉在左边那颗上——用户点「图标」，主面板变成了图标，
+        # 设置页却还显示「文字」是选中态，于是看起来像「不管选哪个都高亮左边」。
+        # 放在 set_ui_mode 里而不是包一层 _set_ui_mode_from_settings：load_settings
+        # 启动时也走这里（见 apply_settings），包在按钮的 connect 上就覆盖不到那条路径。
+        # sync_settings_panel 自己会在设置页还没建好时直接返回，构造期调用是安全的。
+        self.sync_settings_panel()
+        # 主面板换了一套控件、宽高都变了，开着的设置页要重新让位，否则原来刚好让开的
+        # 落点会被变宽后的主面板压上一条（实屏量到 21x442）
+        self.reposition_settings_panel()
         if persist:
             self.save_settings()
         track_event("ui_mode_changed", mode=mode)
@@ -8577,6 +8597,63 @@ class ControlPanel(QWidget):
                                      anchor=getattr(self, "_menu_anchor", None))
         self.menu_panel.move(x, y)
 
+    DODGE_MIN_HEIGHT = 240      # 让位可以压矮窗口，但矮到这个数以下就没法用了
+
+    def _dodge_main_panel(self, panel_width, panel_height, gap=8, anchor=None):
+        """给一个大浮窗找「不压住主面板」的落点，返回 (x, y, height)。
+
+        返回的 height 可能比要求的矮：让位比撑足高度重要，而设置页内部是 QScrollArea，
+        矮一点只是多滚两下；压住主面板则是让那一片的按钮点不动——被压住的那半边点
+        下去是主面板在收事件。
+
+        为什么不能只用 _floating_anchor：它按当前方向只试一个轴（竖版试左右、横版试
+        上下），试不下就 clamp 回屏幕内，而 clamp 的结果正是压在主面板身上。子菜单没
+        这个问题是因为它比主面板矮；设置页高得多（封顶到屏幕可用高度的 88%）。实测
+        横版主面板宽 885（比 800 宽的屏还宽，本身就溢出），左右根本没地方，而它被拖到
+        屏幕中间高度时上下也塞不进 686 高的设置页——四个方向全军覆没。所以必须允许压矮。
+
+        做法：把主面板四周的空地各算成一个矩形，按当前方向排优先级，取第一个「宽度够、
+        高度不低于 DODGE_MIN_HEIGHT」的，高度取「要多少」和「有多少」里的小者。空地
+        矩形本身就排除了主面板，所以不相交是构造出来的，不靠事后判断。
+
+        四块空地都不够时退回 _floating_anchor 的结果并保持原高度——宁可压住主面板，
+        也不能把窗口摆到屏幕外（那是彻底点不到，比压住更糟）。
+        """
+        screen = self.screen_geometry(self) or QApplication.primaryScreen().availableGeometry()
+        frame = self.frameGeometry()
+
+        def fit(value, low, high):
+            return max(low, min(high, value)) if high >= low else low
+
+        # 主面板四周的空地。用 (left, top, right, bottom) 闭区间表示，right/bottom 含端点。
+        boxes = {
+            "right": (frame.right() + gap, screen.top(), screen.right(), screen.bottom()),
+            "left": (screen.left(), screen.top(), frame.left() - gap, screen.bottom()),
+            "below": (screen.left(), frame.bottom() + gap, screen.right(), screen.bottom()),
+            "above": (screen.left(), screen.top(), screen.right(), frame.top() - gap),
+        }
+        order = ("below", "above", "right", "left") if self.orientation == "landscape" \
+            else ("right", "left", "below", "above")
+        # 交叉轴跟着锚点走，摆出来才像「从那颗键旁边开出来的」，而不是随便找个角落
+        spot = None
+        if anchor is not None and anchor.isVisible():
+            origin = anchor.mapToGlobal(QPoint(0, 0))
+            spot = (origin.x(), origin.y())
+        for name in order:
+            left, top, right, bottom = boxes[name]
+            room_w = right - left + 1
+            room_h = bottom - top + 1
+            if room_w < panel_width or room_h < self.DODGE_MIN_HEIGHT:
+                continue
+            height = min(panel_height, room_h)
+            want_x = spot[0] if spot else frame.left()
+            want_y = (spot[1] - 6) if spot else frame.top()
+            x = fit(want_x, left, right - panel_width + 1)
+            y = fit(want_y, top, bottom - height + 1)
+            return int(x), int(y), int(height)
+        x, y = self._floating_anchor(panel_width, panel_height, gap=gap, anchor=anchor)
+        return x, y, int(panel_height)
+
     def set_tool(self, state, button):
         if not self.canvas.is_drawing_mode:
             self.set_drawing_mode(True)              # 穿透状态下点工具自动回到绘图模式
@@ -9227,17 +9304,28 @@ class ControlPanel(QWidget):
     ICON_ANCHOR_KEYS = {
         "btn_pen": "pen", "btn_eraser": "eraser", "btn_select": "select",
         "btn_text": "text", "btn_shape": "shape", "btn_tools": "tools", "btn_file": "file",
+        # 设置页也要贴着触发它的那颗键开，图标模式下那颗键是图标树里的 settings。
+        "btn_settings": "settings",
     }
+
+    def anchor_for(self, button_name):
+        """把「经典树上的按钮名」解析成当前 UI 模式下那颗真正可见的按钮。
+
+        图标模式下经典树整个是隐藏的，直接返回 btn_xxx 会拿到一个 isVisible() 为假的
+        控件，而 _floating_anchor 遇到不可见的锚点会退化成对齐整个主面板——表现就是
+        浮窗不再贴着触发它的那颗键开。设置页和子菜单都要这个解析，所以抽出来共用。
+        """
+        if self.ui_mode == "icon":
+            key = self.ICON_ANCHOR_KEYS.get(button_name)
+            icon_btn = getattr(self, "icon_buttons", {}).get(key) if key else None
+            if icon_btn is not None:
+                return icon_btn
+        return getattr(self, button_name, None)
 
     def sub_anchor_button(self, target):
         for name, button_name in self.SUB_ANCHORS.items():
             if getattr(self, name, None) is target:
-                if self.ui_mode == "icon":
-                    key = self.ICON_ANCHOR_KEYS.get(button_name)
-                    icon_btn = getattr(self, "icon_buttons", {}).get(key) if key else None
-                    if icon_btn is not None:
-                        return icon_btn
-                return getattr(self, button_name, None)
+                return self.anchor_for(button_name)
         return None
 
     def set_orientation(self, orientation):
@@ -9291,6 +9379,8 @@ class ControlPanel(QWidget):
         # 图标面板不固定宽度：它的宽度由 3 列图标决定（约 110px），套用 150 会白留一截
         self.title_label.setText(f" ⠿ {tr('app')} {APP_VERSION}")
         self._resize_to_content()                        # 内部会 clamp_into_screen 收回屏幕
+        # 竖版 150 宽 ↔ 横版几百宽，尺寸变化比换 UI 模式还大，开着的设置页必须重新让位
+        self.reposition_settings_panel()
         track_event("orientation_set", orientation=orientation)
         self.heartbeat_refresh()
 
@@ -9451,18 +9541,59 @@ class ControlPanel(QWidget):
         # 424px、可用高度 783px、封顶 689px，而滚动条却还有 343px 可滚——屏幕明明
         # 有地方，用户却得滚动才能点到「立即检查」。这里把内容的真实高度加回来，
         # 仍然受 cap 约束，装不下才出现滚动条。
+        want = panel.height()
         scroll = getattr(self, "settings_scroll", None)
         if scroll is not None and scroll.widget() is not None:
             content = scroll.widget().sizeHint().height() + 2 * scroll.frameWidth()
             chrome = max(0, panel.height() - scroll.height())   # 标题栏、边距等
-            panel.resize(panel.width(), min(cap, content + chrome))
-        panel.move(screen.center().x() - panel.width() // 2,
-                   max(screen.top() + 8, screen.center().y() - panel.height() // 2))
+            want = min(cap, content + chrome)
+        # 记下「不受限时想要多高」。重新摆位时不能拿 panel.height() 再算一遍：那时
+        # 窗口可能已经被上一次让位压矮了，再算就只会更矮，越摆越小收不回来。
+        self._settings_want_height = int(want)
+        self.place_settings_panel()
         panel.show()
         self.apply_window_opacity()      # 新建的窗口要立刻套上当前透明度
         self.raise_floating(panel)
         self.heartbeat_refresh()
         track_event("settings_opened")
+
+    def place_settings_panel(self):
+        """把设置页摆到「不压住主面板」的落点上，可以反复调。
+
+        避着主面板弹，跟子菜单一个规矩：贴着「设置」那颗键、开在主面板旁边。
+        原先是屏幕居中，而主面板常停在屏幕中间偏左，于是设置页有一大块压在主面板
+        身上——被压住的那半边点下去是主面板在收事件，用户看到的就是「点不动」。
+        不改窗口层级来解决：设置页和主面板都是置顶的 Tool 窗口，靠 owner 关系去争
+        高低实测会被心跳里的重绑带着一起隐藏（比原来的毛病更严重）。摆开就不必争。
+        让位可能要压矮窗口（比如横版主面板停在屏幕中间高度时上下都塞不满），所以
+        高度由 _dodge_main_panel 定，这里用它给的值——矮一点只是多滚两下。
+        """
+        panel = getattr(self, "settings_panel", None)
+        if panel is None:
+            return
+        want = int(getattr(self, "_settings_want_height", 0) or panel.height())
+        screen = self.screen_geometry(self) or QApplication.primaryScreen().availableGeometry()
+        want = min(want, int(screen.height() * 0.88))
+        x, y, height = self._dodge_main_panel(panel.width(), want, gap=8,
+                                             anchor=self.anchor_for("btn_settings"))
+        panel.resize(panel.width(), height)
+        panel.move(x, y)
+
+    def reposition_settings_panel(self):
+        """主面板的位置或尺寸变了之后，把开着的设置页重新摆一次。
+
+        为什么需要它：落点原本只在打开那一刻算一次，可之后主面板还会变。实屏抓到的
+        原样是——图标模式下主面板宽 122，设置页避到 x=799 刚好让开；在设置页里点
+        「文字」切回文字模式，主面板变成 150 宽（右缘到 820），设置页却还在 799，
+        于是压出一条 21x442 的重叠，页面左边那一竖条按下去是主面板在收事件。
+        而「UI 模式」「方向」这两组开关本身就长在设置页里，用户从这里改是常态而不是
+        边角情况。拖动主面板同理，子菜单早就在 mouseMoveEvent 里跟着走了，设置页
+        照同一个规矩来。
+        """
+        panel = getattr(self, "settings_panel", None)
+        if panel is None or not panel.isVisible():
+            return
+        self.place_settings_panel()
 
     def build_settings_panel(self):
         """构造设置面板。
@@ -9477,10 +9608,12 @@ class ControlPanel(QWidget):
         self.settings_panel, layout = self._make_tool_window(tr("settings"))
 
         scroll = QScrollArea()
+        scroll.setObjectName("SettingsScroll")
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         inner = QWidget()
+        inner.setObjectName("SettingsContent")   # 配合 apply_theme 里那条「透明」规则
         form = QVBoxLayout(inner)
         form.setContentsMargins(2, 2, 2, 2)
         form.setSpacing(3)
@@ -9581,6 +9714,13 @@ class ControlPanel(QWidget):
         form.addWidget(about)
 
         scroll.setWidget(inner)
+        # QScrollArea.setWidget() 会把内容 widget 的 autoFillBackground 打开，于是它拿
+        # 默认调色板的浅灰（实测 #efefef）把整个滚动区铺满，盖掉 MainFrame 的主题底色。
+        # 暗色主题下这块浅灰刺眼得很（frame 本该是 #2d3436）；亮色主题下 #efefef 和
+        # #f7f9fb 只差一点，所以一直没人发现。关掉它，让主题底色透上来。
+        # 两层都要关：viewport 目前默认是关的，但那是 Qt 的默认值而不是承诺。
+        inner.setAutoFillBackground(False)
+        scroll.viewport().setAutoFillBackground(False)
         layout.addWidget(scroll)
         # 留着引用：open_settings_panel 要按内容真实高度决定窗口高度。
         self.settings_scroll = scroll
@@ -9941,6 +10081,7 @@ class ControlPanel(QWidget):
             self.move(x, y)
             if self.menu_panel.isVisible():
                 self.position_menu_panel()   # 子菜单跟随面板
+            self.reposition_settings_panel()  # 设置页照子菜单同一个规矩跟着走
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
