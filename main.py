@@ -283,7 +283,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QLabel, QPushButton,
                              QVBoxLayout, QHBoxLayout, QWidget, QFrame, QGridLayout, QColorDialog, QSlider,
                              QInputDialog, QMessageBox, QMenu, QFileDialog, QLineEdit, QTextEdit, QListWidget,
                              QAbstractItemView, QSizePolicy, QListWidgetItem, QDialog, QDoubleSpinBox,
-                             QScroller, QToolTip, QScrollArea)
+                             QScroller, QToolTip, QScrollArea, QToolButton, QSystemTrayIcon)
 from PyQt6.QtCore import (Qt, QPoint, QPointF, QRectF, QTimer, QTranslator, QLibraryInfo, QLine, pyqtSignal, QLocale, QEvent,
                           QSizeF, QMarginsF, QEventLoop, QSize, QUrl, QBuffer, QIODevice, QThread)
 from PyQt6.QtGui import (QPainter, QPen, QColor, QFont, QPainterPath, QFontMetricsF, QTransform, QPolygonF,
@@ -7783,6 +7783,29 @@ class ControlPanel(QWidget):
         ("board_style", "board",    "board",     "toggle_board_style",    "btn_board_style"),
     )
 
+    @staticmethod
+    def _make_logo_icon(size=56):
+        pix = QPixmap(size, size); pix.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pix); p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(QPen(QColor("#006d75"), 3)); p.setBrush(QColor("#eef7f8"))
+        p.drawRoundedRect(QRectF(2, 2, size - 4, size - 4), size * .22, size * .22)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(QRectF(size*.22, size*.25, size*.56, size*.40), size*.08, size*.08)
+        p.drawLine(QPointF(size*.40, size*.76), QPointF(size*.60, size*.76))
+        p.drawLine(QPointF(size*.50, size*.65), QPointF(size*.50, size*.76))
+        p.setPen(QPen(QColor("#e17055"), size*.07, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        path = QPainterPath(QPointF(size*.30, size*.53)); path.cubicTo(size*.40, size*.28, size*.47, size*.66, size*.68, size*.37); p.drawPath(path)
+        p.end(); return QIcon(pix)
+
+    def toggle_collapsed(self):
+        self.collapsed = not getattr(self, "collapsed", False)
+        if self.collapsed:
+            self.show_only_sub(None)
+            self.close_thumbnail_panel()
+        self.icon_grid.setVisible(not self.collapsed)
+        self.icon_wb_box.setVisible(not self.collapsed and bool(self.canvas and self.canvas.whiteboard_mode))
+        self._resize_to_content()
+
     def build_icon_frame(self):
         """构造图标主面板：与文字主面板并存的第二套 widget 树。
 
@@ -7799,18 +7822,16 @@ class ControlPanel(QWidget):
         self.icon_layout.setSpacing(2)
         self.icon_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
-        # 标题行：只放一个旋转键。图标 UI 的卖点是省空间，标题文字会把宽度拉回去。
+        # 图标式面板保留一个原创、简洁的 LOGO 作为折叠入口。
         icon_title = QHBoxLayout(); icon_title.setSpacing(2)
-        self.icon_btn_rotate = QPushButton()
-        self.icon_btn_rotate.setObjectName("RotateBtn")
-        self.icon_btn_rotate.setFlat(True)
-        self.icon_btn_rotate.setIconSize(QSize(20, 20))
-        self.icon_btn_rotate.setIcon(make_rotate_icon(self.theme["label"], 22))
-        self.icon_btn_rotate.setAccessibleName(tr("rotate"))
-        self.icon_btn_rotate.clicked.connect(self.toggle_orientation)
-        icon_title.addStretch(1)
-        icon_title.addWidget(self.icon_btn_rotate)
-        icon_title.addStretch(1)
+        self.logo_button = QPushButton()
+        self.logo_button.setObjectName("LogoButton")
+        self.logo_button.setFixedSize(64, 64)
+        self.logo_button.setIcon(self._make_logo_icon(56))
+        self.logo_button.setIconSize(QSize(56, 56))
+        self.logo_button.setToolTip(tr("logo_hint"))
+        self.logo_button.clicked.connect(self.toggle_collapsed)
+        icon_title.addWidget(self.logo_button)
         self.icon_layout.addLayout(icon_title)
 
         self.icon_grid = QGridLayout()
@@ -7819,7 +7840,7 @@ class ControlPanel(QWidget):
         for key, icon_name, tip_key, handler_name, mirror_name in self.ICON_ACTIONS:
             btn = QPushButton()
             btn.setObjectName("IconBtn")
-            btn.setIconSize(QSize(ICON_GLYPH, ICON_GLYPH))
+            btn.setIconSize(QSize(30, 30))
             btn.setIcon(make_ui_icon(icon_name, self.theme["text"], ICON_GLYPH))
             # 纯图标界面必须有提示，否则用户认不出哪颗是哪颗。ToolTip 的遮挡问题
             # 由 _raise_tooltip() 处理（它会把气泡抬到全屏画布之上）。
@@ -7843,7 +7864,7 @@ class ControlPanel(QWidget):
         for key, icon_name, tip_key, handler_name, mirror_name in self.ICON_WB_ACTIONS:
             btn = QPushButton()
             btn.setObjectName("IconBtn")
-            btn.setIconSize(QSize(ICON_GLYPH, ICON_GLYPH))
+            btn.setIconSize(QSize(30, 30))
             btn.setIcon(make_ui_icon(icon_name, self.theme["text"], ICON_GLYPH))
             btn.setToolTip(tr(tip_key))
             btn.setAccessibleName(tr(tip_key))
@@ -7904,11 +7925,10 @@ class ControlPanel(QWidget):
             for i, key in enumerate(wb_keys):
                 self.icon_wb_grid.addWidget(self.icon_buttons[key], 0, i)
         else:
-            cols = 3
             for i, key in enumerate(main_keys):
-                self.icon_grid.addWidget(self.icon_buttons[key], i // cols, i % cols)
+                self.icon_grid.addWidget(self.icon_buttons[key], i, 0)
             for i, key in enumerate(wb_keys):
-                self.icon_wb_grid.addWidget(self.icon_buttons[key], i // cols, i % cols)
+                self.icon_wb_grid.addWidget(self.icon_buttons[key], i, 0)
         for key in main_keys + wb_keys:
             self.icon_buttons[key].setVisible(True)
 
@@ -7921,8 +7941,6 @@ class ControlPanel(QWidget):
             name = btn.property("icon_name")
             if name:
                 btn.setIcon(make_ui_icon(name, self.theme["text"], ICON_GLYPH))
-        if getattr(self, "icon_btn_rotate", None) is not None:
-            self.icon_btn_rotate.setIcon(make_rotate_icon(self.theme["label"], 22))
 
     def sync_icon_buttons(self):
         """把经典按钮的状态单向投影到图标按钮上。

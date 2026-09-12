@@ -53,9 +53,11 @@ _BASE = {
     "open": ("打开", "Open", "Ouvrir", "Abrir", "Öffnen", "Открыть", "열기", "開く"),
     "save": ("保存", "Save", "Enregistrer", "Guardar", "Speichern", "Сохранить", "저장", "保存"),
     "cancel": ("取消", "Cancel", "Annuler", "Cancelar", "Abbrechen", "Отмена", "취소", "キャンセル"),
+    "logo_hint": ("折叠/展开工具条", "Collapse/Expand toolbar", "Réduire/Développer la barre", "Contraer/Expandir barra", "Symbolleiste ein-/ausklappen", "Свернуть/развернуть панель", "도구 모음 접기/펼치기", "ツールバーを折りたたむ/展開"),
     "rotate": ("旋转", "Rotate", "Pivoter", "Girar", "Drehen", "Повернуть", "회전", "回転"),
     "portrait": ("竖版", "Portrait", "Portrait", "Retrato", "Hochformat", "Вертикаль", "세로", "縦型"),
     "landscape": ("横版", "Landscape", "Paysage", "Paisaje", "Querformat", "Горизонталь", "가로", "横型"),
+    "logo_hint": ("单击折叠/展开，按住拖动", "Click to collapse/expand, drag to move", "Cliquer pour réduire/développer, glisser pour déplacer", "Clic para contraer/expandir, arrastrar para mover", "Klicken zum Ein-/Ausklappen, Ziehen zum Verschieben", "Щелчок — свернуть/развернуть, перетаскивание — переместить", "클릭하여 접기/펼치기, 드래그하여 이동", "クリックで折りたたみ/展開、ドラッグで移動"),
 
     # ---------- 白板 ----------
     "whiteboard": ("进入白板", "Whiteboard", "Tableau blanc", "Pizarra", "Whiteboard", "Доска", "화이트보드", "ホワイトボード"),
