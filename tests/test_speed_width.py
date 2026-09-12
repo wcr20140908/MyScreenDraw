@@ -238,9 +238,9 @@ class ToggleTests(SpeedWidthTestCase):
         for x in range(106, 200, 6):
             c.add_smooth_segments(QPoint(x, 100))
         widths = self.widths()
-        # 关掉速度映射后，宽度只受起笔渐变影响，最终应稳定在 pen_width
-        self.assertEqual(widths[-1], c.pen_width,
-                         "关掉后必须回到 5.2.0 的恒定宽度")
+        # 关掉速度映射后，宽度必须恒定在 pen_width，没有起笔渐变
+        self.assertTrue(all(w == c.pen_width for w in widths),
+                        "关掉后整笔从头到尾都是 pen_width，没有起笔渐变")
 
     def test_the_toggle_is_persisted(self):
         """v5.2.0 漏过一次同类问题（多指开关没进配置，重启即复位），不能再犯。"""
