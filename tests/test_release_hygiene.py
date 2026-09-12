@@ -9,26 +9,44 @@ ROOT = Path(__file__).resolve().parents[1]
 class ReleaseMetadataTests(unittest.TestCase):
     def test_version_is_stable_release(self):
         from version import VERSION, APP_VERSION
-        self.assertEqual(VERSION, "5.5.1")
-        self.assertEqual(APP_VERSION, "v5.5.1")
+        self.assertEqual(VERSION, "6.0.0-beta.1")
+        self.assertEqual(APP_VERSION, "v6.0.0-beta.1")
 
     def test_version_info_resource_matches_version_py(self):
         """version_info.txt 里的四处版本必须和 version.py 一致。
 
-        这条是补上一个真实的漏洞：升版时要手改 version.py、version_info.txt 的
+        这条是补上一个真实的漏洞:升版时要手改 version.py、version_info.txt 的
         filevers/prodvers 两个元组和 FileVersion/ProductVersion 两个字符串、
         build.ps1 的门禁，一共五处。漏掉任何一处都不会有任何报错——程序照样跑、
         照样打包，只是资源管理器里显示旧版本号。所以让测试来核对，而不是靠记性。
+
+        Beta 版本:Windows 资源要求纯数字四元组，所以 filevers/prodvers 映射到
+        (6, 0, 0, 1)，ProductVersion 字符串保留完整的 "v6.0.0-beta.1"。
         """
-        from version import VERSION
+        from version import VERSION, APP_VERSION
         text = (ROOT / "version_info.txt").read_text(encoding="utf-8")
-        major, minor, patch = (int(p) for p in VERSION.split("."))
+
+        # Parse VERSION to get numeric components and prerelease suffix
+        if "-" in VERSION:
+            base_version, prerelease = VERSION.split("-", 1)
+            major, minor, patch = (int(p) for p in base_version.split("."))
+            # Map prerelease to build number: beta.1 -> 1, beta.2 -> 2, etc.
+            if prerelease.startswith("beta."):
+                build = int(prerelease.split(".")[1])
+            else:
+                build = 0
+        else:
+            major, minor, patch = (int(p) for p in VERSION.split("."))
+            build = 0
+
         for field in ("filevers", "prodvers"):
             with self.subTest(field=field):
-                self.assertIn(f"{field}=({major}, {minor}, {patch}, 0)", text)
-        for field in ("FileVersion", "ProductVersion"):
-            with self.subTest(field=field):
-                self.assertIn(f"StringStruct('{field}', '{VERSION}.0')", text)
+                self.assertIn(f"{field}=({major}, {minor}, {patch}, {build})", text)
+
+        # FileVersion uses numeric form
+        self.assertIn(f"StringStruct('FileVersion', '{major}.{minor}.{patch}.{build}')", text)
+        # ProductVersion preserves the full prerelease string
+        self.assertIn(f"StringStruct('ProductVersion', '{APP_VERSION}')", text)
 
     def test_build_gate_matches_version_py(self):
         """build.ps1 的版本门禁必须盯着当前版本，否则发布构建会直接被自己拦下来。"""
@@ -47,8 +65,8 @@ class ReleaseMetadataTests(unittest.TestCase):
         """
         from version import APP_VERSION
         patterns = {
-            "README.md": re.compile(r"当前版本 \*\*(v[\d.]+)\*\*"),
-            "README.en.md": re.compile(r"Current version \*\*(v[\d.]+)\*\*"),
+            "README.md": re.compile(r"当前版本 \*\*(v[\d.]+-?(?:beta\.)?[\d]*)\*\*"),
+            "README.en.md": re.compile(r"Current version \*\*(v[\d.]+-?(?:beta\.)?[\d]*)\*\*"),
         }
         for name, pattern in patterns.items():
             with self.subTest(name=name):
