@@ -2,6 +2,20 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # 版本号：见 version.py（唯一来源，代码里统一用 APP_VERSION）
 # 更新日志：
+# v5.5.1：画布与主面板压过一切浮窗，ClassIsland 永远在上，白板不再闪
+# 1. 白板闪的根源不是主面板掉下去（实屏逐毫秒采样，从没掉过），而是旧心跳每 500ms 无条件
+#    SetWindowPos 画布/主面板/每个浮窗；白板画布是整块不透明层，每次重排 DWM 都重新合成
+# 2. 心跳改成「先审计，有错才改」：topmost_band() 扫置顶带，plan_topmost_order() 以最低的
+#    ClassIsland 窗口为天花板，天花板到画布之间有外来窗、画布不在区里、链条乱序才重写；
+#    apply_topmost_order() 从天花板起逐个 SetWindowPos(hwnd, 上一个)，整条链贴着天花板排开
+# 3. 天花板之上的窗口不归我们管——盖住它就得爬到 ClassIsland 上面去。重写后仍在上面的
+#    （UIAccess 之类）记进 _unreachable_topmost 不再反复重写，掉下去了就忘掉
+# 4. 零面积 / 被 cloak 的窗口不算盖住了什么；否则系统里的隐形置顶窗会让心跳又变回常态重排
+# 5. 选中面板跟随、文字面板、工具提示各自的 force_topmost 一律改为 place_under_ceiling，
+#    不再越过天花板
+# 6. 实屏探针 tests/zorder_probe.py：无竞争者三阶段零次重写；假精灵球每 300ms 抢置顶
+#    ≤430ms 内压回；ClassIsland 在跑且假浮窗硬插到它与我们之间时，ClassIsland 低于我们 0 次
+#
 # v5.4.0：插入点、闪烁光标、打字不再卡、退出顺带收键盘
 # 1. 「越打越卡」不是感觉：实测每键 12.2ms（60 字）→ 19.4ms（180 字）→ 21.6ms（白板
 #    180 字）。每敲一个字符都做了四件全量的事——整屏重绘、整页深拷贝、重排整条浮窗链、
@@ -237,6 +251,7 @@ import sys
 import os
 import errno
 import ctypes
+import ctypes.wintypes
 import uuid
 import json
 import math
@@ -839,6 +854,235 @@ def force_above(above_id, below_id):
             ctypes.c_void_p(below), ctypes.c_void_p(above), 0, 0, 0, 0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
         )
+    except Exception:
+        pass
+
+
+# --- 置顶层的真实 Z 序：读出来、审一遍、只在错了的时候动手 ---
+#
+# 心跳原先每 500ms 无条件 SetWindowPos 一轮（画布进置顶层顶端、面板压上去、浮窗逐个
+# 压上去）。两个后果：
+#   1. 白板模式下画布是不透明的全屏窗口，每次被推到置顶层顶端都要整屏重合成，主面板
+#      跟着闪一下——用户报告的「白板模式主面板闪烁」，探针实测面板从没真的掉到画布
+#      之下，闪的就是这个反复合成。
+#   2. 画布每拍都被推到置顶层【最顶端】，ClassIsland 的课表条每 ~3s 重申一次置顶，
+#      我们 0.4s 后又把它压回去，两边打架，课表条一闪一闪。
+# 现在改成：走一遍真实的置顶层 Z 序，算出「该在谁下面、该压住谁」，顺序已经对的话一次
+# SetWindowPos 都不调；错了才按目标顺序重排一次。目标顺序（从上到下）：
+#   ClassIsland 的可见窗口（不动它，只把自己塞到它最低那扇窗的正下方）
+#   > 我们的浮窗链（文字 → 选中 → 子菜单 → … → 主面板）
+#   > 全屏画布
+#   > 其他一切置顶窗口（精灵球、悬浮窗、任务栏……）
+GW_HWNDNEXT = 2
+GWL_EXSTYLE = -20
+WS_EX_TOPMOST = 0x00000008
+DWMWA_CLOAKED = 14
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+
+# 进程映像名以这些开头的窗口永远留在我们整条链之上（小写比较）。ClassIsland 2.x 的
+# 进程是 ClassIsland.Desktop.exe，1.x 是 ClassIsland.exe，前缀匹配两者都盖住。
+PRIVILEGED_PROCESS_PREFIXES = ("classisland",)
+
+_user32.GetTopWindow.restype = ctypes.c_void_p
+_user32.GetTopWindow.argtypes = [ctypes.c_void_p]
+_user32.GetWindow.restype = ctypes.c_void_p
+_user32.GetWindow.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+_user32.IsWindowVisible.restype = ctypes.c_int
+_user32.IsWindowVisible.argtypes = [ctypes.c_void_p]
+_user32.GetWindowRect.restype = ctypes.c_int
+_user32.GetWindowRect.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.wintypes.RECT)]
+_user32.GetWindowThreadProcessId.restype = ctypes.c_uint
+_user32.GetWindowThreadProcessId.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.wintypes.DWORD)]
+# 32 位 user32 没有 GetWindowLongPtrW 这个导出（同 SetWindowLongPtrW 的守卫）。
+_get_window_long = (_user32.GetWindowLongPtrW if hasattr(_user32, "GetWindowLongPtrW")
+                    else _user32.GetWindowLongW)
+_get_window_long.restype = ctypes.c_void_p
+_get_window_long.argtypes = [ctypes.c_void_p, ctypes.c_int]
+_kernel32 = ctypes.windll.kernel32
+_kernel32.OpenProcess.restype = ctypes.c_void_p
+_kernel32.OpenProcess.argtypes = [ctypes.c_uint, ctypes.c_int, ctypes.c_uint]
+_kernel32.QueryFullProcessImageNameW.restype = ctypes.c_int
+_kernel32.QueryFullProcessImageNameW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_wchar_p,
+                                                 ctypes.POINTER(ctypes.wintypes.DWORD)]
+_kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+_dwmapi = ctypes.windll.dwmapi
+_dwmapi.DwmGetWindowAttribute.restype = ctypes.c_long
+_dwmapi.DwmGetWindowAttribute.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_uint]
+
+_PROCESS_NAME_CACHE = {}    # pid -> 小写映像文件名；PID 复用很少见，错了也只是多让一扇窗
+
+
+def window_pid(hwnd):
+    pid = ctypes.wintypes.DWORD(0)
+    _user32.GetWindowThreadProcessId(ctypes.c_void_p(hwnd), ctypes.byref(pid))
+    return int(pid.value)
+
+
+def process_image_name(pid):
+    """进程映像的小写文件名（如 classisland.desktop.exe），拿不到就是空串。"""
+    name = _PROCESS_NAME_CACHE.get(pid)
+    if name is not None:
+        return name
+    name = ""
+    try:
+        handle = _kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid)
+        if handle:
+            try:
+                size = ctypes.wintypes.DWORD(1024)
+                buf = ctypes.create_unicode_buffer(size.value)
+                if _kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+                    name = os.path.basename(buf.value).lower()
+            finally:
+                _kernel32.CloseHandle(handle)
+    except Exception:
+        name = ""
+    if len(_PROCESS_NAME_CACHE) > 512:
+        _PROCESS_NAME_CACHE.clear()
+    _PROCESS_NAME_CACHE[pid] = name
+    return name
+
+
+def is_privileged_window(hwnd):
+    """这扇窗属于必须留在我们之上的进程（ClassIsland）吗。"""
+    return process_image_name(window_pid(hwnd)).startswith(PRIVILEGED_PROCESS_PREFIXES)
+
+
+def is_own_window(hwnd):
+    return window_pid(hwnd) == os.getpid()
+
+
+def _window_is_cloaked(hwnd):
+    val = ctypes.wintypes.DWORD(0)
+    try:
+        _dwmapi.DwmGetWindowAttribute(ctypes.c_void_p(hwnd), DWMWA_CLOAKED, ctypes.byref(val), 4)
+    except Exception:
+        return False
+    return val.value != 0
+
+
+def window_covers_anything(hwnd):
+    """这扇窗真的显示在屏幕上吗：没被 DWM 遮蔽、且有面积。
+
+    收起的触摸键盘、挂起的 UWP 应用都是 IsWindowVisible 为真却被遮蔽的；零面积的窗口
+    也盖不住任何东西。为它们重排只会白白合成一次。
+    """
+    if _window_is_cloaked(hwnd):
+        return False
+    rect = ctypes.wintypes.RECT()
+    if not _user32.GetWindowRect(ctypes.c_void_p(hwnd), ctypes.byref(rect)):
+        return False
+    return rect.right > rect.left and rect.bottom > rect.top
+
+
+def topmost_band():
+    """置顶层里可见的窗口，从最上到最下。
+
+    只看 IsWindowVisible，不在这里过滤遮蔽/零面积：我们自己链里的窗口必须能在这份
+    名单里找到，否则审计永远判「链不完整」、每拍重排。外来窗口盖不盖得住东西由
+    window_covers_anything 在审计时单独判断。置顶窗口在 Z 序里总是排在非置顶之前，
+    所以碰到第一扇可见的非置顶窗口就可以停。
+    """
+    out = []
+    hwnd = _user32.GetTopWindow(None)
+    while hwnd:
+        if _user32.IsWindowVisible(hwnd):
+            ex_style = int(_get_window_long(hwnd, GWL_EXSTYLE) or 0)
+            if not ex_style & WS_EX_TOPMOST:
+                break
+            out.append(int(hwnd))
+        hwnd = _user32.GetWindow(hwnd, GW_HWNDNEXT)
+    return out
+
+
+def plan_topmost_order(band, chain, is_ours=is_own_window, is_privileged=is_privileged_window,
+                       ignore=()):
+    """审一遍置顶层，回答「要不要重排」和「重排时排到谁的下面」。
+
+    band：topmost_band() 的结果；chain：我们期望的窗口顺序（从上到下，最后一个是画布）。
+    返回 (需要重排, 天花板句柄或 None, 天花板之下压在画布之上的外来窗口列表)。
+    天花板 = 特权进程最低的那扇可见窗口；没有特权窗口时天花板就是置顶层顶端。
+    天花板之上发生什么不归我们管——想压住那里的东西就得越过 ClassIsland，不做。
+
+    ignore 里的句柄是已经证明压不过的窗口（比如 UIAccess 级别的触摸键盘、放大镜，
+    它们在一个我们够不着的更高层带），审计时视而不见，否则每拍都会白白重排一次。
+    """
+    chain = [int(h) for h in chain if h]
+    if not chain:
+        return False, None, []
+    chain_set = set(chain)
+    privileged = [h for h in band if h not in chain_set and is_privileged(h)]
+    ceiling = privileged[-1] if privileged else None
+    zone = band[band.index(ceiling) + 1:] if ceiling is not None else list(band)
+    canvas = chain[-1]
+    if canvas not in zone:
+        return True, ceiling, []
+    above = zone[:zone.index(canvas)]
+    foreign = [h for h in above
+               if h not in chain_set and h not in ignore and not is_ours(h)
+               and window_covers_anything(h)]
+    if foreign:
+        return True, ceiling, foreign
+    if [h for h in zone if h in chain_set] != chain:
+        return True, ceiling, []
+    return False, ceiling, []
+
+
+def apply_topmost_order(chain, ceiling):
+    """按 chain 的顺序把整条链排到天花板正下方（没有天花板就是置顶层顶端）。
+
+    从链顶往下逐个 SetWindowPos(窗口, 排在它上面的那扇)，每一步只动链里的窗口，
+    ClassIsland 和其他外来窗口一个都不碰。hWndInsertAfter 是置顶窗口时被排的窗口
+    也保持置顶，所以链不会掉出置顶层。
+    """
+    anchor = ctypes.c_void_p(int(ceiling)) if ceiling else HWND_TOPMOST
+    for hwnd in chain:
+        hwnd = int(hwnd)
+        if not hwnd:
+            continue
+        _user32.SetWindowPos(ctypes.c_void_p(hwnd), anchor, 0, 0, 0, 0,
+                             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
+        anchor = ctypes.c_void_p(hwnd)
+
+
+def enforce_topmost_order(chain, is_ours=is_own_window, is_privileged=is_privileged_window,
+                          ignore=None):
+    """审计 + 必要时重排。返回 (是否动手了, 天花板, 重排后仍压不过的外来窗口)。
+
+    重排后立刻再审一次：还压在我们之上的外来窗口就是够不着的（更高的层带），交给
+    调用方记进 ignore，下一拍不再为它重排。ignore 是调用方持有的集合，本函数会把
+    已经不在画布之上的句柄从里面清掉——它要是哪天又冒到我们上面来，得重新较量一次。
+    """
+    ignore = ignore if ignore is not None else set()
+    band = topmost_band()
+    # 只排真的显示着的窗口：Qt 认为可见而原生窗口还没显示出来的那一瞬，排进去只会让
+    # 审计永远判「链不完整」。
+    chain = [int(h) for h in chain if h and _user32.IsWindowVisible(ctypes.c_void_p(int(h)))]
+    if not chain:
+        return False, None, []
+    if ignore and chain:
+        canvas = chain[-1]
+        above = set(band[:band.index(canvas)]) if canvas in band else set(band)
+        ignore.intersection_update(above)
+    need, ceiling, _foreign = plan_topmost_order(band, chain, is_ours, is_privileged, ignore)
+    if not need:
+        return False, ceiling, []
+    apply_topmost_order(chain, ceiling)
+    band = topmost_band()
+    still, ceiling, unreachable = plan_topmost_order(band, chain, is_ours, is_privileged, ignore)
+    if still and unreachable:
+        ignore.update(unreachable)
+    return True, ceiling, unreachable
+
+
+def place_under_ceiling(window_id, ceiling):
+    """把一扇不在链里的窗口（提示气泡、QMenu、设置页）放到天花板正下方，即我们整条链之上。"""
+    try:
+        hwnd = int(window_id)
+        if not hwnd:
+            return
+        anchor = ctypes.c_void_p(int(ceiling)) if ceiling else HWND_TOPMOST
+        _user32.SetWindowPos(ctypes.c_void_p(hwnd), anchor, 0, 0, 0, 0,
+                             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
     except Exception:
         pass
 
@@ -7151,6 +7395,8 @@ class ControlPanel(QWidget):
         self._update_worker = None
         self._bound_key = None
         self._topmost_state = None
+        self._topmost_ceiling = None    # 上一拍审计得到的天花板（ClassIsland 最低的可见窗口）
+        self._unreachable_topmost = set()   # 重排后仍压在我们之上的外来窗口：更高层带，别再较劲
         self._drag_offset = None
         self._grabbing = False
         self.orientation = "portrait"   # portrait=竖版工具栏 | landscape=横版工具栏（标题栏旋转键切换）
@@ -9107,10 +9353,10 @@ class ControlPanel(QWidget):
             for key, label in ops:
                 menu.addAction(label, lambda k=key: self.canvas.apply_shape_op(item, k))
 
-        # 弹出期间必须停掉置顶心跳：bind_topmost_stack 里的 force_topmost(画布) 会把全屏
-        # 画布拉到置顶层最顶端。这个 QMenu 刻意不挂父窗口，因而没有 owner 保护，弹出后
-        # 500ms 内就会被画布盖住——菜单还在，但画布上的笔迹直接压在菜单文字上，点击也穿到
-        # 画布。其余模态对话框（取色/校准/导入名单）早就用同一套 stop/start 处理。
+        # 弹出期间停掉置顶心跳：这个 QMenu 刻意不挂父窗口，因而没有 owner 保护，心跳一旦
+        # 因别的原因重排整条链（外来窗口冒上来、链序被打乱），画布就可能压到它上面——
+        # 菜单还在，但画布上的笔迹直接压在菜单文字上，点击也穿到画布。其余模态对话框
+        # （取色/校准/导入名单）早就用同一套 stop/start 处理。
         # singleShot(0)：QMenu 的原生窗口要等 exec() 弹出后才存在，此时再矫正一次 Z 序；
         # bind_owner=False 表示只排 Z 序、不改它的 owner，避免干扰 Qt 的弹窗管理。
         self.timer.stop()
@@ -9150,13 +9396,13 @@ class ControlPanel(QWidget):
         if not was_visible:
             self.raise_floating(self.select_panel)
         else:
-            force_topmost(self.select_panel.winId())
+            self._ensure_above_canvas(self.select_panel)
         # 文字/公式面板必须压在选中面板【之上】：它是当前的操作焦点，而选中面板
         # （复制/删除那一条）是辅助。顺序反了不只是观感问题——把选中面板顶上来会
         # 顺带抢走激活，文字输入控件的键盘焦点随之丢失，键盘就再也打不出字。
         if getattr(self, "text_panel", None) is not None and self.text_panel.isVisible():
             if restack or not was_visible:
-                force_topmost(self.text_panel.winId())
+                place_under_ceiling(self.text_panel.winId(), getattr(self, "_topmost_ceiling", None))
                 # 选中面板刚显示出来，可见集合变了，归属链要跟着重建。
                 self.chain_floating_owners()
                 self.restack_floatings()
@@ -9448,14 +9694,16 @@ class ControlPanel(QWidget):
         Canvas and panel are both topmost Tool windows. Windows only guarantees
         that an *owned* window stays above its owner, so every panel HWND is
         bound to the canvas via GWLP_HWNDPARENT. Owner rebind runs only when a
-        winId changes; force_topmost still runs each heartbeat so a canvas
-        show()/mode switch cannot permanently bury the panel.
+        winId changes.
 
-        关键补充：仅靠 GWLP_HWNDPARENT 与 HWND_TOPMOST 不足以修掉「面板被画布盖住」。
-        两者同处置顶层时 HWND_TOPMOST 不决定兄弟高低，而 set_drawing_mode 里
-        setWindowFlag+show() 会让画布重建 HWND，新画布默认落在置顶层顶端反而压住面板。
-        因此每次心跳都额外 force_above(panel/floatings, canvas) 用 SetWindowPos 把窗口
-        显式叠到画布正上方，同步矫正兄弟高度——面板即时置顶。
+        每拍心跳做的事：读一遍置顶层的真实 Z 序，对照期望顺序（见 enforce_topmost_order
+        上方的说明），顺序对就一个 SetWindowPos 都不调；错了才把整条链重排到天花板
+        （ClassIsland 最低的可见窗口）正下方。以前每拍无条件推一轮 SetWindowPos，
+        白板模式下不透明的全屏画布每 500ms 被重合成一次，主面板跟着闪；同时画布被推到
+        置顶层最顶端、压住 ClassIsland 的课表条，和它的置顶复查互相打架。
+
+        画布和主面板永远在 ClassIsland 之下、在其他一切置顶窗口（精灵球、悬浮窗、任务
+        栏）之上。ClassIsland 不在时天花板就是置顶层顶端。
         """
         if not self.canvas or getattr(self, "_grabbing", False):
             return
@@ -9488,28 +9736,15 @@ class ControlPanel(QWidget):
                 self._bound_key = key
             if not self.isVisible():
                 self.show()
-            # 关键：只 force_topmost(HWND_TOPMOST) 无法决定同在置顶层的两个兄弟谁高谁低。
-            # set_drawing_mode 里画布的 setWindowFlag + show() 会重建画布 HWND，新画布默认
-            # 落到置顶层最顶端（面板之上）。这里显式把面板/浮窗用 SetWindowPos 叠到画布正上方，
-            # 同步矫正兄弟高度，面板就不再被画布盖住。顺序很重要：
-            #   ① 先把画布托进 TOPMOST 层，避免下方 force_above(panel,canvas) 把面板从
-            #     非置顶的画布之上连带拉出 TOPMOST 层（那样面板会跌层、被普通窗口盖住）。
-            #   ② 面板进 TOPMOST 层。
-            #   ③ 面板排到画布正上方（同置顶层内矫正兄弟高低）。
-            #   ④ 各浮窗同样进 TOPMOST 并压到画布正上方。
-            force_topmost(owner)
-            force_topmost(panel_hwnd)
-            force_above(panel_hwnd, owner)
-            for floating in floatings:
-                if floating.isVisible():
-                    force_topmost(int(floating.winId()))
-                    force_above(int(floating.winId()), owner)
-            # 上面每一步只保证「某窗口在画布之上」，彼此之间的高低完全没约束——谁在上
-            # 全看 Windows 上一次怎么排的。真实点击会让被激活窗口连带把同一 owner 下的
-            # 其他窗口重排，于是主面板可能压到符号面板上；心跳只 force_topmost 拉不回来
-            # （对已在置顶层的窗口，HWND_TOPMOST 不改变兄弟高低）。这里显式把整条链排一遍。
-            self.restack_floatings()
-            self._raise_tooltip(owner)
+            # 期望顺序：floating_stack()（文字 → 选中 → 子菜单 → … → 主面板）再加画布垫底。
+            # 链内彼此的高低由 chain_floating_owners 写进归属关系，这里的重排只在审计
+            # 发现「画布不在天花板之下」「有外来窗口插在链和画布之间」「链序被点击打乱」
+            # 时发生。
+            chain = [int(w.winId()) for w in self.floating_stack()] + [owner]
+            _changed, ceiling, _unreachable = enforce_topmost_order(
+                chain, ignore=self._unreachable_topmost)
+            self._topmost_ceiling = ceiling
+            self._raise_tooltip(chain[0], ceiling)
             self._topmost_state = key
             self._topmost_error = None
         except Exception:
@@ -10005,20 +10240,26 @@ class ControlPanel(QWidget):
             pass
 
     @staticmethod
-    def _raise_tooltip(owner):
-        """把正在显示的提示气泡抬到全屏画布之上。
+    def _raise_tooltip(chain_top, ceiling):
+        """把正在显示的提示气泡抬到我们整条链之上（天花板之下）。
 
         气泡是 Qt 自己建的顶层窗口（QTipLabel），既不在我们的 owner 链里，也没进心跳
-        管理的浮窗列表。而心跳每 500ms 会把全屏画布重新推到置顶层顶端——气泡一弹出来，
-        半秒内就被画布压住，只剩一角露在面板上，看起来就是「悬停按钮时冒出一块遮挡」。
+        管理的浮窗列表，重排链的时候可能被留在全屏画布之下，只剩一角露在面板上，看起来
+        就是「悬停按钮时冒出一块遮挡」。只在它确实不在链顶之上时才动它：每拍都推会让
+        它反复重合成。
         """
         if not QToolTip.isVisible():
             return
+        band = None
         for widget in QApplication.topLevelWidgets():
             if widget.isVisible() and widget.metaObject().className() == "QTipLabel":
                 hwnd = int(widget.winId())
-                force_topmost(hwnd)
-                force_above(hwnd, owner)
+                if band is None:
+                    band = topmost_band()
+                top = band.index(int(chain_top)) if int(chain_top) in band else len(band)
+                if hwnd in band and band.index(hwnd) < top:
+                    continue
+                place_under_ceiling(hwnd, ceiling)
 
     def heartbeat_refresh(self):
         self.bind_topmost_stack()
@@ -10057,11 +10298,39 @@ class ControlPanel(QWidget):
             return
         if bind_owner:
             set_window_owner(hwnd, owner)
-        force_topmost(owner)      # 先保证画布在置顶层，避免下一步把浮窗带出置顶层
-        force_topmost(hwnd)
-        force_above(hwnd, owner)
+        # 先把整条链审一遍（画布该在天花板之下、链序该对），再把这扇窗放到链顶之上。
+        # 不能像以前那样 force_topmost(画布)：那会把画布推到置顶层最顶端、压住
+        # ClassIsland，要等下一拍心跳才拉回来——课表条就闪一下。
+        try:
+            chain = [int(w.winId()) for w in self.floating_stack()] + [owner]
+            _changed, ceiling, _unreachable = enforce_topmost_order(
+                chain, ignore=self._unreachable_topmost)
+            self._topmost_ceiling = ceiling
+            if hwnd not in chain:
+                place_under_ceiling(hwnd, ceiling)
+        except Exception:
+            LOGGER.debug("raise_floating 层级校正失败", exc_info=True)
         if bind_owner:
             self._bound_key = None    # 让下一拍心跳重新校验整组窗口的 owner
+
+    def _ensure_above_canvas(self, widget):
+        """浮窗已经显示着、只是每帧都在动（拖选中对象）时的轻量校正。
+
+        以前每帧 force_topmost(浮窗)：浮窗被推到置顶层最顶端、压过 ClassIsland，
+        心跳再把整条链拉回来——白板模式下就是拖一下闪一下。现在先读真实 Z 序，浮窗
+        确实在画布之上就什么都不做；真掉下去了才放回链顶。
+        """
+        if widget is None or not self.canvas or not widget.isVisible():
+            return
+        try:
+            hwnd = int(widget.winId())
+            owner = int(self.canvas.winId())
+            band = topmost_band()
+            if hwnd in band and owner in band and band.index(hwnd) < band.index(owner):
+                return
+            place_under_ceiling(hwnd, getattr(self, "_topmost_ceiling", None))
+        except Exception:
+            pass
 
     # --- 主面板拖动：按住空白处/标题拖动，按钮不受影响 ---
     def mousePressEvent(self, event):

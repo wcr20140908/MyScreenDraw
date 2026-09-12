@@ -1023,16 +1023,23 @@ class RestackTests(WorkflowCase):
             self.panel.chain_floating_owners = original
         self.assertTrue(called, "打开文字面板没有重建归属链")
 
-    def test_the_heartbeat_restacks(self):
+    def test_the_heartbeat_audits_the_whole_chain(self):
+        """5.5.1: the heartbeat no longer restacks blindly -- it audits the real z-order
+        and rewrites only when wrong (blind SetWindowPos every 500 ms was the whiteboard
+        flicker). The audit must still see the full chain, text panel first, canvas last."""
         self.make_box()
-        called = []
-        original = self.panel.restack_floatings
-        self.panel.restack_floatings = lambda: called.append(1)
+        seen = []
+        original = self.main.enforce_topmost_order
+        self.main.enforce_topmost_order = lambda chain, **kw: (seen.append(list(chain)), (False, None, []))[1]
         try:
             self.panel.heartbeat_refresh()
         finally:
-            self.panel.restack_floatings = original
-        self.assertTrue(called, "心跳没有排链，被点乱的层级要等到下次操作才恢复")
+            self.main.enforce_topmost_order = original
+        self.assertTrue(seen, "心跳没有审计窗口层级，被点乱的层级要等到下次操作才恢复")
+        chain = seen[-1]
+        self.assertEqual(chain[0], int(self.panel.text_panel.winId()), "文字面板不在链顶")
+        self.assertEqual(chain[-1], int(self.canvas.winId()), "画布不在链底")
+        self.assertIn(int(self.panel.winId()), chain)
 
     def test_clicking_a_symbol_group_restacks_immediately(self):
         """等下一拍心跳就是用户看到的那一下「闪」。"""
