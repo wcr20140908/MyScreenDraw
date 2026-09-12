@@ -5205,10 +5205,9 @@ class DrawingCanvas(QMainWindow):
                     pen = self.marker_pen()
                     width = pen.width()
                 else:
-                    taper = min(1.0, max(0.35, len(self.current_stroke_widths) / 10))
                     pressure = max(0.08, min(1.0, self.current_pressure))
                     speed = self._speed_width_factor() if self.speed_width_enabled else 1.0
-                    width = self._damp_width(self.pen_width * taper * pressure * speed)
+                    width = self._damp_width(self.pen_width * pressure * speed)
                     pen = QPen(self.pen_color, width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
                 line = QLine(previous.x(), previous.y(), point.x(), point.y())
                 self.all_segments.append({"line": line, "pen": pen, "id": self.current_stroke_id, "marker": is_marker})
@@ -6502,6 +6501,9 @@ class DrawingCanvas(QMainWindow):
         if self._touch_synthesized(event):
             return          # 多指已接管，这是 Windows 为主接触点补发的鼠标消息
         pos = event.position().toPoint()
+        # 点击画布时收起所有临时子菜单，不消耗这次事件，让绘图/选择继续
+        if self.panel and event.button() == Qt.MouseButton.LeftButton:
+            self.panel.show_only_sub(None)
         if event.button() == Qt.MouseButton.RightButton:
             if self.draw_state == "SHAPE":
                 self.cancel_pending_points()
