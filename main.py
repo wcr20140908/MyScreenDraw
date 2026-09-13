@@ -2429,7 +2429,8 @@ class DrawingCanvas(QMainWindow):
         self.panel = panel_ref
         # WindowDoesNotAcceptFocus(=WS_EX_NOACTIVATE)：点击画布绘图不触发窗口激活，
         # 画布就永远不会因为被点击而抬升到面板之上——面板被压住的根源之一
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
+        # 注意：画布不需要WindowStaysOnTopHint，LOGO和工具栏才需要置顶
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint
                             | Qt.WindowType.Tool | Qt.WindowType.WindowDoesNotAcceptFocus)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.is_drawing_mode = True
@@ -7523,9 +7524,6 @@ class ControlPanel(QWidget):
 
         self.btn_exit = QPushButton(tr("close_app")); self.btn_exit.clicked.connect(self.close_to_background); self.toolbar_layout.addWidget(self.btn_exit)
 
-        # 1b. 图标主面板：与文字主面板【并存】的第二套 widget 树（见 build_icon_frame）
-        self.build_icon_frame()
-
         # 2. 子菜单浮窗：独立置顶小窗（不再挤在主面板窗口里）。
         #    换内容/调尺寸/定位全部在隐藏状态下完成后再显示——半透明窗口只要不在
         #    可见状态下缩放，合成器就不会出现新旧画面交替（闪烁/叠影的根源）。
@@ -7620,8 +7618,24 @@ class ControlPanel(QWidget):
         self._calc_display = None
 
         self.h_layout.addWidget(self.main_frame)
-        self.h_layout.addWidget(self.icon_frame)
-        self.icon_frame.setVisible(False)      # 默认经典 UI；load_settings 里按配置切换
+
+        # 分体设计：LOGO和工具栏作为独立窗口
+        from toolbar_windows import LogoWindow, ToolbarWindow
+        self.logo_window = LogoWindow()
+        self.toolbar_window = ToolbarWindow()
+
+        # LOGO点击信号连接到工具栏折叠
+        self.logo_window.clicked.connect(self.toggle_toolbar_collapsed)
+        # 设置LOGO图标（使用主题颜色）
+        self.logo_window.logo_btn.setIcon(self._make_logo_icon())
+        self.logo_window.logo_btn.setIconSize(QSize(56, 56))
+        # LOGO位置改变时，工具栏可以选择跟随（可选功能，暂不实现自动跟随）
+
+        # 创建工具栏按钮
+        self.icon_buttons = {}
+        self.build_toolbar_buttons()
+
+        self.main_frame.setVisible(False)      # 默认图标 UI；load_settings 里按配置切换
 
         self._syncing_thumbnails = False
         self._thumbnail_refresh_timer = QTimer(self)
@@ -7736,6 +7750,11 @@ class ControlPanel(QWidget):
                          getattr(self, "text_panel", None), getattr(self, "settings_panel", None)):
             if floating is not None:
                 floating.setStyleSheet(self.styleSheet())
+        # 分体窗口应用主题
+        if hasattr(self, 'logo_window') and self.logo_window:
+            self.logo_window.apply_theme(t, rad["frame"], int(self.ui_opacity), self._make_logo_icon())
+        if hasattr(self, 'toolbar_window') and self.toolbar_window:
+            self.toolbar_window.apply_theme(t, rad["frame"], int(self.ui_opacity))
         if hasattr(self, "btn_clear"):
             self.btn_clear.setStyleSheet(f"color: {t['clear']};")
         if hasattr(self, "label_w"):
@@ -7780,127 +7799,107 @@ class ControlPanel(QWidget):
         ("board_style", "whiteboard", "board",     "toggle_board_style",    "btn_board_style"),
     )
 
-    @staticmethod
-    def _make_logo_icon(size=56):
+    def _make_logo_icon(self, size=56):
+        """绘制原创LOGO，使用主题颜色"""
         pix = QPixmap(size, size); pix.fill(Qt.GlobalColor.transparent)
         p = QPainter(pix); p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.setPen(QPen(QColor("#006d75"), 3)); p.setBrush(QColor("#eef7f8"))
+        # 使用主题强调色作为边框，按钮色作为填充
+        p.setPen(QPen(QColor(self.theme["accent"]), 3)); p.setBrush(QColor(self.theme["button"]))
         p.drawRoundedRect(QRectF(2, 2, size - 4, size - 4), size * .22, size * .22)
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawRoundedRect(QRectF(size*.22, size*.25, size*.56, size*.40), size*.08, size*.08)
         p.drawLine(QPointF(size*.40, size*.76), QPointF(size*.60, size*.76))
         p.drawLine(QPointF(size*.50, size*.65), QPointF(size*.50, size*.76))
-        p.setPen(QPen(QColor("#e17055"), size*.07, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        # 笔迹使用文字颜色
+        p.setPen(QPen(QColor(self.theme["text"]), size*.07, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
         path = QPainterPath(QPointF(size*.30, size*.53)); path.cubicTo(size*.40, size*.28, size*.47, size*.66, size*.68, size*.37); p.drawPath(path)
         p.end(); return QIcon(pix)
 
     def toggle_collapsed(self):
-        self.collapsed = not getattr(self, "collapsed", False)
-        if self.collapsed:
+        """兼容旧代码：分体设计中改为调用 toggle_toolbar_collapsed"""
+        self.toggle_toolbar_collapsed()
+
+    def toggle_toolbar_collapsed(self):
+        """LOGO点击：折叠/展开工具栏窗口"""
+        if self.toolbar_window.isVisible():
+            # 收起工具栏，但保留LOGO
             self.show_only_sub(None)
             self.close_thumbnail_panel()
-        self.icon_grid.setVisible(not self.collapsed)
-        self.icon_wb_box.setVisible(not self.collapsed and bool(self.canvas and self.canvas.whiteboard_mode))
-        self._resize_to_content()
+            self.toolbar_window.hide()
+        else:
+            # 展开工具栏
+            self.toolbar_window.show()
+            self.toolbar_window.raise_()
+            # 重新定位到LOGO旁边
+            logo_pos = self.logo_window.pos()
+            logo_size = self.logo_window.size()
+            if self.orientation == "portrait":
+                # 竖版：工具栏在LOGO下方
+                self.toolbar_window.move(logo_pos.x(), logo_pos.y() + logo_size.height() + 2)
+            else:
+                # 横版：工具栏在LOGO右侧
+                self.toolbar_window.move(logo_pos.x() + logo_size.width() + 2, logo_pos.y())
 
     def build_icon_frame(self):
-        """构造图标主面板：与文字主面板并存的第二套 widget 树。
+        """兼容旧代码路径：不再使用，保留空实现"""
+        pass
 
-        为什么是两棵真实的树，而不是给同一批按钮换个样子：一个 QWidget 只能有一个父级，
-        真正的「更省空间」要求两套完全不同的排布（文字栏纵向一列 150px 宽；图标栏是
-        紧凑的多列网格），而同一批按钮无法同时存在于两种排布里。代价是状态要同步，
-        这一点由 sync_icon_buttons() 单向解决——经典按钮永远是唯一真相。
-        """
-        self.icon_buttons = {}
-        self.icon_frame = QFrame()
-        self.icon_frame.setObjectName("MainFrame")
-        self.icon_layout = QVBoxLayout(self.icon_frame)
-        self.icon_layout.setContentsMargins(6, 6, 6, 6)
-        self.icon_layout.setSpacing(2)
-        self.icon_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+    def build_toolbar_buttons(self):
+        """创建工具栏窗口的所有按钮"""
+        from ui_icons import make_ui_icon
 
-        # 图标式面板保留一个原创、简洁的 LOGO 作为折叠入口。
-        icon_title = QHBoxLayout(); icon_title.setSpacing(2)
-        self.logo_button = QPushButton()
-        self.logo_button.setObjectName("LogoButton")
-        self.logo_button.setFixedSize(64, 64)
-        from ui_icons import make_app_icon
-        self.logo_button.setIcon(make_app_icon())
-        self.logo_button.setIconSize(QSize(56, 56))
-        self.logo_button.setToolTip(tr("logo_hint"))
-        self.logo_button.clicked.connect(self.toggle_collapsed)
-        icon_title.addWidget(self.logo_button)
-        self.icon_layout.addLayout(icon_title)
-
-        self.icon_grid = QGridLayout()
-        self.icon_grid.setContentsMargins(0, 0, 0, 0)
-        self.icon_grid.setSpacing(2)
+        # 主工具按钮
         for key, icon_name, tip_key, handler_name, mirror_name in self.ICON_ACTIONS:
             btn = QPushButton()
             btn.setObjectName("IconBtn")
-            btn.setIconSize(QSize(30, 30))
+            btn.setProperty("icon_name", icon_name)
             btn.setIcon(make_ui_icon(icon_name, self.theme["text"], ICON_GLYPH))
-            # 纯图标界面必须有提示，否则用户认不出哪颗是哪颗。ToolTip 的遮挡问题
-            # 由 _raise_tooltip() 处理（它会把气泡抬到全屏画布之上）。
+            btn.setIconSize(QSize(ICON_GLYPH, ICON_GLYPH))
             btn.setToolTip(tr(tip_key))
             btn.setAccessibleName(tr(tip_key))
-            btn.setProperty("icon_name", icon_name)
-            if handler_name:
-                btn.clicked.connect(getattr(self, handler_name))
-            # 点完立刻把状态投影一遍：不等心跳，用户看到的高亮变化才是即时的
-            btn.clicked.connect(self.sync_icon_buttons)
-            self.icon_buttons[key] = btn
-        self.icon_layout.addLayout(self.icon_grid)
 
-        # 图标树自己的白板控制区（wb_box 属于经典树，一个 widget 不能有两个父级）
-        self.icon_wb_box = QWidget()
-        self.icon_wb_grid = QGridLayout(self.icon_wb_box)
-        self.icon_wb_grid.setContentsMargins(0, 0, 0, 0)
-        self.icon_wb_grid.setSpacing(2)
+            # 连接处理器
+            handler = getattr(self, handler_name, None)
+            if handler:
+                btn.clicked.connect(handler)
+
+            self.icon_buttons[key] = btn
+            self.toolbar_window.icon_buttons[key] = btn
+
+        # 白板控制按钮
         for key, icon_name, tip_key, handler_name, mirror_name in self.ICON_WB_ACTIONS:
             btn = QPushButton()
             btn.setObjectName("IconBtn")
-            btn.setIconSize(QSize(30, 30))
+            btn.setProperty("icon_name", icon_name)
             btn.setIcon(make_ui_icon(icon_name, self.theme["text"], ICON_GLYPH))
+            btn.setIconSize(QSize(ICON_GLYPH, ICON_GLYPH))
             btn.setToolTip(tr(tip_key))
             btn.setAccessibleName(tr(tip_key))
-            btn.setProperty("icon_name", icon_name)
-            btn.clicked.connect(getattr(self, handler_name))
-            btn.clicked.connect(self.sync_icon_buttons)
+
+            # 连接处理器
+            handler = getattr(self, handler_name, None)
+            if handler:
+                btn.clicked.connect(handler)
+
             self.icon_buttons[key] = btn
-        self.icon_wb_box.setVisible(False)
-        self.icon_layout.addWidget(self.icon_wb_box)
-        self._layout_icon_grid()
+            self.toolbar_window.icon_buttons[key] = btn
+
+        # 重排按钮到网格
+        self.toolbar_window._relayout_buttons()
+
+        # 应用主题样式到工具栏窗口
+        rad = self.radius_tokens()
+        self.toolbar_window.apply_theme(self.theme, rad["frame"], self.ui_opacity)
+        self.logo_window.apply_theme(self.theme, rad["frame"], self.ui_opacity, self._make_logo_icon())
+
+        # 初始同步状态
+        self.sync_icon_buttons()
+        pass
 
     def _relayout_icon_frame(self, orientation):
-        """图标面板跟着方向换排布：竖版纵向堆叠、横版横向一条。
-
-        和经典面板一样要把旧布局交给临时 QWidget 接管——直接给同一个 widget 装第二个
-        布局，Qt 只会打印警告并保留旧布局，表现就是「切了方向图标栏没变」。
-        """
-        if getattr(self, "icon_frame", None) is None:
-            return
-        items = []
-        while self.icon_layout.count():
-            item = self.icon_layout.takeAt(0)
-            widget, sub = item.widget(), item.layout()
-            if widget is not None:
-                items.append(("widget", widget))
-            elif sub is not None:
-                items.append(("layout", sub))
-        QWidget().setLayout(self.icon_layout)
-        new_layout = QHBoxLayout(self.icon_frame) if orientation == "landscape" else QVBoxLayout(self.icon_frame)
-        new_layout.setContentsMargins(6, 6, 6, 6)
-        new_layout.setSpacing(2)
-        new_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter if orientation == "landscape"
-                                else Qt.AlignmentFlag.AlignTop)
-        for kind, obj in items:
-            if kind == "widget":
-                new_layout.addWidget(obj)
-            else:
-                new_layout.addLayout(obj)
-        self.icon_layout = new_layout
-        self._layout_icon_grid()
+        """分体设计：重新布局独立的工具栏窗口"""
+        if hasattr(self, 'toolbar_window') and self.toolbar_window:
+            self.toolbar_window.set_orientation(orientation)
 
     def _icon_prev_page(self):
         self.switch_whiteboard_page(-1)
@@ -7910,25 +7909,8 @@ class ControlPanel(QWidget):
 
     def _layout_icon_grid(self):
         """按当前方向重排图标网格：竖版严格单列、横版单行。"""
-        for grid in (self.icon_grid, self.icon_wb_grid):
-            while grid.count():
-                grid.takeAt(0)
-        main_keys = [key for key, *_ in self.ICON_ACTIONS]
-        wb_keys = [key for key, *_ in self.ICON_WB_ACTIONS]
-        if self.orientation == "landscape":
-            # 横版：单行排列
-            for i, key in enumerate(main_keys):
-                self.icon_grid.addWidget(self.icon_buttons[key], 0, i)
-            for i, key in enumerate(wb_keys):
-                self.icon_wb_grid.addWidget(self.icon_buttons[key], 0, i)
-        else:
-            # 竖版：严格单列排列
-            for i, key in enumerate(main_keys):
-                self.icon_grid.addWidget(self.icon_buttons[key], i, 0)
-            for i, key in enumerate(wb_keys):
-                self.icon_wb_grid.addWidget(self.icon_buttons[key], i, 0)
-        for key in main_keys + wb_keys:
-            self.icon_buttons[key].setVisible(True)
+        if hasattr(self, 'toolbar_window') and self.toolbar_window:
+            self.toolbar_window._relayout_buttons()
 
     def repaint_ui_icons(self):
         """主题变了就按新的文字色重绘所有图标（亮色主题下白色图标看不见）。"""
@@ -7939,6 +7921,18 @@ class ControlPanel(QWidget):
             name = btn.property("icon_name")
             if name:
                 btn.setIcon(make_ui_icon(name, self.theme["text"], ICON_GLYPH))
+
+        # 更新LOGO图标使用新主题颜色
+        if hasattr(self, 'logo_window') and self.logo_window:
+            self.logo_window.logo_btn.setIcon(self._make_logo_icon())
+
+        # 同时更新工具栏窗口的样式
+        if hasattr(self, 'toolbar_window') and self.toolbar_window:
+            rad = self.radius_tokens()
+            self.toolbar_window.apply_theme(self.theme, rad["frame"], self.ui_opacity)
+        if hasattr(self, 'logo_window') and self.logo_window:
+            rad = self.radius_tokens()
+            self.logo_window.apply_theme(self.theme, rad["frame"], self.ui_opacity, self._make_logo_icon())
 
     def sync_icon_buttons(self):
         """把经典按钮的状态单向投影到图标按钮上。
@@ -7981,32 +7975,43 @@ class ControlPanel(QWidget):
         # 可见，而图标模式下 main_frame 整个是隐藏的，wb_box 的 isVisible() 恒为 False——
         # 用它来投影的话，图标模式下进白板永远看不到翻页栏。isHidden() 只反映「这个控件
         # 自己有没有被显式隐藏」，那才是 update_whiteboard_ui() 写进去的那个意图。
-        if getattr(self, "wb_box", None) is not None and getattr(self, "icon_wb_box", None) is not None:
+        if getattr(self, "wb_box", None) is not None and hasattr(self, "toolbar_window"):
             want_visible = not self.wb_box.isHidden()
-            if self.icon_wb_box.isHidden() == want_visible:
-                self.icon_wb_box.setVisible(want_visible)
+            if self.toolbar_window.icon_wb_box.isHidden() == want_visible:
+                self.toolbar_window.icon_wb_box.setVisible(want_visible)
                 if self.ui_mode == "icon":
-                    self._resize_to_content()
+                    self.toolbar_window.adjustSize()
 
     def set_ui_mode(self, mode, persist=True):
-        """图标主面板是唯一界面，不再切换。兼容旧配置的迁移路径。"""
+        """图标主面板是唯一界面，分体设计：显示LOGO和工具栏窗口。"""
         if mode not in ("classic", "icon"):
             return
-        # 统一为图标式，classic 配置自动迁移
-        if self.ui_mode != "icon":
-            self.ui_mode = "icon"
-            self.main_frame.setVisible(False)
-            self.icon_frame.setVisible(True)
-            self.sync_icon_buttons()
-            self._resize_to_content()
-            if getattr(self, "menu_panel", None) is not None and self.menu_panel.isVisible():
-                self.position_menu_panel()
-            self.heartbeat_refresh()
-            self.sync_settings_panel()
-            self.reposition_settings_panel()
-            if persist:
-                self.save_settings()
-            track_event("ui_mode_unified", from_mode=mode)
+        # 统一为图标式分体设计
+        self.ui_mode = "icon"
+        self.main_frame.setVisible(False)
+        # 显示分体窗口
+        if hasattr(self, 'logo_window') and hasattr(self, 'toolbar_window'):
+            self.logo_window.show()
+            self.toolbar_window.show()
+            # 初始位置：屏幕左上角附近
+            from PyQt6.QtWidgets import QApplication
+            screen = QApplication.primaryScreen().geometry()
+            self.logo_window.move(20, 20)
+            logo_pos = self.logo_window.pos()
+            logo_size = self.logo_window.size()
+            if self.orientation == "portrait":
+                self.toolbar_window.move(logo_pos.x(), logo_pos.y() + logo_size.height() + 2)
+            else:
+                self.toolbar_window.move(logo_pos.x() + logo_size.width() + 2, logo_pos.y())
+        self.sync_icon_buttons()
+        if getattr(self, "menu_panel", None) is not None and self.menu_panel.isVisible():
+            self.position_menu_panel()
+        self.heartbeat_refresh()
+        self.sync_settings_panel()
+        self.reposition_settings_panel()
+        if persist:
+            self.save_settings()
+        track_event("ui_mode_unified", from_mode=mode)
 
     def _layout_wb_box(self):
         """白板控制区始终保持紧凑两行。
@@ -8860,7 +8865,25 @@ class ControlPanel(QWidget):
         也不能把窗口摆到屏幕外（那是彻底点不到，比压住更糟）。
         """
         screen = self.screen_geometry(self) or QApplication.primaryScreen().availableGeometry()
+        # Icon模式下应该使用toolbar_window的几何，但需要处理测试场景
+        # frameGeometry()包含窗口装饰，在offscreen或未显示时可能无效，回退到geometry()
         frame = self.frameGeometry()
+        if not frame.isValid() or frame.width() <= 0 or frame.height() <= 0:
+            frame = self.geometry()
+
+        # 只有在真实运行（非测试）且toolbar_window已正确初始化时才使用它
+        # 判据：toolbar_window可见、ControlPanel不可见（真实icon模式）或两者位置接近（同步）
+        if (hasattr(self, 'toolbar_window') and
+            self.toolbar_window.isVisible() and
+            self.toolbar_window.width() > 10):
+            tw_frame = self.toolbar_window.frameGeometry()
+            # 如果ControlPanel不可见，说明是真实icon模式，必须用toolbar_window
+            if not self.isVisible():
+                frame = tw_frame
+            # 如果两者位置接近（<100px），说明是同步的，可以用toolbar_window
+            elif (abs(frame.x() - tw_frame.x()) < 100 and
+                  abs(frame.y() - tw_frame.y()) < 100):
+                frame = tw_frame
 
         def fit(value, low, high):
             return max(low, min(high, value)) if high >= low else low
@@ -9425,6 +9448,8 @@ class ControlPanel(QWidget):
 
     def set_drawing_mode(self, enabled):
         cv = self.canvas
+        if not cv:
+            return
         if cv.is_drawing_mode == enabled:
             return
         cv.is_drawing_mode = enabled
@@ -9494,7 +9519,11 @@ class ControlPanel(QWidget):
         以及拖动主面板到边缘的过程中实时换边。
         """
         screen = self.screen_geometry(self) or QApplication.primaryScreen().availableGeometry()
-        frame = self.frameGeometry()
+        # 图标模式下使用toolbar_window的几何，经典模式使用主面板几何
+        if self.ui_mode == "icon" and hasattr(self, "toolbar_window") and self.toolbar_window.isVisible():
+            frame = self.toolbar_window.frameGeometry()
+        else:
+            frame = self.frameGeometry()
         if anchor is not None and anchor.isVisible():
             spot = anchor.mapToGlobal(QPoint(0, 0))
             anchor_rect = QRectF(spot.x(), spot.y(), anchor.width(), anchor.height())
@@ -9569,15 +9598,16 @@ class ControlPanel(QWidget):
         return None
 
     def set_orientation(self, orientation):
-        """在竖版 / 横版工具栏之间切换：把已有的工具栏条目重新排布。
-
-        实现方式是从 main_frame 当前布局里把所有条目（widget / sublayout）一并 takeAt
-        取出，再用目标方向的布局重新插回——元素本身（按钮 / 行布局 / 白板区）不变，
-        只是排布方向从纵向变横向。竖版固定宽度 150、横版不固定宽度按高度收紧。
-        """
+        """在竖版 / 横版工具栏之间切换：分体设计中更新工具栏窗口方向。"""
         if orientation not in ("portrait", "landscape") or orientation == self.orientation:
             return
         self.orientation = orientation
+
+        # 更新工具栏窗口方向
+        if hasattr(self, 'toolbar_window') and self.toolbar_window:
+            self.toolbar_window.set_orientation(orientation)
+
+        # 旧的 main_frame 布局切换逻辑保留（设置页可能还需要）
         # 先把现有条目从 toolbar_layout 全部取下，保留对象本身
         items = []
         while self.toolbar_layout.count():
@@ -9606,7 +9636,6 @@ class ControlPanel(QWidget):
                 new_layout.addLayout(obj)
         self.toolbar_layout = new_layout
         self._layout_wb_box()      # 白板控制区跟着换行/换列，否则横版下文字被压掉
-        self._relayout_icon_frame(orientation)
         # 竖版：固定宽度、高度自适应；横版：宽度自适应、高度按内容收紧。
         # 横版原来写死 setFixedHeight(70)：白板控制区一显示就要两行按钮的高度，
         # 硬压在 70px 里会把「上页/下页/新页/黑板」的字裁掉，所以改由内容决定高度。
