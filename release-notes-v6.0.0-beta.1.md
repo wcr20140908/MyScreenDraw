@@ -41,7 +41,7 @@ This is the **first beta release** of MyScreenDraw v6, featuring a completely re
 2. Extract to Desktop/drive/USB
 3. Run MyScreenDraw.exe
 
-**SHA-256**: 86abc216c7df206c289da9664f113af204b14206b755e5410c7d8ff5bde4d33d
+**SHA-256**: a5129f81bf0476ef511d4c16ed942c86bdaf76807bb6e6f4f8b069e27a905c8b
 
 ## 🐛 Feedback
 Report issues at: https://github.com/wcr20140908/MyScreenDraw/issues
