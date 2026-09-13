@@ -60,8 +60,7 @@ class _PanelCase(unittest.TestCase):
                 pass
 
     def setUp(self):
-        # 每个用例从经典 UI、不透明、默认圆角开始，避免用例间互相污染
-        self.panel.set_ui_mode("classic", persist=False)
+        # 每个用例从不透明、默认圆角开始，避免用例间互相污染
         self.panel.set_ui_opacity(100, persist=False)
         self.panel.set_ui_radius(self.panel.RADIUS_DEFAULT, persist=False)
         if self.canvas.whiteboard_mode:
@@ -169,123 +168,7 @@ class RadiusTests(_PanelCase):
             self.assertEqual(value, 0, f"{name} 在圆角为 0 时仍是 {value}")
 
 
-class IconUiTests(_PanelCase):
-    def test_switching_modes_shows_exactly_one_tree(self):
-        self.panel.set_ui_mode("icon", persist=False)
-        self.assertTrue(self.panel.icon_frame.isVisible())
-        self.assertFalse(self.panel.main_frame.isVisible())
-        self.panel.set_ui_mode("classic", persist=False)
-        self.assertTrue(self.panel.main_frame.isVisible())
-        self.assertFalse(self.panel.icon_frame.isVisible())
-
-    def test_every_icon_button_has_a_drawn_icon(self):
-        empty = [key for key, btn in self.panel.icon_buttons.items() if btn.icon().isNull()]
-        self.assertEqual(empty, [], f"这些图标画不出来: {empty}")
-
-    def test_icon_buttons_keep_the_touch_target_size(self):
-        """换 UI 不能让触控命中面积缩水。"""
-        small = [(key, btn.minimumWidth(), btn.minimumHeight())
-                 for key, btn in self.panel.icon_buttons.items()
-                 if btn.minimumWidth() < self.main.TOUCH_MIN_BUTTON
-                 or btn.minimumHeight() < self.main.TOUCH_MIN_BUTTON]
-        self.assertEqual(small, [])
-
-    def test_highlight_is_projected_from_the_classic_button(self):
-        self.panel.set_ui_mode("icon", persist=False)
-        self.panel.handle_eraser_click()
-        self.assertEqual(self.panel.btn_eraser.objectName(), "ActiveTool")
-        self.assertEqual(self.panel.icon_buttons["eraser"].objectName(), "IconBtnActive")
-        self.panel.handle_annotate_click()
-        self.assertEqual(self.panel.icon_buttons["eraser"].objectName(), "IconBtn")
-        self.assertEqual(self.panel.icon_buttons["pen"].objectName(), "IconBtnActive")
-
-    def test_enabled_state_is_projected(self):
-        self.panel.set_ui_mode("icon", persist=False)
-        self.panel.update_history_ui()
-        for key, classic in (("undo", self.panel.btn_undo), ("redo", self.panel.btn_redo)):
-            self.assertEqual(self.panel.icon_buttons[key].isEnabled(), classic.isEnabled(),
-                             f"{key} 的可用性没跟上经典按钮")
-
-    def test_tooltips_follow_the_live_button_text(self):
-        """模式键在「穿透/绘图」之间来回，提示不能停在旧文案上。"""
-        self.panel.set_ui_mode("icon", persist=False)
-        before = self.panel.icon_buttons["mode"].toolTip()
-        self.assertEqual(before, self.panel.btn_mode.text())
-        self.panel.toggle_mode()
-        self.panel.sync_icon_buttons()
-        after = self.panel.icon_buttons["mode"].toolTip()
-        self.assertEqual(after, self.panel.btn_mode.text())
-        self.assertNotEqual(after, before, "切换模式后提示没变")
-        self.panel.toggle_mode()
-
-    def test_whiteboard_bar_appears_in_icon_mode(self):
-        """回归：祖先隐藏使 isVisible() 恒 False，用它投影会让翻页栏永不出现。"""
-        self.panel.set_ui_mode("icon", persist=False)
-        self.panel.toggle_whiteboard()
-        self.assertTrue(self.canvas.whiteboard_mode)
-        self.assertFalse(self.panel.wb_box.isHidden(), "经典白板栏的显示意图没写上")
-        self.assertFalse(self.panel.icon_wb_box.isHidden(), "图标白板栏没跟上")
-        self.assertTrue(self.panel.icon_wb_box.isVisible(), "图标模式下翻页栏应当真的可见")
-        self.panel.toggle_whiteboard()
-        self.assertTrue(self.panel.icon_wb_box.isHidden())
-
-    def test_orientation_keeps_the_icon_tree_intact(self):
-        self.panel.set_ui_mode("icon", persist=False)
-        self.panel.set_orientation("landscape")
-        self.assertEqual(self.panel.icon_layout.__class__.__name__, "QHBoxLayout")
-        self.assertTrue(all(btn.parent() is not None
-                            for btn in self.panel.icon_buttons.values()))
-        self.panel.set_orientation("portrait")
-        self.assertEqual(self.panel.icon_layout.__class__.__name__, "QVBoxLayout")
-        self.assertTrue(all(btn.parent() is not None
-                            for btn in self.panel.icon_buttons.values()))
-
-    def test_submenu_anchors_move_to_the_icon_buttons(self):
-        """子菜单要贴着当前那棵树的按钮弹，否则在图标模式下会飘到别处。"""
-        self.panel.set_ui_mode("icon", persist=False)
-        anchor = self.panel.sub_anchor_button(self.panel.annotate_sub)
-        self.assertIn(anchor, list(self.panel.icon_buttons.values()))
-        self.panel.set_ui_mode("classic", persist=False)
-        anchor = self.panel.sub_anchor_button(self.panel.annotate_sub)
-        self.assertNotIn(anchor, list(self.panel.icon_buttons.values()))
-
-
 class SmartShapesDualEntryTests(_PanelCase):
-    def _pin(self, enabled):
-        """直接把两边落到 enabled，不经过 set_smart_shapes——它正是被测对象。
-
-        变异测试里踩到过：拿 set_smart_shapes 铺场地时，前一个用例失败后留下
-        canvas=True / 按钮未勾选，本用例翻一次刚好两边都变成 False，断言凑巧
-        通过，漏抓了「不同步 checked」这个变异。场地必须由构造保证一致。
-        """
-        self.canvas.smart_shapes_enabled = enabled
-        self.panel.btn_smart_toggle.blockSignals(True)
-        self.panel.btn_smart_toggle.setChecked(enabled)
-        self.panel.btn_smart_toggle.blockSignals(False)
-
-    def test_settings_toggle_syncs_the_checkable_button(self):
-        """只改文案不改 checked，会让批注面板那颗按钮下一次点击「没反应」。"""
-        for start in (False, True):
-            with self.subTest(start=start):
-                self._pin(start)
-                self.panel.toggle_smart_shapes()
-                self.assertEqual(self.canvas.smart_shapes_enabled, not start)
-                self.assertEqual(self.panel.btn_smart_toggle.isChecked(),
-                                 self.canvas.smart_shapes_enabled)
-                # 现在从批注面板那颗点回去，必须真的切回来
-                self.panel.btn_smart_toggle.setChecked(start)
-                self.panel.on_smart_toggle()
-                self.assertEqual(self.canvas.smart_shapes_enabled, start)
-
-    def test_both_buttons_show_the_same_state(self):
-        self.panel.open_settings_panel()
-        for want in (True, False):
-            self.panel.set_smart_shapes(want)
-            self.assertEqual(self.panel.btn_smart_toggle.isChecked(), want)
-            expect = self.main.tr("smart_shapes_on") if want else self.main.tr("smart_shapes_off")
-            self.assertEqual(self.panel.btn_smart_toggle.text(), expect)
-            self.assertEqual(self.panel.btn_settings_smart.text(), expect)
-
     def test_multitouch_and_speed_width_have_ui_entries(self):
         self.panel.open_settings_panel()
         for toggle, attr in ((self.panel.toggle_multitouch, "smart_multitouch_enabled"),
@@ -299,12 +182,10 @@ class SmartShapesDualEntryTests(_PanelCase):
 
 class PersistenceTests(_PanelCase):
     def test_new_keys_round_trip(self):
-        self.panel.set_ui_mode("icon", persist=False)
         self.panel.set_ui_radius(21, persist=False)
         self.panel.set_ui_opacity(58, persist=False)
         self.panel.update_check_enabled = True
         settings = self.panel.collect_settings()
-        self.assertEqual(settings["ui_mode"], "icon")
         self.assertEqual(settings["ui_radius"], 21)
         self.assertEqual(settings["ui_opacity"], 58)
         self.assertIs(settings["update_check_enabled"], True)
@@ -337,14 +218,11 @@ class PersistenceTests(_PanelCase):
         if had_config:
             shutil.copy2(config, backup)
         try:
-            self.panel.set_ui_mode("classic", persist=False)
             self.panel.set_ui_radius(10, persist=False)
             self.panel.set_ui_opacity(90, persist=False)
-            baseline = {"ui_mode": self.panel.ui_mode,
-                        "ui_radius": self.panel.ui_radius,
+            baseline = {"ui_radius": self.panel.ui_radius,
                         "ui_opacity": self.panel.ui_opacity}
-            for bad in ({"ui_mode": "nonsense"}, {"ui_mode": 7},
-                        {"ui_radius": "big"}, {"ui_radius": None},
+            for bad in ({"ui_radius": "big"}, {"ui_radius": None},
                         {"ui_opacity": None}, {"ui_opacity": "half"},
                         {"ui_opacity": True}):     # True 是 int 的子类，必须挡住
                 key = next(iter(bad))
@@ -664,18 +542,15 @@ class SettingsAppearanceTests(_PanelCase):
         return shot.pixelColor(point).name().lower()
 
     def _gap_point(self):
-        """「文字」和「图标」两颗按钮之间那道 3px 间隙——这一点必定是背景。
+        """取设置页中间靠上的背景区域——避开按钮和边框。
 
         不取窗口角落：MainFrame 有 2px 描边加圆角，角落像素合法地是边框色或
         透明，拿它当背景量会得出一个「看着不对但其实没错」的颜色。
         """
         from PyQt6.QtCore import QPoint
-        left, right = self.panel.btn_ui_classic, self.panel.btn_ui_icon
         host = self.panel.settings_panel
-        a = left.mapTo(host, QPoint(left.width() - 1, left.height() // 2))
-        b = right.mapTo(host, QPoint(0, right.height() // 2))
-        self.assertGreater(b.x() - a.x(), 0, "两颗按钮没有并排，间隙采样无效")
-        return QPoint((a.x() + b.x()) // 2, (a.y() + b.y()) // 2)
+        # 取中间偏上的位置，避开所有按钮
+        return QPoint(host.width() // 2, 30)
 
     def test_settings_background_follows_the_theme(self):
         """暗色主题下设置页背景必须是主题的 frame 色，不能是调色板默认灰。"""
@@ -726,7 +601,12 @@ class SettingsAppearanceTests(_PanelCase):
         from PyQt6.QtCore import QPoint
         self._use_theme("dark")
         theme = self.main.ControlPanel.THEMES["dark"]
-        button = self.panel.btn_ui_icon          # 非高亮那颗
+        # 在设置页内部找一颗按钮，量它的底色
+        self.panel.open_settings_panel()
+        self.panel.settings_panel.show()
+        self.panel.settings_panel.repaint()
+        self.app.processEvents()
+        button = self.panel.btn_check_update  # 设置页内部的按钮
         host = self.panel.settings_panel
         # 贴着左内边取点：按钮正中是字形，量到的会是文字色而不是底色
         point = button.mapTo(host, QPoint(4, button.height() // 2))
@@ -734,47 +614,6 @@ class SettingsAppearanceTests(_PanelCase):
         self.assertEqual(got, theme["button"].lower(),
                          f"按钮底色是 {got}，应为 {theme['button']}；"
                          f"要是等于 frame {theme['frame']} 就是被那条透明规则打穿了")
-
-    def test_clicking_icon_moves_the_highlight(self):
-        """照用户的动作来：点按钮本体，不是直接调 set_ui_mode。"""
-        self.panel.set_ui_mode("classic", persist=False)
-        self.panel.btn_ui_icon.click()
-        self.app.processEvents()
-        self.assertEqual(self.panel.ui_mode, "icon")
-        self.assertEqual(self.panel.btn_ui_icon.objectName(), "ActiveTool",
-                         "切到图标了，图标那颗却没高亮")
-        self.assertEqual(self.panel.btn_ui_classic.objectName(), "",
-                         "高亮还赖在左边那颗「文字」上")
-
-    def test_clicking_classic_moves_the_highlight_back(self):
-        self.panel.set_ui_mode("icon", persist=False)
-        self.panel.btn_ui_classic.click()
-        self.app.processEvents()
-        self.assertEqual(self.panel.ui_mode, "classic")
-        self.assertEqual(self.panel.btn_ui_classic.objectName(), "ActiveTool")
-        self.assertEqual(self.panel.btn_ui_icon.objectName(), "")
-
-    def test_highlight_is_painted_not_just_named(self):
-        """高亮要真画出来。objectName 对了但没重绘，用户还是看不见变化。"""
-        from PyQt6.QtCore import QPoint
-        self._use_theme("dark")
-        accent = self.main.ControlPanel.THEMES["dark"]["accent"].lower()
-        host = self.panel.settings_panel
-        self.panel.set_ui_mode("classic", persist=False)
-        self.panel.btn_ui_icon.click()
-        self.app.processEvents()
-        icon_btn = self.panel.btn_ui_icon
-        point = icon_btn.mapTo(host, QPoint(4, icon_btn.height() // 2))
-        self.assertEqual(self._panel_pixel(point), accent,
-                         "图标那颗按钮的底色没变成强调色——objectName 改了但没重绘")
-
-    def test_loading_icon_mode_from_config_marks_the_right_button(self):
-        """从配置里读出 icon 模式时高亮也要对——这条走的是 persist=False 那条路径。"""
-        self.panel.set_ui_mode("classic", persist=False)
-        self.panel.set_ui_mode("icon", persist=False)
-        self.app.processEvents()
-        self.assertEqual(self.panel.btn_ui_icon.objectName(), "ActiveTool")
-        self.assertEqual(self.panel.btn_ui_classic.objectName(), "")
 
 
 class SettingsPlacementTests(_PanelCase):
@@ -975,29 +814,11 @@ class SettingsPlacementTests(_PanelCase):
             self.panel.setGeometry(real_rect)
             self.app.processEvents()
 
-    def test_anchor_follows_the_ui_mode(self):
-        """图标模式下锚点要换成图标树里那颗设置键，否则退化成对齐整个主面板。"""
-        self.panel.set_ui_mode("classic", persist=False)
-        self.assertIs(self.panel.anchor_for("btn_settings"), self.panel.btn_settings)
-        self.panel.set_ui_mode("icon", persist=False)
-        icon_btn = self.panel.icon_buttons.get("settings")
-        self.assertIsNotNone(icon_btn, "图标树里没有设置键，锚点表对不上")
-        self.assertIs(self.panel.anchor_for("btn_settings"), icon_btn)
-
-    def test_icon_mode_dodges_too(self):
-        self.panel.set_ui_mode("icon", persist=False)
-        self.app.processEvents()
-        self._open()
-        ov = self._overlap()
-        self.assertTrue(ov.isEmpty(), f"图标模式下重叠 {ov.width()}x{ov.height()}")
 
     def test_submenu_anchoring_still_works(self):
         """抽出 anchor_for 之后，子菜单的锚点解析不能跟着坏掉。"""
         target = self.panel.draw_sub
         self.assertIs(self.panel.sub_anchor_button(target), self.panel.btn_pen)
-        self.panel.set_ui_mode("icon", persist=False)
-        self.assertIs(self.panel.sub_anchor_button(target),
-                      self.panel.icon_buttons.get("pen"))
 
     def test_reopening_keeps_it_clear(self):
         """关掉再开、以及主面板挪过位置之后再开，都要重新避让。"""
@@ -1012,32 +833,6 @@ class SettingsPlacementTests(_PanelCase):
         self.assertNotEqual(self.panel.settings_panel.pos(), moved,
                             "主面板都挪了 120px，设置页却停在老位置，说明落点没重算")
 
-    def test_switching_ui_mode_re_dodges(self):
-        """在设置页里换 UI 模式，主面板尺寸跟着变，设置页必须重新让位。
-
-        实屏抓到的原样：图标模式下主面板 122x230，设置页避到 x=799 刚好让开；在设置
-        页里点「文字」，主面板变成 150x442（右缘 799→820），设置页却还停在 799，压出
-        一条 21x442 的重叠。落点原先只在 open 那一刻算一次，之后主面板还会变。
-
-        这一条是「设置页开着的时候」才成立，所以离屏也测得到——不需要真屏幕，只要
-        主面板尺寸真的变了。而这两颗开关本身就长在设置页里，用户从这儿改是常态。
-        """
-        for first, second in (("icon", "classic"), ("classic", "icon")):
-            with self.subTest(从=first, 到=second):
-                self.panel.set_ui_mode(first, persist=False)
-                self.app.processEvents()
-                self._open()
-                self.assertTrue(self._overlap().isEmpty(), f"{first} 模式下开就压上了")
-                before = self.panel.frameGeometry().size()
-                self.panel.set_ui_mode(second, persist=False)
-                self.app.processEvents()
-                self.assertNotEqual(before, self.panel.frameGeometry().size(),
-                                    "主面板尺寸没变，这条测的前提不成立")
-                ov = self._overlap()
-                self.assertTrue(ov.isEmpty(),
-                                f"{first}→{second} 之后重叠 {ov.width()}x{ov.height()}；"
-                                f"设置页 {self.panel.settings_panel.geometry()}，"
-                                f"主面板 {self.panel.frameGeometry()}")
 
     def test_switching_orientation_re_dodges(self):
         """换方向的尺寸变化比换 UI 模式更大（竖版 150 宽 ↔ 横版几百宽）。

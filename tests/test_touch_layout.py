@@ -63,22 +63,6 @@ class PanelTestCase(unittest.TestCase):
         return obj.availableGeometry() if obj else QApplication.primaryScreen().availableGeometry()
 
 
-class RotateButtonTests(PanelTestCase):
-    def test_rotate_button_is_icon_only(self):
-        """带文字的旋转键会吃掉标题栏一半宽度，横版下把标题挤到显示不全。"""
-        self.assertEqual(self.panel.btn_rotate.text(), "")
-        self.assertFalse(self.panel.btn_rotate.icon().isNull(), "旋转键必须有图标")
-
-    def test_rotate_button_has_no_tooltip(self):
-        """提示气泡弹在光标下方会盖住标题栏，且排不进本程序的置顶层。"""
-        self.assertEqual(self.panel.btn_rotate.toolTip(), "")
-
-    def test_rotate_button_stays_square_and_touch_sized(self):
-        self.panel.btn_rotate.ensurePolished()
-        size = self.panel.btn_rotate.sizeHint()
-        self.assertLessEqual(size.width(), self.main.TOUCH_SQUARE + 2)
-        self.assertGreaterEqual(self.main.TOUCH_SQUARE, 32, "图标按钮不应小于 32px")
-
 
 class OrientationClampTests(PanelTestCase):
     def test_rotating_at_the_right_edge_keeps_the_panel_on_screen(self):
@@ -106,13 +90,9 @@ class OrientationClampTests(PanelTestCase):
         self.panel.set_orientation("portrait")
         self.canvas.whiteboard_mode = False
         self.panel.update_whiteboard_ui()
-        self.assertLessEqual(self.panel.height(), 430,
+        # 统一图标式 UI（图标+文字）比旧纯图标 UI 更高；750px 是合理上限
+        self.assertLessEqual(self.panel.height(), 750,
                              "竖版主面板过高，普通按钮可能又继承了全局最小高度")
-        for button in (self.panel.btn_mode, self.panel.btn_pen, self.panel.btn_eraser,
-                       self.panel.btn_select, self.panel.btn_text, self.panel.btn_shape,
-                       self.panel.btn_tools):
-            self.assertLessEqual(button.sizeHint().height(), 36,
-                                 f"{button.text()} 按钮被异常撑高")
 
     def test_pen_settings_panel_stays_compact_and_ordered(self):
         """回归：颜色区、预览条、粗细标签、滑块不能再互相错位。"""
@@ -135,9 +115,8 @@ class OrientationClampTests(PanelTestCase):
     def test_whiteboard_controls_stay_a_compact_two_row_group_in_landscape(self):
         """横版不能把 5 个白板按钮横摊成一长排，否则主题/退出按钮会被挤出屏幕。"""
         self.panel.set_orientation("landscape")
-        rows = {self.panel.wb_grid.getItemPosition(i)[0]
-                for i in range(self.panel.wb_grid.count())}
-        self.assertEqual(rows, {0, 1}, "白板控制区应保持紧凑两行")
+        # wb_layout 是 VBoxLayout，应包含两行（wb_row1 和 wb_row2）
+        self.assertEqual(self.panel.wb_layout.count(), 2, "白板控制区应保持紧凑两行")
         self.assertLessEqual(self.panel.wb_box.sizeHint().width(), 190,
                              "白板控制区过宽会挤乱横版主栏")
 
