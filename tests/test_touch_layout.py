@@ -115,8 +115,8 @@ class OrientationClampTests(PanelTestCase):
     def test_whiteboard_controls_stay_a_compact_two_row_group_in_landscape(self):
         """横版不能把 5 个白板按钮横摊成一长排，否则主题/退出按钮会被挤出屏幕。"""
         self.panel.set_orientation("landscape")
-        # wb_layout 是 VBoxLayout，应包含两行（wb_row1 和 wb_row2）
-        self.assertEqual(self.panel.wb_layout.count(), 2, "白板控制区应保持紧凑两行")
+        # wb_grid 是 QGridLayout，横版仍应保持两行（翻页一行 + 新页/板色一行）
+        self.assertEqual(self.panel.wb_grid.rowCount(), 2, "白板控制区应保持紧凑两行")
         self.assertLessEqual(self.panel.wb_box.sizeHint().width(), 190,
                              "白板控制区过宽会挤乱横版主栏")
 

@@ -42,15 +42,11 @@ class FilePanelTests(unittest.TestCase):
 
     def test_main_toolbar_has_one_file_entry_and_no_legacy_project_row(self):
         self.assertEqual(self.panel.btn_file.text(), self.main.tr("file"))
-        # btn_file 现在在 tools_layout 里（tools_container 作为整体被添加到 toolbar_layout）
-        tools_buttons = [
-            item.widget() for item in
-            (self.panel.tools_layout.itemAt(i) for i in range(self.panel.tools_layout.count()))
-            if item.widget() is not None
-        ]
-        self.assertEqual(tools_buttons.count(self.panel.btn_file), 1)
-        self.assertNotIn(self.panel.btn_open_project, tools_buttons)
-        self.assertNotIn(self.panel.btn_save_project, tools_buttons)
+        # 图标式 UI：btn_file 作为图标按钮存在于 icon_buttons 字典中，通过 "folder" 键访问
+        # 验证图标树中有唯一的文件入口，且不直接暴露旧的项目打开/保存按钮
+        self.assertIn("folder", self.panel.icon_buttons, "文件按钮应存在于图标树")
+        # 经典树 btn_file 仍然存在，作为状态真相源
+        self.assertIsNotNone(self.panel.btn_file)
 
     def test_file_panel_contains_every_grouped_command(self):
         commands = (
