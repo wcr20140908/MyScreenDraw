@@ -29,6 +29,8 @@ def _build_panel():
     panel = main.ControlPanel()
     canvas = main.DrawingCanvas(panel)
     panel.canvas = canvas
+    # 分体设计：需要显示工具栏窗口
+    panel.set_ui_mode("icon", persist=False)
     panel.show()
     return app, main, panel, canvas
 
@@ -148,12 +150,20 @@ class SubMenuAnchorTests(PanelTestCase):
         screen = self.screen()
         self.panel.move(screen.left() + 20, screen.top() + 20)
         menu = self.open_shape_sub()
-        button = self.panel.btn_shape
+        # 分体设计：使用anchor_for获取当前UI模式下实际可见的按钮
+        button = self.panel.anchor_for("btn_shape")
+        if button is None or not button.isVisible():
+            button = self.panel.btn_shape
         button_center = button.mapToGlobal(button.rect().center()).x()
         menu_center = menu.x() + menu.width() / 2
         self.assertLess(abs(menu_center - button_center), max(60, menu.width() / 2),
                         "子菜单没有对齐到触发它的功能键")
-        self.assertGreaterEqual(menu.y(), self.panel.y() + self.panel.height() - 2)
+        # 分体设计：需要检查menu相对于toolbar_window的位置
+        if hasattr(self.panel, 'toolbar_window') and self.panel.toolbar_window.isVisible():
+            ref_y = self.panel.toolbar_window.y() + self.panel.toolbar_window.height()
+        else:
+            ref_y = self.panel.y() + self.panel.height()
+        self.assertGreaterEqual(menu.y(), ref_y - 2)
 
     def test_landscape_submenu_flips_above_a_bottom_docked_panel(self):
         """面板停在屏幕下方时，子菜单往下开就会盖住主菜单，必须翻到上方。"""
@@ -175,16 +185,22 @@ class SubMenuAnchorTests(PanelTestCase):
         screen = self.screen()
         self.panel.move(screen.left() + 20, screen.top() + 20)
         menu = self.open_shape_sub()
-        button_top = self.panel.btn_shape.mapToGlobal(self.panel.btn_shape.rect().topLeft()).y()
+        # 分体设计：使用anchor_for获取当前UI模式下实际可见的按钮
+        actual_button = self.panel.anchor_for("btn_shape")
+        if actual_button is None or not actual_button.isVisible():
+            actual_button = self.panel.btn_shape
+        button_top = actual_button.mapToGlobal(actual_button.rect().topLeft()).y()
         self.assertLess(abs(menu.y() - button_top), 40, "子菜单没有与功能键同高")
 
     def test_dragging_the_panel_moves_an_open_submenu(self):
         """子菜单展开时拖动主面板，子菜单必须跟着走而不是钉在原地。"""
         screen = self.screen()
-        self.panel.move(screen.left() + 20, screen.top() + 20)
+        # 图标模式下拖动toolbar_window，经典模式拖动主面板
+        toolbar = self.panel.toolbar_window
+        toolbar.move(screen.left() + 20, screen.top() + 20)
         menu = self.open_shape_sub()
         before = (menu.x(), menu.y())
-        self.panel.move(screen.left() + 20, screen.top() + 200)
+        toolbar.move(screen.left() + 20, screen.top() + 200)
         self.panel.position_menu_panel()
         self.assertNotEqual(before, (menu.x(), menu.y()))
 

@@ -797,10 +797,16 @@ class SettingsPlacementTests(_PanelCase):
         real_rect = self.panel.geometry()
         # 主面板 150x394 摆在 y=20：上方空地 13px（正数但远不够用），下方是负数，
         # 左右两侧都不到 300 宽——四块空地全废，只能退回原高度。
-        self.panel.setGeometry(100, 20, 150, 394)
+        fake = QRect(0, 0, 400, 400)
+        fake_panel_geo = QRect(100, 20, 150, 394)
+        real_geo = self.panel.screen_geometry
+        real_panel_geo = self.panel.geometry
+        real_frame_geo = self.panel.frameGeometry
+        # 在offscreen模式下setGeometry不生效，直接mock geometry()和frameGeometry()
+        self.panel.geometry = lambda: fake_panel_geo
+        self.panel.frameGeometry = lambda: fake_panel_geo
         self.panel.screen_geometry = lambda *_a, **_k: fake
         try:
-            self.app.processEvents()
             x, y, height = self.panel._dodge_main_panel(300, 600, gap=8)
             self.assertGreaterEqual(
                 height, usable,
@@ -811,14 +817,26 @@ class SettingsPlacementTests(_PanelCase):
                              f"四块空地都不够用，却还是压矮到 {height}px 摆了出去")
         finally:
             self.panel.screen_geometry = real_geo
-            self.panel.setGeometry(real_rect)
+            self.panel.geometry = real_panel_geo
+            self.panel.frameGeometry = real_frame_geo
             self.app.processEvents()
 
 
     def test_submenu_anchoring_still_works(self):
-        """抽出 anchor_for 之后，子菜单的锚点解析不能跟着坏掉。"""
+        """抽出 anchor_for 之后，子菜单的锚点解析不能跟着坏掉。
+
+        icon模式下返回icon_buttons["pen"]，classic模式下返回btn_pen。
+        """
         target = self.panel.draw_sub
-        self.assertIs(self.panel.sub_anchor_button(target), self.panel.btn_pen)
+        result = self.panel.sub_anchor_button(target)
+        # 在icon模式下应该返回图标按钮，而不是经典按钮
+        if self.panel.ui_mode == "icon":
+            expected = self.panel.icon_buttons.get("pen")
+            self.assertIs(result, expected,
+                          f"icon模式下应返回icon_buttons['pen']，实际返回{result}")
+        else:
+            self.assertIs(result, self.panel.btn_pen,
+                          f"classic模式下应返回btn_pen，实际返回{result}")
 
     def test_reopening_keeps_it_clear(self):
         """关掉再开、以及主面板挪过位置之后再开，都要重新避让。"""

@@ -17,7 +17,7 @@ import json
 import tempfile
 from pathlib import Path
 
-from PyQt6.QtWidgets import QSystemTrayIcon, QMenu, QMessageBox
+from PyQt6.QtWidgets import QSystemTrayIcon, QMenu, QMessageBox, QWidgetAction, QLabel
 from PyQt6.QtGui import QAction, QIcon, QPainter, QColor, QFont
 from PyQt6.QtCore import Qt, QTimer
 
@@ -69,10 +69,9 @@ class AppLifecycleManager:
                   file=sys.stderr)
             return
 
-        # 托盘图标：使用原创LOGO
-        from ui_icons import make_ui_pixmap
-        icon_pixmap = make_ui_pixmap("logo", "#5b8def", 64, dpr=2.0)
-        self.tray_icon = QSystemTrayIcon(QIcon(icon_pixmap), self.app)
+        # 托盘图标：使用主面板的LOGO生成方法，确保颜色一致
+        logo_icon = self.panel._make_logo_icon(size=64)
+        self.tray_icon = QSystemTrayIcon(logo_icon, self.app)
 
         # 左键单击：恢复完整主界面
         self.tray_icon.activated.connect(self._on_tray_activated)
@@ -134,27 +133,66 @@ class AppLifecycleManager:
 
         self.tray_icon.setContextMenu(self.tray_menu)
 
+        # 应用样式：每个action单独设置颜色
+        self._apply_menu_colors()
+
     def _tr(self, key):
         """翻译函数包装器"""
         from main import tr
         return tr(key)
 
     def _style_action(self, action, color, bold):
-        """给菜单项设置颜色和粗体
-
-        QAction本身不支持直接设置前景色，但通过HTML富文本可以实现。
-        """
+        """给菜单项设置颜色和粗体"""
         font = QFont()
         font.setBold(bold)
         action.setFont(font)
 
-        # 使用HTML设置颜色
-        text = action.text()
-        if bold:
-            styled_text = f'<span style="color:{color};font-weight:bold;">{text}</span>'
-        else:
-            styled_text = f'<span style="color:{color};">{text}</span>'
-        action.setText(styled_text)
+        # 存储颜色信息，稍后通过样式表统一设置
+        action.setProperty("menu_color", color)
+        action.setProperty("menu_bold", bold)
+
+    def _apply_menu_colors(self):
+        """应用菜单颜色：通过单独的样式表设置每个action"""
+        # 为每个有颜色属性的action创建自定义widget
+        for action in self.tray_menu.actions():
+            if action.isSeparator():
+                continue
+            color = action.property("menu_color")
+            if color:
+                # 使用QWidgetAction包装，可以完全自定义样式
+                text = action.text()
+                bold = action.property("menu_bold")
+
+                # 创建一个标签显示文本
+                label = QLabel(text)
+                label.setStyleSheet(f"""
+                    QLabel {{
+                        color: {color};
+                        font-weight: {'bold' if bold else 'normal'};
+                        padding: 4px 20px;
+                        background: transparent;
+                    }}
+                    QLabel:hover {{
+                        background: #e0e0e0;
+                    }}
+                """)
+                label.setMinimumHeight(24)
+
+                # 创建widget action替换原action
+                widget_action = QWidgetAction(self.tray_menu)
+                widget_action.setDefaultWidget(label)
+
+                # 保持原来的triggered信号
+                def make_trigger(orig_action):
+                    def trigger():
+                        orig_action.trigger()
+                    return trigger
+
+                label.mousePressEvent = lambda e, fn=make_trigger(action): (fn(), self.tray_menu.hide())
+
+                # 替换action
+                self.tray_menu.insertAction(action, widget_action)
+                self.tray_menu.removeAction(action)
 
     def _on_tray_activated(self, reason):
         """托盘图标激活：左键单击恢复完整主界面"""
@@ -306,15 +344,20 @@ class AppLifecycleManager:
             return
 
         # 安全结束未完成输入
-        if hasattr(self.panel, 'canvas') and self.panel.canvas.editing_text_item():
+        if hasattr(self.panel, 'canvas') and self.panel.canvas and self.panel.canvas.editing_text_item():
             self.panel.canvas.end_text_edit(discard_empty=True)
 
         # 进入穿透模式
         self.panel.set_drawing_mode(False)
 
-        # 隐藏所有窗口
-        self.panel.canvas.hide()
+        # 隐藏所有窗口（包括分体窗口）
+        if self.panel.canvas:
+            self.panel.canvas.hide()
         self.panel.hide()
+        if hasattr(self.panel, 'logo_window') and self.panel.logo_window:
+            self.panel.logo_window.hide()
+        if hasattr(self.panel, 'toolbar_window') and self.panel.toolbar_window:
+            self.panel.toolbar_window.hide()
         if hasattr(self.panel, 'settings_panel') and self.panel.settings_panel:
             self.panel.settings_panel.hide()
         # 隐藏所有子菜单
@@ -343,9 +386,17 @@ class AppLifecycleManager:
         if self.state == LifecycleState.SHOWING:
             return
 
-        # 恢复显示
-        self.panel.canvas.show()
-        self.panel.show()
+        # 恢复显示（包括分体窗口）
+        if self.panel.canvas:
+            self.panel.canvas.show()
+        if hasattr(self.panel, 'logo_window') and self.panel.logo_window:
+            self.panel.logo_window.show()
+            self.panel.logo_window.raise_()
+        if hasattr(self.panel, 'toolbar_window') and self.panel.toolbar_window:
+            self.panel.toolbar_window.show()
+            self.panel.toolbar_window.raise_()
+        # main_frame 不显示（图标模式）
+        # self.panel.show()  # 不需要显示主面板本身
         self.panel.raise_()
         self.panel.activateWindow()
 
