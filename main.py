@@ -279,11 +279,12 @@ import formula
 import touch_keyboard
 from i18n import tr, trf, CURRENT
 import eps_export
+from app_lifecycle import AppLifecycleManager, LifecycleState
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QLabel, QPushButton,
                              QVBoxLayout, QHBoxLayout, QWidget, QFrame, QGridLayout, QColorDialog, QSlider,
                              QInputDialog, QMessageBox, QMenu, QFileDialog, QLineEdit, QTextEdit, QListWidget,
                              QAbstractItemView, QSizePolicy, QListWidgetItem, QDialog, QDoubleSpinBox,
-                             QScroller, QToolTip, QScrollArea, QToolButton, QSystemTrayIcon)
+                             QScroller, QToolTip, QScrollArea, QToolButton)
 from PyQt6.QtCore import (Qt, QPoint, QPointF, QRectF, QTimer, QTranslator, QLibraryInfo, QLine, pyqtSignal, QLocale, QEvent,
                           QSizeF, QMarginsF, QEventLoop, QSize, QUrl, QBuffer, QIODevice, QThread)
 from PyQt6.QtGui import (QPainter, QPen, QColor, QFont, QPainterPath, QFontMetricsF, QTransform, QPolygonF,
@@ -7006,6 +7007,9 @@ class DrawingCanvas(QMainWindow):
         return True
 
     def _pointer_press(self, key, pos, pressure):
+        # 多指第一触也收起临时子菜单，与鼠标 mousePressEvent 对称
+        if self.panel:
+            self.panel.show_only_sub(None)
         with self._pointer_scope(key):
             self.current_pressure = max(0.05, float(pressure) or 1.0)
             self._cancel_smart_recognition(drop_pending=True)
@@ -7430,22 +7434,10 @@ class ControlPanel(QWidget):
         self.toolbar_layout.setSpacing(2) # 极致压缩上下间距
         self.toolbar_layout.setAlignment(Qt.AlignmentFlag.AlignTop) # 核心：垂直向上对齐，杜绝空缺
 
-        # 标题栏：应用名 + 版本 + 旋转（横竖切换）按钮。竖版下也在显眼位置，横版下作为标题
+        # 标题栏：应用名 + 版本（移除旋转按钮）
         title_row = QHBoxLayout(); title_row.setSpacing(4)
         self.title_label = QLabel(f" ⠿ {tr('app')} {APP_VERSION}")
         title_row.addWidget(self.title_label)
-        # 旋转键：纯图标、无文字。带文字时按钮要占掉标题栏一半宽度，横版下直接把
-        # 标题压得显示不全；同时不设 ToolTip——提示气泡会弹在光标正下方盖住标题栏，
-        # 而它作为独立顶层窗口又排不进本程序的置顶层，出现半截黑框的遮挡残影。
-        self.btn_rotate = QPushButton(); self.btn_rotate.setObjectName("RotateBtn")
-        self.btn_rotate.setFlat(True)
-        self.btn_rotate.setIconSize(QSize(20, 20))
-        # 图标在这里就先画一次：apply_theme() 在构造函数里跑得比本按钮还早，
-        # 只靠它设置的话，按钮会一直空到下一次切主题为止。
-        self.btn_rotate.setIcon(make_rotate_icon(self.theme["label"], 22))
-        self.btn_rotate.setAccessibleName(tr("rotate"))
-        self.btn_rotate.clicked.connect(self.toggle_orientation)
-        title_row.addWidget(self.btn_rotate)
         self.toolbar_layout.addLayout(title_row)
 
         self.btn_mode = QPushButton(tr("passthrough")); self.btn_mode.setObjectName("ModeBtn")
@@ -7529,7 +7521,7 @@ class ControlPanel(QWidget):
         self.thumbnail_panel.hide()
         self.thumbnail_panel.setStyleSheet(self.styleSheet())
 
-        self.btn_exit = QPushButton(tr("exit")); self.btn_exit.clicked.connect(QApplication.quit); self.toolbar_layout.addWidget(self.btn_exit)
+        self.btn_exit = QPushButton(tr("close_app")); self.btn_exit.clicked.connect(self.close_to_background); self.toolbar_layout.addWidget(self.btn_exit)
 
         # 1b. 图标主面板：与文字主面板【并存】的第二套 widget 树（见 build_icon_frame）
         self.build_icon_frame()
@@ -7658,6 +7650,11 @@ class ControlPanel(QWidget):
         self.listener = keyboard.Listener(on_press=self.on_global_key_press); self.listener.start()
         track_event("app_started", theme=self.theme_name)
 
+        # 初始化生命周期管理器（托盘、后台、退出/重启）
+        self.lifecycle = AppLifecycleManager(self)
+        # 禁用默认的关闭即退出行为
+        QApplication.instance().setQuitOnLastWindowClosed(False)
+
     def radius_tokens(self):
         """把「圆角」这一个用户可调值派生成样式表要用的一组半径。
 
@@ -7750,9 +7747,7 @@ class ControlPanel(QWidget):
             self.btn_theme.setText(tr("dark_theme") if self.theme_name == "light" else tr("light_theme"))
         if hasattr(self, "btn_exit"):
             self.btn_exit.setStyleSheet(f"background-color: {t['danger']}; color: white;")
-        if hasattr(self, "btn_rotate"):
-            # 图标按主题重绘：亮色主题下白色箭头会看不见
-            self.btn_rotate.setIcon(make_rotate_icon(t["label"], 22))
+        # 旋转按钮已移除
         self.repaint_ui_icons()
 
     # 图标主面板的按钮清单：(键, 图标名, 提示文案 key, 点击处理器属性名, 对应的经典按钮属性名)
@@ -7760,29 +7755,29 @@ class ControlPanel(QWidget):
     # 图标按钮只是它的投影，由 sync_icon_buttons() 单向同步过来。这样新增/修改功能时
     # 仍然只需要维护经典按钮那一套状态逻辑，不会出现两套树各记一半、彼此不一致。
     ICON_ACTIONS = (
-        ("mode",       "mode",       "passthrough", "toggle_mode",            "btn_mode"),
+        ("mode",       "mouse",      "passthrough", "toggle_mode",            "btn_mode"),
         ("pen",        "pen",        "annotate",    "handle_annotate_click",  "btn_pen"),
         ("eraser",     "eraser",     "eraser",      "handle_eraser_click",    "btn_eraser"),
         ("select",     "select",     "select",      "handle_select_click",    "btn_select"),
         ("text",       "text",       "text",        "handle_text_click",      "btn_text"),
         ("shape",      "shape",      "shape",       "handle_shape_click",     "btn_shape"),
         ("tools",      "tools",      "tools",       "handle_tools_click",     "btn_tools"),
-        ("file",       "file",       "file",        "handle_file_click",      "btn_file"),
+        ("folder",     "folder",     "file",        "handle_file_click",      "btn_file"),
         ("undo",       "undo",       "undo",        "undo",                   "btn_undo"),
         ("redo",       "redo",       "redo",        "redo",                   "btn_redo"),
         ("clear",      "clear",      "clear",       "clear",                  "btn_clear"),
         ("whiteboard", "whiteboard", "whiteboard",  "toggle_whiteboard",      "btn_whiteboard"),
         ("settings",   "settings",   "settings",    "open_settings_panel",    "btn_settings"),
-        ("exit",       "exit",       "exit",        None,                     "btn_exit"),
+        ("close",      "close",      "close_app",   "close_to_background",    "btn_exit"),
     )
 
     # 白板控制区在图标树里的对应按钮
     ICON_WB_ACTIONS = (
-        ("prev_page",   "prev",     "prev",      "_icon_prev_page",       "btn_prev_page"),
-        ("pages",       "pages",    "page_list", "toggle_thumbnail_panel", "page_label"),
-        ("next_page",   "next",     "next",      "_icon_next_page",       "btn_next_page"),
-        ("new_page",    "new_page", "new_page",  "new_whiteboard_page",   "btn_new_page"),
-        ("board_style", "board",    "board",     "toggle_board_style",    "btn_board_style"),
+        ("prev_page",   "page_prev",  "prev",      "_icon_prev_page",       "btn_prev_page"),
+        ("pages",       "whiteboard", "page_list", "toggle_thumbnail_panel", "page_label"),
+        ("next_page",   "page_next",  "next",      "_icon_next_page",       "btn_next_page"),
+        ("new_page",    "page_next",  "new_page",  "new_whiteboard_page",   "btn_new_page"),
+        ("board_style", "whiteboard", "board",     "toggle_board_style",    "btn_board_style"),
     )
 
     @staticmethod
@@ -7829,7 +7824,8 @@ class ControlPanel(QWidget):
         self.logo_button = QPushButton()
         self.logo_button.setObjectName("LogoButton")
         self.logo_button.setFixedSize(64, 64)
-        self.logo_button.setIcon(self._make_logo_icon(56))
+        from ui_icons import make_app_icon
+        self.logo_button.setIcon(make_app_icon())
         self.logo_button.setIconSize(QSize(56, 56))
         self.logo_button.setToolTip(tr("logo_hint"))
         self.logo_button.clicked.connect(self.toggle_collapsed)
@@ -7849,9 +7845,7 @@ class ControlPanel(QWidget):
             btn.setToolTip(tr(tip_key))
             btn.setAccessibleName(tr(tip_key))
             btn.setProperty("icon_name", icon_name)
-            if handler_name is None:            # exit 直接连 QApplication.quit
-                btn.clicked.connect(QApplication.quit)
-            else:
+            if handler_name:
                 btn.clicked.connect(getattr(self, handler_name))
             # 点完立刻把状态投影一遍：不等心跳，用户看到的高亮变化才是即时的
             btn.clicked.connect(self.sync_icon_buttons)
@@ -7915,18 +7909,20 @@ class ControlPanel(QWidget):
         self.switch_whiteboard_page(1)
 
     def _layout_icon_grid(self):
-        """按当前方向重排图标网格：竖版 3 列、横版 1 行。"""
+        """按当前方向重排图标网格：竖版严格单列、横版单行。"""
         for grid in (self.icon_grid, self.icon_wb_grid):
             while grid.count():
                 grid.takeAt(0)
         main_keys = [key for key, *_ in self.ICON_ACTIONS]
         wb_keys = [key for key, *_ in self.ICON_WB_ACTIONS]
         if self.orientation == "landscape":
+            # 横版：单行排列
             for i, key in enumerate(main_keys):
                 self.icon_grid.addWidget(self.icon_buttons[key], 0, i)
             for i, key in enumerate(wb_keys):
                 self.icon_wb_grid.addWidget(self.icon_buttons[key], 0, i)
         else:
+            # 竖版：严格单列排列
             for i, key in enumerate(main_keys):
                 self.icon_grid.addWidget(self.icon_buttons[key], i, 0)
             for i, key in enumerate(wb_keys):
@@ -7993,33 +7989,24 @@ class ControlPanel(QWidget):
                     self._resize_to_content()
 
     def set_ui_mode(self, mode, persist=True):
-        """在文字主面板与图标主面板之间切换。"""
+        """图标主面板是唯一界面，不再切换。兼容旧配置的迁移路径。"""
         if mode not in ("classic", "icon"):
             return
-        if mode == self.ui_mode and self.main_frame.isVisible() == (mode == "classic"):
-            return
-        self.ui_mode = mode
-        self.main_frame.setVisible(mode == "classic")
-        self.icon_frame.setVisible(mode == "icon")
-        self.sync_icon_buttons()
-        self._resize_to_content()
-        # 子菜单锚点换了一整套按钮，已展开的子菜单要重新定位到新按钮旁
-        if getattr(self, "menu_panel", None) is not None and self.menu_panel.isVisible():
-            self.position_menu_panel()
-        self.heartbeat_refresh()
-        # 设置页上那两颗「文字 / 图标」按钮要跟着换高亮。这一句原来漏了，实屏表现是：
-        # 界面确实换了，但高亮永远钉在左边那颗上——用户点「图标」，主面板变成了图标，
-        # 设置页却还显示「文字」是选中态，于是看起来像「不管选哪个都高亮左边」。
-        # 放在 set_ui_mode 里而不是包一层 _set_ui_mode_from_settings：load_settings
-        # 启动时也走这里（见 apply_settings），包在按钮的 connect 上就覆盖不到那条路径。
-        # sync_settings_panel 自己会在设置页还没建好时直接返回，构造期调用是安全的。
-        self.sync_settings_panel()
-        # 主面板换了一套控件、宽高都变了，开着的设置页要重新让位，否则原来刚好让开的
-        # 落点会被变宽后的主面板压上一条（实屏量到 21x442）
-        self.reposition_settings_panel()
-        if persist:
-            self.save_settings()
-        track_event("ui_mode_changed", mode=mode)
+        # 统一为图标式，classic 配置自动迁移
+        if self.ui_mode != "icon":
+            self.ui_mode = "icon"
+            self.main_frame.setVisible(False)
+            self.icon_frame.setVisible(True)
+            self.sync_icon_buttons()
+            self._resize_to_content()
+            if getattr(self, "menu_panel", None) is not None and self.menu_panel.isVisible():
+                self.position_menu_panel()
+            self.heartbeat_refresh()
+            self.sync_settings_panel()
+            self.reposition_settings_panel()
+            if persist:
+                self.save_settings()
+            track_event("ui_mode_unified", from_mode=mode)
 
     def _layout_wb_box(self):
         """白板控制区始终保持紧凑两行。
@@ -8205,8 +8192,13 @@ class ControlPanel(QWidget):
 
     def on_global_key_press(self, key):
         if key == keyboard.Key.f12:
-            self.exit_requested.emit()
+            self.close_to_background()
             return False
+
+    def close_to_background(self):
+        """关闭软件按钮和F12快捷键的处理：转入后台而非退出"""
+        if hasattr(self, 'lifecycle'):
+            self.lifecycle.hide_to_background()
 
     def setup_draw_sub(self):
         grid = QGridLayout(); grid.setSpacing(4)
@@ -8232,13 +8224,7 @@ class ControlPanel(QWidget):
         btn_u = QPushButton("▲"); btn_u.setObjectName("ArrowBtn"); btn_u.clicked.connect(lambda: self.pen_slider.setValue(self.pen_slider.value()+1))
         s_row.addWidget(btn_d); s_row.addWidget(self.pen_slider); s_row.addWidget(btn_u); self.draw_sub_layout.addLayout(s_row)
 
-        # 常驻智能识别开关：批注笔画完自动把近似图形转成标准图形
-        self.btn_smart_toggle = QPushButton(tr("smart_shapes_on"))
-        self.btn_smart_toggle.setCheckable(True)
-        self.btn_smart_toggle.setChecked(True)
-        self.btn_smart_toggle.clicked.connect(self.on_smart_toggle)
-        self.draw_sub_layout.addWidget(self.btn_smart_toggle)
-        self.draw_sub_layout.addWidget(QLabel(tr("smart_shapes_hint")))
+        # 智能识别功能保留，但开关移至设置页面，此处不再显示
 
     def setup_annotate_sub(self):
         """批注入口：普通笔 / 荧光笔 / 激光笔（始终三选一，不再藏设置里）。"""
@@ -8364,34 +8350,22 @@ class ControlPanel(QWidget):
         self.aid_sub_layout.addWidget(QLabel(tr("aid_hint")))
 
     def on_smart_toggle(self):
-        # 批注子面板那颗是 checkable 按钮，它的勾选状态就是用户刚点出来的意图
-        self.set_smart_shapes(self.btn_smart_toggle.isChecked())
+        """智能识别开关已移至设置页面，此处不再使用"""
+        pass
 
     def toggle_smart_shapes(self):
-        """设置页那颗按钮的入口：取反当前真实状态。
-
-        两个入口（批注子面板 / 设置页）都收敛到 set_smart_shapes，共用同一个状态。
-        """
+        """设置页智能识别按钮的入口：取反当前真实状态。"""
         if not self.canvas:
             return
         self.set_smart_shapes(not self.canvas.smart_shapes_enabled)
 
     def set_smart_shapes(self, enabled):
-        """智能识别图形的唯一写入点。
-
-        btn_smart_toggle 是 checkable 的，所以从设置页改状态时必须一并把它的勾选状态
-        同步过去——只改文案不改 checked，下次用户点批注面板那颗时 isChecked() 返回的是
-        过期值，开关会「点一下没反应」。
-        """
+        """智能识别图形的唯一写入点（开关已移至设置页面）。"""
         enabled = bool(enabled)
         if not self.canvas:
             return
         self.canvas.smart_shapes_enabled = enabled
         self.canvas.dash_chain = None
-        self.btn_smart_toggle.blockSignals(True)
-        self.btn_smart_toggle.setChecked(enabled)
-        self.btn_smart_toggle.blockSignals(False)
-        self.btn_smart_toggle.setText(tr("smart_shapes_on") if enabled else tr("smart_shapes_off"))
         self.sync_settings_panel()
         self.save_settings()
         track_event("smart_shapes_toggled", enabled=enabled)
@@ -9893,15 +9867,7 @@ class ControlPanel(QWidget):
         section("settings_appearance")
         form.addWidget(self.btn_theme)          # 主题按钮从主栏搬到这里
 
-        ui_row = QHBoxLayout(); ui_row.setSpacing(3)
-        self.btn_ui_classic = QPushButton(tr("ui_classic"))
-        self.btn_ui_classic.clicked.connect(lambda: self.set_ui_mode("classic"))
-        self.btn_ui_icon = QPushButton(tr("ui_icon"))
-        self.btn_ui_icon.clicked.connect(lambda: self.set_ui_mode("icon"))
-        ui_row.addWidget(self.btn_ui_classic)
-        ui_row.addWidget(self.btn_ui_icon)
-        form.addWidget(QLabel(tr("ui_mode")))
-        form.addLayout(ui_row)
+        # UI模式统一为图标式，不再提供切换选项
 
         self.opacity_value_label = QLabel(trf("opacity_value", value=self.ui_opacity))
         form.addWidget(self.opacity_value_label)
@@ -10003,8 +9969,7 @@ class ControlPanel(QWidget):
                 button.setObjectName(want)
                 button.setStyle(button.style())
 
-        mark(self.btn_ui_classic, self.ui_mode == "classic")
-        mark(self.btn_ui_icon, self.ui_mode == "icon")
+        # UI模式已统一为图标式，不再需要同步UI模式按钮状态
         mark(self.btn_orient_portrait, self.orientation == "portrait")
         mark(self.btn_orient_landscape, self.orientation == "landscape")
 
@@ -10281,7 +10246,31 @@ class ControlPanel(QWidget):
                     continue
                 place_under_ceiling(hwnd, ceiling)
 
+    def pause_callbacks(self):
+        """暂停所有会重新显示界面的心跳和定时器（进入后台隐藏时调用）"""
+        if hasattr(self, 'timer'):
+            self.timer.stop()
+        if hasattr(self, 'autosave_timer'):
+            self.autosave_timer.stop()
+        if hasattr(self, '_thumbnail_live_timer'):
+            self._thumbnail_live_timer.stop()
+        if hasattr(self, '_laser_fade'):
+            self._laser_fade.stop()
+        if hasattr(self, '_keyboard_watch'):
+            self._keyboard_watch.stop()
+
+    def resume_callbacks(self):
+        """恢复所有心跳和定时器（从后台恢复时调用）"""
+        if hasattr(self, 'timer'):
+            self.timer.start(self.HEARTBEAT_MS)
+        if hasattr(self, 'autosave_timer'):
+            self.autosave_timer.start(AUTOSAVE_INTERVAL * 1000)
+        # 其他定时器（缩略图、激光笔淡出、键盘监控）按需启动，不在这里恢复
+
     def heartbeat_refresh(self):
+        # 后台隐藏时不执行任何会显示窗口的操作
+        if hasattr(self, 'lifecycle') and self.lifecycle.state == LifecycleState.HIDDEN:
+            return
         self.bind_topmost_stack()
         # 图标树的状态投影在这里兜底：显式调用点覆盖了所有已知的状态变化路径，但
         # 兜一次底的代价只是每 500ms 读十几个 isEnabled/objectName，换来的是「以后
@@ -10678,11 +10667,7 @@ class ControlPanel(QWidget):
                 cv.board_style = settings["board_style"]
             smart = settings.get("smart_shapes")
             if isinstance(smart, bool):
-                self.btn_smart_toggle.blockSignals(True)
-                self.btn_smart_toggle.setChecked(smart)
-                self.btn_smart_toggle.blockSignals(False)
                 cv.smart_shapes_enabled = smart
-                self.btn_smart_toggle.setText(tr("smart_shapes_on") if smart else tr("smart_shapes_off"))
             # 多指书写：5.5.0 起设置页里有开关了（之前只能改配置文件）；缺省保持开启。
             multitouch = settings.get("smart_multitouch")
             if isinstance(multitouch, bool):
@@ -10738,9 +10723,12 @@ class ControlPanel(QWidget):
             opacity = settings.get("ui_opacity")
             if isinstance(opacity, int) and not isinstance(opacity, bool):
                 self.set_ui_opacity(opacity, persist=False)
+            # UI模式统一为图标式，旧配置中的classic/icon均迁移为icon
             ui_mode = settings.get("ui_mode")
             if ui_mode in ("classic", "icon"):
-                self.set_ui_mode(ui_mode, persist=False)
+                self.set_ui_mode("icon", persist=False)
+            else:
+                self.set_ui_mode("icon", persist=False)
             update_check = settings.get("update_check_enabled")
             if isinstance(update_check, bool):
                 self.update_check_enabled = update_check

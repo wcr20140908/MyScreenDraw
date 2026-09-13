@@ -59,6 +59,7 @@ _BASE = {
     "open_settings": ("打开设置", "Settings", "Paramètres", "Ajustes", "Einstellungen", "Настройки", "설정", "設定"),
     "restart_software": ("重启软件", "Restart", "Redémarrer", "Reiniciar", "Neu starten", "Перезапустить", "다시 시작", "再起動"),
     "restart_app": ("重启软件", "Restart", "Redémarrer", "Reiniciar", "Neu starten", "Перезапустить", "다시 시작", "再起動"),  # 别名
+    "close_app": ("关闭软件", "Close", "Fermer", "Cerrar", "Schließen", "Закрыть", "닫기", "閉じる"),
     "exit_software": ("退出软件", "Quit", "Quitter", "Salir", "Beenden", "Выход", "종료", "終了"),
     "quit_app": ("退出软件", "Quit", "Quitter", "Salir", "Beenden", "Выход", "종료", "終了"),  # 别名
     "show_main_ui": ("显示主界面", "Show Main UI", "Afficher l'interface", "Mostrar interfaz", "Hauptoberfläche anzeigen", "Показать интерфейс", "메인 UI 표시", "メインUIを表示"),
