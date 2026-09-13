@@ -42,14 +42,15 @@ class FilePanelTests(unittest.TestCase):
 
     def test_main_toolbar_has_one_file_entry_and_no_legacy_project_row(self):
         self.assertEqual(self.panel.btn_file.text(), self.main.tr("file"))
-        direct_buttons = [
+        # btn_file 现在在 tools_layout 里（tools_container 作为整体被添加到 toolbar_layout）
+        tools_buttons = [
             item.widget() for item in
-            (self.panel.toolbar_layout.itemAt(i) for i in range(self.panel.toolbar_layout.count()))
+            (self.panel.tools_layout.itemAt(i) for i in range(self.panel.tools_layout.count()))
             if item.widget() is not None
         ]
-        self.assertEqual(direct_buttons.count(self.panel.btn_file), 1)
-        self.assertNotIn(self.panel.btn_open_project, direct_buttons)
-        self.assertNotIn(self.panel.btn_save_project, direct_buttons)
+        self.assertEqual(tools_buttons.count(self.panel.btn_file), 1)
+        self.assertNotIn(self.panel.btn_open_project, tools_buttons)
+        self.assertNotIn(self.panel.btn_save_project, tools_buttons)
 
     def test_file_panel_contains_every_grouped_command(self):
         commands = (
