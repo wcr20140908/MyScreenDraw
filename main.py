@@ -281,10 +281,11 @@ from i18n import tr, trf, CURRENT
 import eps_export
 from app_lifecycle import AppLifecycleManager, LifecycleState
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QLabel, QPushButton,
+                             QToolButton,
                              QVBoxLayout, QHBoxLayout, QWidget, QFrame, QGridLayout, QColorDialog, QSlider,
                              QInputDialog, QMessageBox, QMenu, QFileDialog, QLineEdit, QTextEdit, QListWidget,
                              QAbstractItemView, QSizePolicy, QListWidgetItem, QDialog, QDoubleSpinBox,
-                             QScroller, QToolTip, QScrollArea, QToolButton)
+                             QScroller, QToolTip, QScrollArea)
 from PyQt6.QtCore import (Qt, QPoint, QPointF, QRectF, QTimer, QTranslator, QLibraryInfo, QLine, pyqtSignal, QLocale, QEvent,
                           QSizeF, QMarginsF, QEventLoop, QSize, QUrl, QBuffer, QIODevice, QThread)
 from PyQt6.QtGui import (QPainter, QPen, QColor, QFont, QPainterPath, QFontMetricsF, QTransform, QPolygonF,
@@ -5207,9 +5208,14 @@ class DrawingCanvas(QMainWindow):
                     pen = self.marker_pen()
                     width = pen.width()
                 else:
-                    pressure = max(0.08, min(1.0, self.current_pressure))
-                    speed = self._speed_width_factor() if self.speed_width_enabled else 1.0
-                    width = self._damp_width(self.pen_width * pressure * speed)
+                    if self.speed_width_enabled:
+                        pressure = max(0.08, min(1.0, self.current_pressure))
+                        speed = self._speed_width_factor()
+                        width = self._damp_width(self.pen_width * pressure * speed)
+                    else:
+                        # 关闭速度影响时，用户选择的笔宽是唯一来源：不叠加
+                        # 压感、速度系数或相邻段阻尼，保证整笔严格恒定。
+                        width = int(round(max(1, self.pen_width)))
                     pen = QPen(self.pen_color, width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
                 line = QLine(previous.x(), previous.y(), point.x(), point.y())
                 self.all_segments.append({"line": line, "pen": pen, "id": self.current_stroke_id, "marker": is_marker})
@@ -6499,13 +6505,14 @@ class DrawingCanvas(QMainWindow):
             self.draw_aids(painter)
 
     def mousePressEvent(self, event):
+        # 画布上的一次左键点击先收起所有临时子菜单；本次事件继续进入
+        # 正常绘图/选择路径，不要求用户再点一次才能落墨。
+        if self.panel and event.button() == Qt.MouseButton.LeftButton:
+            self.panel.show_only_sub(None)
         if not self.is_drawing_mode: return
         if self._touch_synthesized(event):
             return          # 多指已接管，这是 Windows 为主接触点补发的鼠标消息
         pos = event.position().toPoint()
-        # 点击画布时收起所有临时子菜单，不消耗这次事件，让绘图/选择继续
-        if self.panel and event.button() == Qt.MouseButton.LeftButton:
-            self.panel.show_only_sub(None)
         if event.button() == Qt.MouseButton.RightButton:
             if self.draw_state == "SHAPE":
                 self.cancel_pending_points()
@@ -7408,6 +7415,8 @@ class ControlPanel(QWidget):
         self._grabbing = False
         self.orientation = "portrait"   # portrait=竖版工具栏 | landscape=横版工具栏（标题栏旋转键切换）
         self._menu_anchor = None        # 当前子菜单对齐到哪个主栏按钮
+        self._toolbar_detached = False
+        self._toolbar_saved_pos = None
         self.last_annotate_tool = "PEN" # 主栏「批注」回到哪支笔：记住上次选的普通笔/荧光笔/激光笔
         self.calc_panel = None
         self.roster_panel = None
@@ -7624,12 +7633,13 @@ class ControlPanel(QWidget):
         self.logo_window = LogoWindow()
         self.toolbar_window = ToolbarWindow()
 
-        # LOGO点击信号连接到工具栏折叠
+        self.toolbar_window.position_changed.connect(self._on_toolbar_dragged)
         self.logo_window.clicked.connect(self.toggle_toolbar_collapsed)
+        # LOGO拖动时工具栏跟随
+        self.logo_window.position_changed.connect(self._on_logo_dragged)
         # 设置LOGO图标（使用主题颜色）
-        self.logo_window.logo_btn.setIcon(self._make_logo_icon())
-        self.logo_window.logo_btn.setIconSize(QSize(56, 56))
-        # LOGO位置改变时，工具栏可以选择跟随（可选功能，暂不实现自动跟随）
+        self.logo_window.logo_btn.setIcon(self._make_logo_icon(32))
+        self.logo_window.logo_btn.setIconSize(QSize(32, 32))
 
         # 创建工具栏按钮
         self.icon_buttons = {}
@@ -7752,7 +7762,7 @@ class ControlPanel(QWidget):
                 floating.setStyleSheet(self.styleSheet())
         # 分体窗口应用主题
         if hasattr(self, 'logo_window') and self.logo_window:
-            self.logo_window.apply_theme(t, rad["frame"], int(self.ui_opacity), self._make_logo_icon())
+            self.logo_window.apply_theme(t, rad["frame"], int(self.ui_opacity), self._make_logo_icon(32))
         if hasattr(self, 'toolbar_window') and self.toolbar_window:
             self.toolbar_window.apply_theme(t, rad["frame"], int(self.ui_opacity))
         if hasattr(self, "btn_clear"):
@@ -7799,25 +7809,68 @@ class ControlPanel(QWidget):
         ("board_style", "whiteboard", "board",     "toggle_board_style",    "btn_board_style"),
     )
 
-    def _make_logo_icon(self, size=56):
-        """绘制原创LOGO，使用主题颜色"""
+    def _make_logo_icon(self, size=32):
+        """绘制原创LOGO，使用主题颜色
+
+        注意：边框由QPushButton的border提供，这里只绘制图标内容
+        """
         pix = QPixmap(size, size); pix.fill(Qt.GlobalColor.transparent)
         p = QPainter(pix); p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        # 使用主题强调色作为边框，按钮色作为填充
-        p.setPen(QPen(QColor(self.theme["accent"]), 3)); p.setBrush(QColor(self.theme["button"]))
-        p.drawRoundedRect(QRectF(2, 2, size - 4, size - 4), size * .22, size * .22)
+        # 屏幕框（无边框，只有填充）
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(self.theme["button"]))
+        p.drawRoundedRect(QRectF(4, 4, size - 8, size - 8), size * .18, size * .18)
+        # 屏幕内容区域（用强调色勾勒）
+        p.setPen(QPen(QColor(self.theme["accent"]), max(1.5, size//20)))
         p.setBrush(Qt.BrushStyle.NoBrush)
-        p.drawRoundedRect(QRectF(size*.22, size*.25, size*.56, size*.40), size*.08, size*.08)
-        p.drawLine(QPointF(size*.40, size*.76), QPointF(size*.60, size*.76))
-        p.drawLine(QPointF(size*.50, size*.65), QPointF(size*.50, size*.76))
-        # 笔迹使用文字颜色
-        p.setPen(QPen(QColor(self.theme["text"]), size*.07, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-        path = QPainterPath(QPointF(size*.30, size*.53)); path.cubicTo(size*.40, size*.28, size*.47, size*.66, size*.68, size*.37); p.drawPath(path)
+        p.drawRoundedRect(QRectF(size*.25, size*.28, size*.50, size*.36), size*.06, size*.06)
+        # 支架
+        p.drawLine(QPointF(size*.42, size*.73), QPointF(size*.58, size*.73))
+        p.drawLine(QPointF(size*.50, size*.64), QPointF(size*.50, size*.73))
+        # 笔迹使用强调色
+        p.setPen(QPen(QColor(self.theme["accent"]), max(1.8, size*.065), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        path = QPainterPath(QPointF(size*.32, size*.50)); path.cubicTo(size*.40, size*.32, size*.46, size*.60, size*.66, size*.38); p.drawPath(path)
         p.end(); return QIcon(pix)
 
     def toggle_collapsed(self):
         """兼容旧代码：分体设计中改为调用 toggle_toolbar_collapsed"""
         self.toggle_toolbar_collapsed()
+
+    def _on_toolbar_dragged(self, new_toolbar_pos):
+        """工具栏独立拖动时保留其位置；后续 LOGO 拖动不覆盖用户的布局。"""
+        self._toolbar_detached = True
+        self._toolbar_saved_pos = (new_toolbar_pos.x(), new_toolbar_pos.y())
+        self.save_settings()
+
+    def _on_logo_dragged(self, new_logo_pos):
+        """LOGO拖动时，工具栏跟随移动，除非用户已独立拖动工具栏。"""
+        if self.toolbar_window.isVisible() and not getattr(self, "_toolbar_detached", False):
+            logo_size = self.logo_window.size()
+            if self.orientation == "portrait":
+                self.toolbar_window.move(new_logo_pos.x(), new_logo_pos.y() + logo_size.height() + 2)
+            else:
+                self.toolbar_window.move(new_logo_pos.x() + logo_size.width() + 2, new_logo_pos.y())
+
+    def _reposition_toolbar_next_to_logo(self):
+        """将工具栏定位到LOGO旁边（根据方向）"""
+        if not hasattr(self, 'logo_window') or not self.logo_window:
+            return
+        if not hasattr(self, 'toolbar_window') or not self.toolbar_window:
+            return
+
+        if getattr(self, "_toolbar_detached", False) and self._toolbar_saved_pos:
+            self.toolbar_window.move(*self._toolbar_saved_pos)
+            return
+
+        logo_pos = self.logo_window.pos()
+        logo_size = self.logo_window.size()
+
+        if self.orientation == "portrait":
+            # 竖版：工具栏在LOGO下方
+            self.toolbar_window.move(logo_pos.x(), logo_pos.y() + logo_size.height() + 2)
+        else:
+            # 横版：工具栏在LOGO右侧
+            self.toolbar_window.move(logo_pos.x() + logo_size.width() + 2, logo_pos.y())
 
     def toggle_toolbar_collapsed(self):
         """LOGO点击：折叠/展开工具栏窗口"""
@@ -7826,19 +7879,16 @@ class ControlPanel(QWidget):
             self.show_only_sub(None)
             self.close_thumbnail_panel()
             self.toolbar_window.hide()
+            if hasattr(self, "lifecycle"):
+                self.lifecycle.state = LifecycleState.COLLAPSED
         else:
             # 展开工具栏
             self.toolbar_window.show()
             self.toolbar_window.raise_()
             # 重新定位到LOGO旁边
-            logo_pos = self.logo_window.pos()
-            logo_size = self.logo_window.size()
-            if self.orientation == "portrait":
-                # 竖版：工具栏在LOGO下方
-                self.toolbar_window.move(logo_pos.x(), logo_pos.y() + logo_size.height() + 2)
-            else:
-                # 横版：工具栏在LOGO右侧
-                self.toolbar_window.move(logo_pos.x() + logo_size.width() + 2, logo_pos.y())
+            self._reposition_toolbar_next_to_logo()
+            if hasattr(self, "lifecycle"):
+                self.lifecycle.state = LifecycleState.SHOWING
 
     def build_icon_frame(self):
         """兼容旧代码路径：不再使用，保留空实现"""
@@ -7850,11 +7900,13 @@ class ControlPanel(QWidget):
 
         # 主工具按钮
         for key, icon_name, tip_key, handler_name, mirror_name in self.ICON_ACTIONS:
-            btn = QPushButton()
+            btn = QToolButton()
+            btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
             btn.setObjectName("IconBtn")
             btn.setProperty("icon_name", icon_name)
             btn.setIcon(make_ui_icon(icon_name, self.theme["text"], ICON_GLYPH))
             btn.setIconSize(QSize(ICON_GLYPH, ICON_GLYPH))
+            btn.setText(tr(tip_key))
             btn.setToolTip(tr(tip_key))
             btn.setAccessibleName(tr(tip_key))
 
@@ -7868,11 +7920,13 @@ class ControlPanel(QWidget):
 
         # 白板控制按钮
         for key, icon_name, tip_key, handler_name, mirror_name in self.ICON_WB_ACTIONS:
-            btn = QPushButton()
+            btn = QToolButton()
+            btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
             btn.setObjectName("IconBtn")
             btn.setProperty("icon_name", icon_name)
             btn.setIcon(make_ui_icon(icon_name, self.theme["text"], ICON_GLYPH))
             btn.setIconSize(QSize(ICON_GLYPH, ICON_GLYPH))
+            btn.setText(tr(tip_key))
             btn.setToolTip(tr(tip_key))
             btn.setAccessibleName(tr(tip_key))
 
@@ -7890,7 +7944,7 @@ class ControlPanel(QWidget):
         # 应用主题样式到工具栏窗口
         rad = self.radius_tokens()
         self.toolbar_window.apply_theme(self.theme, rad["frame"], self.ui_opacity)
-        self.logo_window.apply_theme(self.theme, rad["frame"], self.ui_opacity, self._make_logo_icon())
+        self.logo_window.apply_theme(self.theme, rad["frame"], self.ui_opacity, self._make_logo_icon(32))
 
         # 初始同步状态
         self.sync_icon_buttons()
@@ -7924,7 +7978,7 @@ class ControlPanel(QWidget):
 
         # 更新LOGO图标使用新主题颜色
         if hasattr(self, 'logo_window') and self.logo_window:
-            self.logo_window.logo_btn.setIcon(self._make_logo_icon())
+            self.logo_window.logo_btn.setIcon(self._make_logo_icon(32))
 
         # 同时更新工具栏窗口的样式
         if hasattr(self, 'toolbar_window') and self.toolbar_window:
@@ -7932,7 +7986,7 @@ class ControlPanel(QWidget):
             self.toolbar_window.apply_theme(self.theme, rad["frame"], self.ui_opacity)
         if hasattr(self, 'logo_window') and self.logo_window:
             rad = self.radius_tokens()
-            self.logo_window.apply_theme(self.theme, rad["frame"], self.ui_opacity, self._make_logo_icon())
+            self.logo_window.apply_theme(self.theme, rad["frame"], self.ui_opacity, self._make_logo_icon(32))
 
     def sync_icon_buttons(self):
         """把经典按钮的状态单向投影到图标按钮上。
@@ -10475,6 +10529,12 @@ class ControlPanel(QWidget):
             "panel_x": int(self.x()),
             "panel_y": int(self.y()),
             "panel_screen": self.screen().name() if self.screen() else "",
+            # 分体窗口位置
+            "logo_x": int(self.logo_window.x()) if hasattr(self, 'logo_window') and self.logo_window else 100,
+            "logo_y": int(self.logo_window.y()) if hasattr(self, 'logo_window') and self.logo_window else 100,
+            "toolbar_x": int(self.toolbar_window.x()) if hasattr(self, 'toolbar_window') and self.toolbar_window else 100,
+            "toolbar_y": int(self.toolbar_window.y()) if hasattr(self, 'toolbar_window') and self.toolbar_window else 100,
+            "toolbar_detached": bool(getattr(self, "_toolbar_detached", False)),
             "orientation": self.orientation,
             "draw_state": tool,
             "shape_type": cv.shape_type if cv.shape_type in self.SHAPE_TYPES else "LINE",
@@ -10742,6 +10802,20 @@ class ControlPanel(QWidget):
             if isinstance(px, int) and isinstance(py, int):
                 self._saved_pos = (px, py)
             self._saved_screen = settings.get("panel_screen") if isinstance(settings.get("panel_screen"), str) else None
+
+            # 分体窗口位置恢复
+            logo_x, logo_y = settings.get("logo_x"), settings.get("logo_y")
+            if isinstance(logo_x, int) and isinstance(logo_y, int):
+                if hasattr(self, 'logo_window') and self.logo_window:
+                    self.logo_window.move(logo_x, logo_y)
+                    self._toolbar_detached = bool(settings.get("toolbar_detached", False))
+                    toolbar_x, toolbar_y = settings.get("toolbar_x"), settings.get("toolbar_y")
+                    if (self._toolbar_detached and isinstance(toolbar_x, int)
+                            and isinstance(toolbar_y, int)):
+                        self._toolbar_saved_pos = (toolbar_x, toolbar_y)
+                        self.toolbar_window.move(toolbar_x, toolbar_y)
+                    else:
+                        self._reposition_toolbar_next_to_logo()
 
             # --- 5.5.0 外观设置 ---
             # 顺序有讲究：圆角先于 UI 模式。set_ui_mode 会切换可见的那棵树并

@@ -48,8 +48,7 @@ class AppLifecycleManager:
         """
         self.panel = panel
         self.state = LifecycleState.SHOWING
-
-        # 托盘图标
+        self._state_before_hidden = self.state
         self.tray_icon = None
         self.tray_menu = None
 
@@ -209,10 +208,10 @@ class AppLifecycleManager:
     def _open_settings_from_tray(self):
         """从托盘打开设置（后台也能打开）"""
         if self.state == LifecycleState.HIDDEN:
-            # 后台状态：只显示设置页，不恢复主面板
-            self.panel.settings_panel.show()
-            self.panel.settings_panel.raise_()
-            self.panel.settings_panel.activateWindow()
+            # 后台状态：设置页懒创建后再显示，不恢复主面板。
+            if self.panel.settings_panel is None:
+                self.panel.build_settings_panel()
+            self.panel.open_settings_panel()
         else:
             # 前台状态：正常打开
             self.panel.open_settings_panel()
@@ -343,7 +342,7 @@ class AppLifecycleManager:
         if self.state == LifecycleState.HIDDEN:
             return
 
-        # 安全结束未完成输入
+        self._state_before_hidden = self.state
         if hasattr(self.panel, 'canvas') and self.panel.canvas and self.panel.canvas.editing_text_item():
             self.panel.canvas.end_text_edit(discard_empty=True)
 
@@ -386,26 +385,24 @@ class AppLifecycleManager:
         if self.state == LifecycleState.SHOWING:
             return
 
-        # 恢复显示（包括分体窗口）
-        if self.panel.canvas:
-            self.panel.canvas.show()
+        # 恢复 LOGO；只有进入后台前是完整显示时才恢复工具栏。
         if hasattr(self.panel, 'logo_window') and self.panel.logo_window:
             self.panel.logo_window.show()
             self.panel.logo_window.raise_()
+        was_collapsed = self._state_before_hidden == LifecycleState.COLLAPSED
         if hasattr(self.panel, 'toolbar_window') and self.panel.toolbar_window:
-            self.panel.toolbar_window.show()
-            self.panel.toolbar_window.raise_()
-        # main_frame 不显示（图标模式）
-        # self.panel.show()  # 不需要显示主面板本身
+            if was_collapsed:
+                self.panel.toolbar_window.hide()
+            else:
+                self.panel.toolbar_window.show()
+                self.panel.toolbar_window.raise_()
         self.panel.raise_()
         self.panel.activateWindow()
 
         # 保持穿透模式，直到用户主动选择绘图工具
         # （防止恢复时误画）
 
-        self.state = LifecycleState.SHOWING
-
-        # 恢复心跳和定时器
+        self.state = LifecycleState.COLLAPSED if was_collapsed else LifecycleState.SHOWING
         self.panel.resume_callbacks()
 
         # 更新托盘菜单文字

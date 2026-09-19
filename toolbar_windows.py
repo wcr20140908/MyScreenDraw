@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """独立的工具栏窗口：LOGO窗口和工具条窗口的分体设计"""
 
-from PyQt6.QtWidgets import QWidget, QPushButton, QVBoxLayout, QHBoxLayout, QGridLayout, QFrame, QLabel
+from PyQt6.QtWidgets import QWidget, QPushButton, QToolButton, QVBoxLayout, QHBoxLayout, QGridLayout, QFrame, QLabel
 from PyQt6.QtCore import Qt, QSize, pyqtSignal, QPoint
 from PyQt6.QtGui import QCursor
 import logging
@@ -31,8 +31,8 @@ class LogoWindow(QWidget):
         self._dragging = False
         self._press_pos = None
 
-        # 设置固定大小
-        self.setFixedSize(64, 64)
+        # 设置固定大小 - 与工具按钮一致（40x40）
+        self.setFixedSize(40, 40)
 
         # 布局
         layout = QVBoxLayout(self)
@@ -43,7 +43,7 @@ class LogoWindow(QWidget):
         from main import tr
         self.logo_btn = QPushButton()
         self.logo_btn.setObjectName("LogoButton")
-        self.logo_btn.setFixedSize(64, 64)
+        self.logo_btn.setFixedSize(40, 40)
         self.logo_btn.setToolTip(tr("logo_hint"))
         self.logo_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.logo_btn.clicked.connect(self._on_logo_clicked)
@@ -118,16 +118,20 @@ class LogoWindow(QWidget):
         """
         self.setStyleSheet(f"""
             QWidget {{
-                background-color: {theme['frame']};
-                border-radius: {radius}px;
+                background-color: transparent;
             }}
             QPushButton#LogoButton {{
-                background-color: {theme['frame']};
+                background-color: {theme['button']};
                 border: 2px solid {theme['accent']};
                 border-radius: {radius}px;
+                padding: 0px;
+                margin: 0px;
             }}
             QPushButton#LogoButton:hover {{
                 background-color: {theme['button_hover']};
+            }}
+            QPushButton#LogoButton:pressed {{
+                background-color: {theme['accent']};
             }}
         """)
         self.setWindowOpacity(opacity / 100.0)
@@ -135,16 +139,13 @@ class LogoWindow(QWidget):
         # 更新按钮图标
         if logo_icon is not None and hasattr(self, 'logo_btn'):
             self.logo_btn.setIcon(logo_icon)
-            self.logo_btn.setIconSize(QSize(56, 56))
-
-        # 更新LOGO图标
-        if logo_icon and hasattr(self, 'logo_btn'):
-            self.logo_btn.setIcon(logo_icon)
+            self.logo_btn.setIconSize(QSize(32, 32))  # 图标32x32，按钮40x40（含4px留白）
 
 
 class ToolbarWindow(QWidget):
     """工具栏独立窗口：显示所有工具按钮，可独立拖动"""
 
+    position_changed = pyqtSignal(QPoint)
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowFlags(
@@ -157,6 +158,8 @@ class ToolbarWindow(QWidget):
         self._drag_offset = None
         self.orientation = "portrait"
         self.icon_buttons = {}
+        self._button_width = 66
+        self._button_height = 58
 
         # 主布局框架
         self.main_frame = QFrame()
@@ -195,6 +198,7 @@ class ToolbarWindow(QWidget):
         """鼠标移动：拖动窗口"""
         if event.buttons() & Qt.MouseButton.LeftButton and self._drag_offset is not None:
             self.move(event.globalPosition().toPoint() - self._drag_offset)
+            self.position_changed.emit(self.pos())
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
@@ -287,28 +291,29 @@ class ToolbarWindow(QWidget):
                 border-radius: {radius}px;
                 border: 2px solid {theme['accent']};
             }}
-            QPushButton {{
+            QPushButton, QToolButton {{
                 background-color: {theme['button']};
                 color: {theme['text']};
                 border-radius: 6px;
                 border: none;
-                padding: 0px;
+                padding: 2px;
                 margin: 1px;
-                min-width: {btn_size}px;
-                max-width: {btn_size}px;
-                min-height: {btn_size}px;
-                max-height: {btn_size}px;
+                min-width: {self._button_width}px;
+                max-width: {self._button_width}px;
+                min-height: {self._button_height}px;
+                max-height: {self._button_height}px;
+                font-size: 10px;
             }}
-            QPushButton:hover {{
+            QPushButton:hover, QToolButton:hover {{
                 background-color: {theme['button_hover']};
             }}
-            QPushButton:pressed {{
+            QPushButton:pressed, QToolButton:pressed {{
                 background-color: {theme['accent']};
             }}
-            QPushButton#IconBtn {{
+            QToolButton#IconBtn {{
                 background-color: {theme['button']};
             }}
-            QPushButton#IconBtnActive {{
+            QToolButton#IconBtnActive {{
                 background-color: {theme['accent']};
                 color: {theme['active_text']};
             }}
