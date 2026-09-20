@@ -2,12 +2,46 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """独立的工具栏窗口：LOGO窗口和工具条窗口的分体设计"""
 
-from PyQt6.QtWidgets import QWidget, QPushButton, QToolButton, QVBoxLayout, QHBoxLayout, QGridLayout, QFrame, QLabel
-from PyQt6.QtCore import Qt, QSize, pyqtSignal, QPoint
-from PyQt6.QtGui import QCursor
+from PyQt6.QtWidgets import (QWidget, QPushButton, QToolButton, QVBoxLayout, QHBoxLayout,
+                             QGridLayout, QFrame, QLabel, QApplication)
+from PyQt6.QtCore import Qt, QSize, QRect, pyqtSignal, QPoint
+from PyQt6.QtGui import QCursor, QFontMetrics
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+# 按钮尺寸：图标 20px + 一行 10px 文字 + 上下留白。56×44 在触屏上仍够按，
+# 又不会像 66×58 那样把竖版整栏顶出任务栏。
+BUTTON_WIDTH = 56
+BUTTON_HEIGHT = 44
+BUTTON_HEIGHT_MIN = 36      # 屏幕矮时允许压到这里；再矮文字就贴着图标了
+BUTTON_WIDTH_MAX = 76       # 最长的文案（如 Durchsichtig）也不至于把栏撑得太宽
+LOGO_THICKNESS = 40         # 竖版 LOGO 的高度 / 横版 LOGO 的宽度
+LOGO_GAP = 2                # LOGO 与工具栏之间的缝
+
+
+def _available_rect(widget):
+    """widget 所在屏幕的可用区（不含任务栏）；屏幕拿不到时退回主屏。"""
+    screen = None
+    try:
+        screen = widget.screen()
+    except Exception:
+        screen = None
+    if screen is None:
+        screen = QApplication.primaryScreen()
+    if screen is None:
+        return QRect(0, 0, 1920, 1040)
+    return screen.availableGeometry()
+
+
+def clamp_point_into(x, y, w, h, area):
+    """把 (x, y, w, h) 的矩形收进 area；比 area 还大时贴左/上边。"""
+    max_x = area.right() - w + 1
+    max_y = area.bottom() - h + 1
+    x = max(area.left(), min(x, max_x))
+    y = max(area.top(), min(y, max_y))
+    return int(x), int(y)
 
 
 class LogoWindow(QWidget):
@@ -18,21 +52,18 @@ class LogoWindow(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        # Tool：不上任务栏、不抢焦点；置顶归属由主面板的 bind_topmost_stack 统一挂到画布上。
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint |
-            Qt.WindowType.WindowStaysOnTopHint
-            # 暂时移除Tool标志测试
-            # | Qt.WindowType.Tool
+            Qt.WindowType.WindowStaysOnTopHint |
+            Qt.WindowType.Tool
         )
-        # 不使用WA_TranslucentBackground，而是给窗口一个实际背景
-        # self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
         self._drag_offset = None
         self._dragging = False
         self._press_pos = None
-
-        # 设置固定大小 - 与工具按钮一致（40x40）
-        self.setFixedSize(40, 40)
+        self._icon_size = 32
 
         # 布局
         layout = QVBoxLayout(self)
@@ -43,7 +74,6 @@ class LogoWindow(QWidget):
         from main import tr
         self.logo_btn = QPushButton()
         self.logo_btn.setObjectName("LogoButton")
-        self.logo_btn.setFixedSize(40, 40)
         self.logo_btn.setToolTip(tr("logo_hint"))
         self.logo_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.logo_btn.clicked.connect(self._on_logo_clicked)
@@ -52,8 +82,27 @@ class LogoWindow(QWidget):
         self.logo_btn.installEventFilter(self)
 
         layout.addWidget(self.logo_btn)
+        self.set_size(LOGO_THICKNESS, LOGO_THICKNESS)
 
         logger.info("[LogoWindow] Initialized with QPushButton")
+
+    def set_size(self, width, height):
+        """LOGO 尺寸跟着工具栏走：竖版与工具栏同宽，横版与工具栏同高。
+
+        两个窗口一宽一窄就是「宽度不一致、奇丑」的来源，所以尺寸不在这里自己决定，
+        由主面板在工具栏每次重排后同步过来。图标按短边缩放并留出边框。
+        """
+        width = max(24, int(width))
+        height = max(24, int(height))
+        if (width, height) == (self.width(), self.height()) and self.logo_btn.width() == width:
+            return
+        self.setFixedSize(width, height)
+        self.logo_btn.setFixedSize(width, height)
+        self._icon_size = max(16, min(32, min(width, height) - 8))
+        self.logo_btn.setIconSize(QSize(self._icon_size, self._icon_size))
+
+    def icon_size(self):
+        return self._icon_size
 
     def _on_logo_clicked(self):
         """LOGO按钮被点击"""
@@ -68,22 +117,22 @@ class LogoWindow(QWidget):
                     self._press_pos = event.globalPosition().toPoint()
                     self._drag_offset = self._press_pos - self.pos()
                     self._dragging = False
-                    logger.info(f"[LogoWindow] Press recorded at {self._press_pos}")
             elif event.type() == event.Type.MouseMove:
                 if event.buttons() & Qt.MouseButton.LeftButton and self._drag_offset is not None:
                     delta = event.globalPosition().toPoint() - self._press_pos
                     if not self._dragging and (abs(delta.x()) > 5 or abs(delta.y()) > 5):
                         self._dragging = True
-                        logger.info(f"[LogoWindow] Dragging started, delta={delta}")
 
                     if self._dragging:
                         new_pos = event.globalPosition().toPoint() - self._drag_offset
+                        x, y = clamp_point_into(new_pos.x(), new_pos.y(), self.width(), self.height(),
+                                                _available_rect(self))
+                        new_pos = QPoint(x, y)
                         self.move(new_pos)
                         self.position_changed.emit(new_pos)
                         return True  # 拖动时阻止按钮处理事件
             elif event.type() == event.Type.MouseButtonRelease:
                 if event.button() == Qt.MouseButton.LeftButton:
-                    logger.info(f"[LogoWindow] mouseReleaseEvent: dragging={self._dragging}")
                     was_dragging = self._dragging
                     self._drag_offset = None
                     self._dragging = False
@@ -139,13 +188,16 @@ class LogoWindow(QWidget):
         # 更新按钮图标
         if logo_icon is not None and hasattr(self, 'logo_btn'):
             self.logo_btn.setIcon(logo_icon)
-            self.logo_btn.setIconSize(QSize(32, 32))  # 图标32x32，按钮40x40（含4px留白）
+            self.logo_btn.setIconSize(QSize(self._icon_size, self._icon_size))
 
 
 class ToolbarWindow(QWidget):
     """工具栏独立窗口：显示所有工具按钮，可独立拖动"""
 
     position_changed = pyqtSignal(QPoint)
+    # 白板控制按钮的key
+    WB_KEYS = frozenset({'prev_page', 'pages', 'next_page', 'new_page', 'board_style'})
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowFlags(
@@ -158,14 +210,18 @@ class ToolbarWindow(QWidget):
         self._drag_offset = None
         self.orientation = "portrait"
         self.icon_buttons = {}
-        self._button_width = 66
-        self._button_height = 58
+        self._button_width = BUTTON_WIDTH
+        self._button_height = BUTTON_HEIGHT
+        self._wb_columns = 1
+        self._main_rows = 1
+        self._theme_args = None
 
         # 主布局框架
         self.main_frame = QFrame()
         self.main_frame.setObjectName("MainFrame")
         outer_layout = QVBoxLayout(self)
         outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
         outer_layout.addWidget(self.main_frame)
 
         # 内部布局（会根据方向动态切换）
@@ -188,6 +244,7 @@ class ToolbarWindow(QWidget):
         self.icon_wb_box.setVisible(False)
         self.toolbar_layout.addWidget(self.icon_wb_box)
 
+    # --- 拖动 ---
     def mousePressEvent(self, event):
         """鼠标按下：记录拖动起始点"""
         if event.button() == Qt.MouseButton.LeftButton:
@@ -197,7 +254,10 @@ class ToolbarWindow(QWidget):
     def mouseMoveEvent(self, event):
         """鼠标移动：拖动窗口"""
         if event.buttons() & Qt.MouseButton.LeftButton and self._drag_offset is not None:
-            self.move(event.globalPosition().toPoint() - self._drag_offset)
+            target = event.globalPosition().toPoint() - self._drag_offset
+            x, y = clamp_point_into(target.x(), target.y(), self.width(), self.height(),
+                                    _available_rect(self))
+            self.move(x, y)
             self.position_changed.emit(self.pos())
         super().mouseMoveEvent(event)
 
@@ -207,6 +267,7 @@ class ToolbarWindow(QWidget):
             self._drag_offset = None
         super().mouseReleaseEvent(event)
 
+    # --- 布局 ---
     def set_orientation(self, orientation):
         """切换横版/竖版布局"""
         if self.orientation == orientation:
@@ -246,45 +307,121 @@ class ToolbarWindow(QWidget):
         self.toolbar_layout = new_layout
         self._relayout_buttons()
 
+    def _main_buttons(self):
+        return [btn for key, btn in self.icon_buttons.items() if key not in self.WB_KEYS]
+
+    def _wb_buttons(self):
+        return [btn for key, btn in self.icon_buttons.items() if key in self.WB_KEYS]
+
     def _relayout_buttons(self):
-        """根据方向重排按钮：横版单行，竖版单列"""
-        # 清空网格
+        """根据方向重排按钮：横版单行，竖版单列，然后按内容收紧并收进屏幕。"""
+        self._place_buttons()
+        self._button_width = self._measure_button_width()
+        # 先按标准高度试，放不下再压矮；压到底还放不下就把白板控制区折成两列。
+        self._button_height = BUTTON_HEIGHT
+        self._wb_columns = 1
+        self._main_rows = 1
+        self._reapply_button_size()
+        self._fit_to_content()
+        avail = _available_rect(self)
+        if self.orientation == "portrait":
+            limit = avail.height() - LOGO_THICKNESS - LOGO_GAP
+            if self.height() > limit:
+                self._button_height = BUTTON_HEIGHT_MIN
+                self._reapply_button_size()
+                self._fit_to_content()
+                if self.height() > limit and self._wb_buttons():
+                    self._wb_columns = 2
+                    self._place_buttons()
+                    self._fit_to_content()
+        else:
+            # 横版一行 14 个按钮约 850px，窄屏（200% 缩放的 1080p 只有 960 逻辑像素）
+            # 放不下就折成两行，比让整栏伸出屏幕右边被 clamp 到 x=0 好。
+            limit = avail.width() - LOGO_THICKNESS - LOGO_GAP
+            if self.width() > limit:
+                self._main_rows = 2
+                self._place_buttons()
+                self._fit_to_content()
+        self.clamp_into_screen()
+
+    def _place_buttons(self):
         for grid in (self.icon_grid, self.icon_wb_grid):
             while grid.count():
                 grid.takeAt(0)
-
-        # 白板控制按钮的key
-        wb_keys = {'prev_page', 'pages', 'next_page', 'new_page', 'board_style'}
-
-        # 重新排列
-        main_buttons = [btn for key, btn in self.icon_buttons.items()
-                       if key not in wb_keys]
-        wb_buttons = [btn for key, btn in self.icon_buttons.items()
-                     if key in wb_keys]
-
+        main_buttons = self._main_buttons()
+        wb_buttons = self._wb_buttons()
         if self.orientation == "landscape":
-            # 横版：单行
+            rows = max(1, self._main_rows)
+            per_row = max(1, -(-len(main_buttons) // rows))
             for i, btn in enumerate(main_buttons):
-                self.icon_grid.addWidget(btn, 0, i)
+                self.icon_grid.addWidget(btn, i // per_row, i % per_row)
+            wb_per_row = max(1, -(-len(wb_buttons) // rows))
             for i, btn in enumerate(wb_buttons):
-                self.icon_wb_grid.addWidget(btn, 0, i)
+                self.icon_wb_grid.addWidget(btn, i // wb_per_row, i % wb_per_row)
         else:
-            # 竖版：单列
             for i, btn in enumerate(main_buttons):
                 self.icon_grid.addWidget(btn, i, 0)
+            cols = max(1, self._wb_columns)
             for i, btn in enumerate(wb_buttons):
-                self.icon_wb_grid.addWidget(btn, i, 0)
-
+                self.icon_wb_grid.addWidget(btn, i // cols, i % cols)
         for btn in main_buttons + wb_buttons:
             btn.setVisible(True)
 
-        self.adjustSize()
+    def _measure_button_width(self):
+        """按钮宽度由最长文案决定：英文/德文的「穿透」比中文长得多，56px 会把字截掉。"""
+        widest = 0
+        for btn in self.icon_buttons.values():
+            text = btn.text()
+            if not text:
+                continue
+            font = btn.font()
+            font.setPixelSize(10)
+            widest = max(widest, QFontMetrics(font).horizontalAdvance(text))
+        return max(BUTTON_WIDTH, min(BUTTON_WIDTH_MAX, widest + 8))
+
+    def _reapply_button_size(self):
+        if self._theme_args is not None:
+            self.apply_theme(*self._theme_args)
+
+    def _fit_to_content(self):
+        """按内容定死窗口尺寸。
+
+        半透明无边框窗口只 adjustSize() 不够：嵌套布局的 sizeHint 有缓存，白板区
+        显隐或按钮改尺寸后窗口只会变大不会缩回，底部留一截透明却仍拦点击的空白。
+        """
+        for nested in (self.icon_grid, self.icon_wb_grid, self.toolbar_layout, self.layout()):
+            if nested is not None:
+                nested.invalidate()
+                nested.activate()
+        hint = self.layout().sizeHint()
+        if hint.isValid() and hint.width() > 0 and hint.height() > 0:
+            self.setFixedSize(hint)
+        else:
+            self.adjustSize()
+        self.update()
+
+    def refresh_layout(self):
+        """白板控制区显隐后重新收紧并收进屏幕（主面板 sync_icon_buttons 调用）。"""
+        self._relayout_buttons()
+
+    def clamp_into_screen(self):
+        """整栏收进当前屏幕可用区：竖版不许伸到任务栏下面，横版不许伸出右边。"""
+        area = _available_rect(self)
+        x, y = clamp_point_into(self.x(), self.y(), self.width(), self.height(), area)
+        if (x, y) != (self.x(), self.y()):
+            self.move(x, y)
+            return True
+        return False
+
+    def logo_size_for(self):
+        """与本栏匹配的 LOGO 尺寸：竖版同宽、横版同高。"""
+        if self.orientation == "portrait":
+            return self.width(), LOGO_THICKNESS
+        return LOGO_THICKNESS, self.height()
 
     def apply_theme(self, theme, radius, opacity):
         """应用主题样式"""
-        # 按钮尺寸：使用TOUCH_MIN_BUTTON与主面板IconBtn保持一致
-        from main import TOUCH_MIN_BUTTON
-        btn_size = TOUCH_MIN_BUTTON  # 32px，与主面板样式统一
+        self._theme_args = (theme, radius, opacity)
         self.setStyleSheet(f"""
             QFrame#MainFrame {{
                 background-color: {theme['frame']};
@@ -296,8 +433,8 @@ class ToolbarWindow(QWidget):
                 color: {theme['text']};
                 border-radius: 6px;
                 border: none;
-                padding: 2px;
-                margin: 1px;
+                padding: 1px;
+                margin: 0px;
                 min-width: {self._button_width}px;
                 max-width: {self._button_width}px;
                 min-height: {self._button_height}px;

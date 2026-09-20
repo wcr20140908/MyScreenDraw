@@ -63,3 +63,7 @@ exports/
 
 # Public screenshots must be reviewed for personal/environment data before commit
 screenshots/
+# 实屏验收截图含桌面内容，不入库
+_beta5_grabs/
+# 历史便携包（当前版本的 ZIP 会在发布提交里显式 add）
+MyScreenDraw-v6.0.0-beta.3-windows-x64.zip

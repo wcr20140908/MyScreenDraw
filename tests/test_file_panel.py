@@ -72,7 +72,9 @@ class FilePanelTests(unittest.TestCase):
         self.canvas.draw_state = "ERASER"
         self.panel.handle_file_click()
         self.assertTrue(self.panel.file_sub.isVisible())
-        self.assertIs(self.panel.sub_anchor_button(self.panel.file_sub), self.panel.btn_file)
+        # 图标式 UI 是唯一界面：文件面板要贴着图标树里那颗可见的「文件」键开，
+        # 而不是隐藏着的经典 btn_file（那样浮窗会落到主面板左上角）。
+        self.assertIs(self.panel.sub_anchor_button(self.panel.file_sub), self.panel.icon_buttons["folder"])
         self.assertEqual(self.canvas.draw_state, "ERASER")
         self.panel.handle_file_click()
         self.assertFalse(self.panel.file_sub.isVisible())

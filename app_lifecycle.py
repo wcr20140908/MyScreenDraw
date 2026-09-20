@@ -152,6 +152,7 @@ class AppLifecycleManager:
 
     def _apply_menu_colors(self):
         """应用菜单颜色：通过单独的样式表设置每个action"""
+        self._menu_labels = {}
         # 为每个有颜色属性的action创建自定义widget
         for action in self.tray_menu.actions():
             if action.isSeparator():
@@ -192,6 +193,14 @@ class AppLifecycleManager:
                 # 替换action
                 self.tray_menu.insertAction(action, widget_action)
                 self.tray_menu.removeAction(action)
+                self._menu_labels[action] = label
+
+    def _set_action_text(self, action, text):
+        """改菜单项文字：原 action 已被 QWidgetAction 的标签顶替，只改 action 用户看不到。"""
+        action.setText(text)
+        label = getattr(self, "_menu_labels", {}).get(action)
+        if label is not None:
+            label.setText(text)
 
     def _on_tray_activated(self, reason):
         """托盘图标激活：左键单击恢复完整主界面"""
@@ -242,7 +251,9 @@ class AppLifecycleManager:
             candidate = os.path.join(os.path.dirname(launcher), "pythonw.exe")
             if os.path.exists(candidate):
                 launcher = candidate
-            cmd = [launcher, os.path.abspath(__file__)]
+            # 入口是 main.py，不是本文件：拉起 app_lifecycle.py 只会静默退出
+            entry = os.path.join(os.path.dirname(os.path.abspath(__file__)), "main.py")
+            cmd = [launcher, entry]
 
         if recovery_file:
             cmd.extend(['--restore', recovery_file])
@@ -269,7 +280,15 @@ class AppLifecycleManager:
             return
 
         self._quit_dialog_showing = True
+        state_before_quit = self.state
         self.state = LifecycleState.QUITTING
+
+        def stay_in_app():
+            # 「不再退出」：后台状态就恢复主界面；本来就显示着的保持原样（折叠的仍折叠）
+            if state_before_quit == LifecycleState.HIDDEN:
+                self.restore_from_background()
+            else:
+                self.state = state_before_quit
 
         try:
             # 暂停可能改动状态的回调
@@ -280,6 +299,8 @@ class AppLifecycleManager:
             dialog.setWindowTitle(self._tr("exit_title"))
             dialog.setText(self._tr("exit_prompt"))
             dialog.setIcon(QMessageBox.Icon.Question)
+            # 主面板是置顶 Tool 窗口，对话框不置顶的话会开在全屏画布/工具栏底下
+            dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
 
             # 三个按钮
             btn_cancel = dialog.addButton(self._tr("exit_cancel"),
@@ -293,10 +314,7 @@ class AppLifecycleManager:
             dialog.exec()
             clicked = dialog.clickedButton()
 
-            if clicked == btn_cancel:
-                # 不再退出：恢复完整主界面
-                self.restore_from_background()
-            elif clicked == btn_quit_directly:
+            if clicked == btn_quit_directly:
                 # 直接退出：不保存
                 self._do_quit(save=False)
             elif clicked == btn_save_and_quit:
@@ -306,15 +324,21 @@ class AppLifecycleManager:
                     self._do_quit(save=True)
                 else:
                     # 保存失败：留在程序里
-                    self.restore_from_background()
+                    stay_in_app()
+            else:
+                # 不再退出（含按 Esc / 关闭对话框）
+                stay_in_app()
         finally:
             self._quit_dialog_showing = False
-            if self.state == LifecycleState.QUITTING:
-                self.state = LifecycleState.SHOWING
-            self.panel.resume_callbacks()
+            if not getattr(self, "_quit_done", False):
+                if self.state == LifecycleState.QUITTING:
+                    self.state = LifecycleState.SHOWING
+                self.panel.resume_callbacks()
 
     def _do_quit(self, save):
         """执行退出清理"""
+        self._quit_done = True
+        self.state = LifecycleState.QUITTING
         # 停止所有定时器和监听器
         try:
             self.panel.listener.stop()
@@ -374,8 +398,7 @@ class AppLifecycleManager:
 
         # 更新托盘菜单文字
         if hasattr(self, 'action_toggle_ui') and self.action_toggle_ui:
-            self._style_action(self.action_toggle_ui, "#000000", bold=False)
-            self.action_toggle_ui.setText(self._tr("show_main_ui"))
+            self._set_action_text(self.action_toggle_ui, self._tr("show_main_ui"))
 
         # 暂停心跳和定时器
         self.panel.pause_callbacks()
@@ -385,30 +408,36 @@ class AppLifecycleManager:
         if self.state == LifecycleState.SHOWING:
             return
 
+        # 画布也要回来：进后台时把它藏了，不重新显示的话已有批注全部不见，用户要再
+        # 点一次绘图模式才「找回」墨迹。此时仍是穿透模式，显示出来不拦点击。
+        if hasattr(self.panel, 'canvas') and self.panel.canvas:
+            self.panel.canvas.show()
+        self.panel.show()
         # 恢复 LOGO；只有进入后台前是完整显示时才恢复工具栏。
         if hasattr(self.panel, 'logo_window') and self.panel.logo_window:
             self.panel.logo_window.show()
-            self.panel.logo_window.raise_()
         was_collapsed = self._state_before_hidden == LifecycleState.COLLAPSED
         if hasattr(self.panel, 'toolbar_window') and self.panel.toolbar_window:
             if was_collapsed:
                 self.panel.toolbar_window.hide()
             else:
                 self.panel.toolbar_window.show()
-                self.panel.toolbar_window.raise_()
-        self.panel.raise_()
-        self.panel.activateWindow()
+        if hasattr(self.panel, '_sync_split_geometry'):
+            self.panel._sync_split_geometry()
 
         # 保持穿透模式，直到用户主动选择绘图工具
         # （防止恢复时误画）
 
         self.state = LifecycleState.COLLAPSED if was_collapsed else LifecycleState.SHOWING
+        # hide()/show() 后 Qt 可能把 GWLP_HWNDPARENT 重置，整组窗口重新挂回画布之上
+        self.panel._bound_key = None
+        if hasattr(self.panel, 'bind_topmost_stack'):
+            self.panel.bind_topmost_stack()
         self.panel.resume_callbacks()
 
         # 更新托盘菜单文字
         if hasattr(self, 'action_toggle_ui') and self.action_toggle_ui:
-            self._style_action(self.action_toggle_ui, "#000000", bold=False)
-            self.action_toggle_ui.setText(self._tr("hide_main_ui"))
+            self._set_action_text(self.action_toggle_ui, self._tr("hide_main_ui"))
 
     def is_exiting(self):
         """是否正在退出中"""

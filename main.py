@@ -280,6 +280,7 @@ import touch_keyboard
 from i18n import tr, trf, CURRENT
 import eps_export
 from app_lifecycle import AppLifecycleManager, LifecycleState
+import toolbar_windows
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QLabel, QPushButton,
                              QToolButton,
                              QVBoxLayout, QHBoxLayout, QWidget, QFrame, QGridLayout, QColorDialog, QSlider,
@@ -1636,7 +1637,10 @@ def make_ui_icon(name, color, size=22):
     """
     draw = _UI_ICONS.get(name)
     if draw is None:
-        return QIcon()
+        # 图标式工具栏用的是 ui_icons 里的新名字（mouse/folder/close…），这张旧表没有；
+        # 换主题时 repaint_ui_icons 若从这里拿到空图标，「穿透模式」「文件」就会秃掉。
+        from ui_icons import make_ui_icon as _make_new_icon
+        return _make_new_icon(name, color, size)
     pixmap, painter = _icon_canvas(size)
     try:
         draw(painter, color, float(size))
@@ -2552,7 +2556,10 @@ class DrawingCanvas(QMainWindow):
         self.mouse_pos = QPoint(-100, -100)
         self.last_erase_point = None
         self.setMouseTracking(True)
-        self.showFullScreen()
+        # 不用 showFullScreen()：它在 show 后还会 activateWindow()，而画布是
+        # WindowDoesNotAcceptFocus，Qt 会打一条 requestActivate() 警告；效果上也不需要激活。
+        self.setWindowState(self.windowState() | Qt.WindowState.WindowFullScreen)
+        self.show()
 
     @staticmethod
     def point_to_segment_distance_sq(pos, line):
@@ -7342,6 +7349,9 @@ class _TextInputEdit(QTextEdit):
 
 class ControlPanel(QWidget):
     exit_requested = pyqtSignal()
+    # F12 由 pynput 在它自己的线程里回调；隐藏窗口/停计时器必须回到 Qt 主线程做，
+    # 否则就是 "QObject::killTimer: Timers cannot be stopped from another thread"。
+    background_requested = pyqtSignal()
 
     HEARTBEAT_MS = 500   # 置顶心跳间隔：200ms 会让分层窗口频繁重新合成产生闪烁
 
@@ -7401,7 +7411,10 @@ class ControlPanel(QWidget):
         self.theme_name = "dark"
         self.theme = self.THEMES[self.theme_name]
         # --- 外观与系统设置（全部走 collect_settings / load_settings 持久化）---
-        self.ui_mode = "classic"        # classic=文字按钮主面板 | icon=全图标主面板
+        # 图标式分体界面是唯一界面（set_ui_mode 只会写 "icon"）。初值也必须是 icon：
+        # 各处 `ui_mode == "icon"` 的判断在 load_settings 之前就会跑（白板区显隐后的
+        # 工具栏重排、子菜单锚点），初值留成 classic 会让这些路径在启动早期走错分支。
+        self.ui_mode = "icon"
         self.ui_radius = self.RADIUS_DEFAULT
         self.ui_opacity = 100           # 百分比；作用于浮窗，不作用于画布（否则墨迹跟着淡）
         self.update_check_enabled = False   # 默认关闭：不联网是本程序的默认状态
@@ -7421,6 +7434,7 @@ class ControlPanel(QWidget):
         self.calc_panel = None
         self.roster_panel = None
         self.exit_requested.connect(QApplication.quit)
+        self.background_requested.connect(self.close_to_background, Qt.ConnectionType.QueuedConnection)
 
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -7638,8 +7652,7 @@ class ControlPanel(QWidget):
         # LOGO拖动时工具栏跟随
         self.logo_window.position_changed.connect(self._on_logo_dragged)
         # 设置LOGO图标（使用主题颜色）
-        self.logo_window.logo_btn.setIcon(self._make_logo_icon(32))
-        self.logo_window.logo_btn.setIconSize(QSize(32, 32))
+        self.logo_window.logo_btn.setIcon(self._make_logo_icon(self.logo_window.icon_size()))
 
         # 创建工具栏按钮
         self.icon_buttons = {}
@@ -7837,19 +7850,65 @@ class ControlPanel(QWidget):
         self.toggle_toolbar_collapsed()
 
     def _on_toolbar_dragged(self, new_toolbar_pos):
-        """工具栏独立拖动时保留其位置；后续 LOGO 拖动不覆盖用户的布局。"""
+        """工具栏独立拖动时保留其位置；后续 LOGO 拖动不覆盖用户的布局。
+
+        拖动中每移动一像素都会进来一次，配置文件不能跟着每像素写一遍，攒到停手再写。
+        """
         self._toolbar_detached = True
         self._toolbar_saved_pos = (new_toolbar_pos.x(), new_toolbar_pos.y())
-        self.save_settings()
+        self._schedule_split_save()
+        if getattr(self, "menu_panel", None) is not None and self.menu_panel.isVisible():
+            self.position_menu_panel()
+
+    def _schedule_split_save(self):
+        timer = getattr(self, "_split_save_timer", None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.setInterval(400)
+            timer.timeout.connect(self.save_settings)
+            self._split_save_timer = timer
+        timer.start()
 
     def _on_logo_dragged(self, new_logo_pos):
         """LOGO拖动时，工具栏跟随移动，除非用户已独立拖动工具栏。"""
         if self.toolbar_window.isVisible() and not getattr(self, "_toolbar_detached", False):
-            logo_size = self.logo_window.size()
-            if self.orientation == "portrait":
-                self.toolbar_window.move(new_logo_pos.x(), new_logo_pos.y() + logo_size.height() + 2)
+            self._reposition_toolbar_next_to_logo()
+            if getattr(self, "menu_panel", None) is not None and self.menu_panel.isVisible():
+                self.position_menu_panel()
+        self._schedule_split_save()
+
+    def _toolbar_slot_next_to_logo(self):
+        """工具栏贴着 LOGO 的落点：竖版在 LOGO 下方、横版在右侧；放不下就翻到另一侧。
+
+        竖版贴屏幕底部时工具栏会伸到任务栏下面，横版贴右边时会伸出屏幕——这两种
+        情况都翻面（下→上、右→左），翻面也放不下时再 clamp 进屏幕。
+        """
+        logo = self.logo_window
+        toolbar = self.toolbar_window
+        area = toolbar_windows._available_rect(logo)
+        gap = toolbar_windows.LOGO_GAP
+        if self.orientation == "portrait":
+            x = logo.x()
+            below = logo.y() + logo.height() + gap
+            above = logo.y() - gap - toolbar.height()
+            if below + toolbar.height() - 1 <= area.bottom():
+                y = below
+            elif above >= area.top():
+                y = above
             else:
-                self.toolbar_window.move(new_logo_pos.x() + logo_size.width() + 2, new_logo_pos.y())
+                y = below
+        else:
+            y = logo.y()
+            right = logo.x() + logo.width() + gap
+            left = logo.x() - gap - toolbar.width()
+            if right + toolbar.width() - 1 <= area.right():
+                x = right
+            elif left >= area.left():
+                x = left
+            else:
+                x = right
+        return toolbar_windows.clamp_point_into(x, y, toolbar.width(), toolbar.height(), area)
 
     def _reposition_toolbar_next_to_logo(self):
         """将工具栏定位到LOGO旁边（根据方向）"""
@@ -7860,17 +7919,12 @@ class ControlPanel(QWidget):
 
         if getattr(self, "_toolbar_detached", False) and self._toolbar_saved_pos:
             self.toolbar_window.move(*self._toolbar_saved_pos)
+            self.toolbar_window.clamp_into_screen()
             return
 
-        logo_pos = self.logo_window.pos()
-        logo_size = self.logo_window.size()
-
-        if self.orientation == "portrait":
-            # 竖版：工具栏在LOGO下方
-            self.toolbar_window.move(logo_pos.x(), logo_pos.y() + logo_size.height() + 2)
-        else:
-            # 横版：工具栏在LOGO右侧
-            self.toolbar_window.move(logo_pos.x() + logo_size.width() + 2, logo_pos.y())
+        x, y = self._toolbar_slot_next_to_logo()
+        if (x, y) != (self.toolbar_window.x(), self.toolbar_window.y()):
+            self.toolbar_window.move(x, y)
 
     def toggle_toolbar_collapsed(self):
         """LOGO点击：折叠/展开工具栏窗口"""
@@ -7884,9 +7938,11 @@ class ControlPanel(QWidget):
         else:
             # 展开工具栏
             self.toolbar_window.show()
-            self.toolbar_window.raise_()
             # 重新定位到LOGO旁边
-            self._reposition_toolbar_next_to_logo()
+            self._sync_split_geometry()
+            # hide()/show() 不换 winId，心跳不会重绑 owner；不钉回画布之上的话，
+            # 绘图模式下展开的工具栏会落在全屏画布底下、点不到。
+            self.raise_floating(self.toolbar_window)
             if hasattr(self, "lifecycle"):
                 self.lifecycle.state = LifecycleState.SHOWING
 
@@ -7938,17 +7994,40 @@ class ControlPanel(QWidget):
             self.icon_buttons[key] = btn
             self.toolbar_window.icon_buttons[key] = btn
 
-        # 重排按钮到网格
-        self.toolbar_window._relayout_buttons()
-
-        # 应用主题样式到工具栏窗口
+        # 先下发样式（按钮的 min/max 尺寸写在样式表里），再重排并按内容收紧窗口；
+        # 反过来会先按无样式的 sizeHint 定死窗口，样式一到按钮变大就被裁掉。
         rad = self.radius_tokens()
         self.toolbar_window.apply_theme(self.theme, rad["frame"], self.ui_opacity)
-        self.logo_window.apply_theme(self.theme, rad["frame"], self.ui_opacity, self._make_logo_icon(32))
+        self.toolbar_window._relayout_buttons()
+        self.logo_window.apply_theme(self.theme, rad["frame"], self.ui_opacity,
+                                     self._make_logo_icon(self.logo_window.icon_size()))
+        self._sync_split_geometry()
 
         # 初始同步状态
         self.sync_icon_buttons()
-        pass
+
+    def _sync_split_geometry(self, follow=True):
+        """让 LOGO 与工具栏保持一体：竖版同宽、横版同高，工具栏贴在 LOGO 旁边。
+
+        follow=False 只同步尺寸并收进屏幕，不动工具栏位置（用户独立拖过工具栏时）。
+        心跳每拍也会调，所以尺寸没变就不做任何事。
+        """
+        logo = getattr(self, "logo_window", None)
+        toolbar = getattr(self, "toolbar_window", None)
+        if logo is None or toolbar is None:
+            return
+        want_w, want_h = toolbar.logo_size_for()
+        if (want_w, want_h) != (logo.width(), logo.height()):
+            logo.set_size(want_w, want_h)
+            logo.logo_btn.setIcon(self._make_logo_icon(logo.icon_size()))
+        area = toolbar_windows._available_rect(logo)
+        lx, ly = toolbar_windows.clamp_point_into(logo.x(), logo.y(), logo.width(), logo.height(), area)
+        if (lx, ly) != (logo.x(), logo.y()):
+            logo.move(lx, ly)
+        if follow:
+            self._reposition_toolbar_next_to_logo()
+        else:
+            toolbar.clamp_into_screen()
 
     def _relayout_icon_frame(self, orientation):
         """分体设计：重新布局独立的工具栏窗口"""
@@ -7971,22 +8050,25 @@ class ControlPanel(QWidget):
         buttons = getattr(self, "icon_buttons", None)
         if not buttons:
             return
+        # 必须和 build_toolbar_buttons 用同一套图标（ui_icons），否则换主题后按钮换成
+        # 旧表的另一种画法，两套风格混在一栏里。
+        from ui_icons import make_ui_icon as _make_toolbar_icon
         for btn in buttons.values():
             name = btn.property("icon_name")
             if name:
-                btn.setIcon(make_ui_icon(name, self.theme["text"], ICON_GLYPH))
+                btn.setIcon(_make_toolbar_icon(name, self.theme["text"], ICON_GLYPH))
 
-        # 更新LOGO图标使用新主题颜色
-        if hasattr(self, 'logo_window') and self.logo_window:
-            self.logo_window.logo_btn.setIcon(self._make_logo_icon(32))
-
-        # 同时更新工具栏窗口的样式
+        # 同时更新工具栏窗口的样式，并重新按内容收紧（圆角/主题不改按钮尺寸，但
+        # 语言切换会改文案长度，按钮宽度跟着最长文案走）
         if hasattr(self, 'toolbar_window') and self.toolbar_window:
             rad = self.radius_tokens()
             self.toolbar_window.apply_theme(self.theme, rad["frame"], self.ui_opacity)
+            self.toolbar_window.refresh_layout()
         if hasattr(self, 'logo_window') and self.logo_window:
             rad = self.radius_tokens()
-            self.logo_window.apply_theme(self.theme, rad["frame"], self.ui_opacity, self._make_logo_icon(32))
+            self.logo_window.apply_theme(self.theme, rad["frame"], self.ui_opacity,
+                                         self._make_logo_icon(self.logo_window.icon_size()))
+            self._sync_split_geometry(follow=not getattr(self, "_toolbar_detached", False))
 
     def sync_icon_buttons(self):
         """把经典按钮的状态单向投影到图标按钮上。
@@ -8034,7 +8116,10 @@ class ControlPanel(QWidget):
             if self.toolbar_window.icon_wb_box.isHidden() == want_visible:
                 self.toolbar_window.icon_wb_box.setVisible(want_visible)
                 if self.ui_mode == "icon":
-                    self.toolbar_window.adjustSize()
+                    self.toolbar_window.refresh_layout()
+                    self._sync_split_geometry(follow=not getattr(self, "_toolbar_detached", False))
+                    if getattr(self, "menu_panel", None) is not None and self.menu_panel.isVisible():
+                        self.position_menu_panel()
 
     def set_ui_mode(self, mode, persist=True):
         """图标主面板是唯一界面，分体设计：显示LOGO和工具栏窗口。"""
@@ -8047,16 +8132,15 @@ class ControlPanel(QWidget):
         if hasattr(self, 'logo_window') and hasattr(self, 'toolbar_window'):
             self.logo_window.show()
             self.toolbar_window.show()
-            # 初始位置：屏幕左上角附近
-            from PyQt6.QtWidgets import QApplication
-            screen = QApplication.primaryScreen().geometry()
-            self.logo_window.move(20, 20)
-            logo_pos = self.logo_window.pos()
-            logo_size = self.logo_window.size()
-            if self.orientation == "portrait":
-                self.toolbar_window.move(logo_pos.x(), logo_pos.y() + logo_size.height() + 2)
-            else:
-                self.toolbar_window.move(logo_pos.x() + logo_size.width() + 2, logo_pos.y())
+            # 只有没有保存过位置（首次启动）才落到左上角；否则 load_settings 刚恢复的
+            # 位置会被这里覆盖，用户每次启动都发现 LOGO 又跑回 (20, 20)。
+            if not getattr(self, "_split_position_restored", False):
+                self.logo_window.move(20, 20)
+                self._split_position_restored = True
+            self._sync_split_geometry()
+            # 刚 show() 出来的窗口还没进 owner 链，先钉到画布之上，别等心跳
+            self.raise_floating(self.toolbar_window)
+            self.raise_floating(self.logo_window)
         self.sync_icon_buttons()
         if getattr(self, "menu_panel", None) is not None and self.menu_panel.isVisible():
             self.position_menu_panel()
@@ -8251,7 +8335,7 @@ class ControlPanel(QWidget):
 
     def on_global_key_press(self, key):
         if key == keyboard.Key.f12:
-            self.close_to_background()
+            self.background_requested.emit()
             return False
 
     def close_to_background(self):
@@ -8925,19 +9009,13 @@ class ControlPanel(QWidget):
         if not frame.isValid() or frame.width() <= 0 or frame.height() <= 0:
             frame = self.geometry()
 
-        # 只有在真实运行（非测试）且toolbar_window已正确初始化时才使用它
-        # 判据：toolbar_window可见、ControlPanel不可见（真实icon模式）或两者位置接近（同步）
+        # 分体设计里用户看到的「主面板」是工具栏窗口；只要它显示着就以它为准。
+        # ControlPanel 自身在图标模式下是一个透明的空壳（main_frame 隐藏），它的
+        # 几何和屏幕上的任何东西都对不上。
         if (hasattr(self, 'toolbar_window') and
             self.toolbar_window.isVisible() and
             self.toolbar_window.width() > 10):
-            tw_frame = self.toolbar_window.frameGeometry()
-            # 如果ControlPanel不可见，说明是真实icon模式，必须用toolbar_window
-            if not self.isVisible():
-                frame = tw_frame
-            # 如果两者位置接近（<100px），说明是同步的，可以用toolbar_window
-            elif (abs(frame.x() - tw_frame.x()) < 100 and
-                  abs(frame.y() - tw_frame.y()) < 100):
-                frame = tw_frame
+            frame = self.toolbar_window.frameGeometry()
 
         def fit(value, low, high):
             return max(low, min(high, value)) if high >= low else low
@@ -9321,7 +9399,10 @@ class ControlPanel(QWidget):
                 if nested:
                     nested.invalidate()
                     nested.activate()
-            self.setFixedSize(layout.sizeHint())
+            hint = layout.sizeHint()
+            # 分体模式下主面板只是个空壳（main_frame 隐藏），sizeHint 是 0×0；0×0 的
+            # 分层窗口刷新时 UpdateLayeredWindowIndirect 会报 GEN_FAILURE，至少给 1×1。
+            self.setFixedSize(max(1, hint.width()), max(1, hint.height()))
         else:
             self.adjustSize()
         # 尺寸一变就可能越界（进白板变高、横竖切换长宽互换），立刻收回屏幕内
@@ -9626,7 +9707,7 @@ class ControlPanel(QWidget):
     # 否则锚点指向的是隐藏着的经典按钮，位置全落在窗口左上角。
     ICON_ANCHOR_KEYS = {
         "btn_pen": "pen", "btn_eraser": "eraser", "btn_select": "select",
-        "btn_text": "text", "btn_shape": "shape", "btn_tools": "tools", "btn_file": "file",
+        "btn_text": "text", "btn_shape": "shape", "btn_tools": "tools", "btn_file": "folder",
         # 设置页也要贴着触发它的那颗键开，图标模式下那颗键是图标树里的 settings。
         "btn_settings": "settings",
     }
@@ -9784,6 +9865,11 @@ class ControlPanel(QWidget):
         """
         if not self.canvas or getattr(self, "_grabbing", False):
             return
+        # 后台状态下什么都不显示。进后台前 set_drawing_mode(False) 会排几个延迟重绑
+        # （最晚 540ms），那些回调在 hide() 之后才到，下面的 self.show() 会把主面板拉回来。
+        lifecycle = getattr(self, "lifecycle", None)
+        if lifecycle is not None and lifecycle.state == LifecycleState.HIDDEN:
+            return
         floatings = [
             w for w in (
                 getattr(self, "menu_panel", None),
@@ -9793,6 +9879,8 @@ class ControlPanel(QWidget):
                 getattr(self, "calc_panel", None),
                 getattr(self, "roster_panel", None),
                 getattr(self, "text_panel", None),
+                getattr(self, "toolbar_window", None),
+                getattr(self, "logo_window", None),
             ) if w is not None
         ]
         try:
@@ -10213,6 +10301,7 @@ class ControlPanel(QWidget):
             getattr(self, "mini_timer", None), getattr(self, "calc_panel", None),
             getattr(self, "roster_panel", None), getattr(self, "thumbnail_panel", None),
             getattr(self, "text_panel", None), getattr(self, "settings_panel", None),
+            getattr(self, "toolbar_window", None), getattr(self, "logo_window", None),
         ) if w is not None]
 
     def apply_window_opacity(self):
@@ -10268,6 +10357,10 @@ class ControlPanel(QWidget):
             getattr(self, "roster_panel", None),
             getattr(self, "thumbnail_panel", None),
             getattr(self, "mini_timer", None),
+            # 分体的工具栏和 LOGO 就是用户眼里的「主面板」：必须在链里，否则它们只是
+            # 置顶层里两个和全屏画布平级的兄弟，绘图模式下一律被画布盖住、点不到。
+            getattr(self, "toolbar_window", None),
+            getattr(self, "logo_window", None),
             self,
         ]
         return [w for w in order if w is not None and w.isVisible()]
@@ -10359,6 +10452,8 @@ class ControlPanel(QWidget):
         # 兜一次底的代价只是每 500ms 读十几个 isEnabled/objectName，换来的是「以后
         # 有人新增了一处状态变化却忘了调 sync」时，界面最多错半秒而不是一直错。
         self.sync_icon_buttons()
+        # LOGO 与工具栏的尺寸/位置一致性同样兜底（分辨率或任务栏变化后收回屏幕）
+        self._sync_split_geometry()
         self.apply_window_opacity()
         # 置顶重排会把主面板重新激活，从而抢走文字输入控件的键盘焦点。心跳每 500ms
         # 跑一次，所以文字面板打开后不到半秒键盘就失效了——报告里的「键盘根本无法
@@ -10808,6 +10903,7 @@ class ControlPanel(QWidget):
             if isinstance(logo_x, int) and isinstance(logo_y, int):
                 if hasattr(self, 'logo_window') and self.logo_window:
                     self.logo_window.move(logo_x, logo_y)
+                    self._split_position_restored = True
                     self._toolbar_detached = bool(settings.get("toolbar_detached", False))
                     toolbar_x, toolbar_y = settings.get("toolbar_x"), settings.get("toolbar_y")
                     if (self._toolbar_detached and isinstance(toolbar_x, int)
@@ -10815,7 +10911,8 @@ class ControlPanel(QWidget):
                         self._toolbar_saved_pos = (toolbar_x, toolbar_y)
                         self.toolbar_window.move(toolbar_x, toolbar_y)
                     else:
-                        self._reposition_toolbar_next_to_logo()
+                        self._toolbar_detached = False
+                    self._sync_split_geometry()
 
             # --- 5.5.0 外观设置 ---
             # 顺序有讲究：圆角先于 UI 模式。set_ui_mode 会切换可见的那棵树并
@@ -11269,6 +11366,24 @@ class ControlPanel(QWidget):
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             notify_user(self, tr("open_failed"), map_io_exception(exc, path), level="warning", exc=exc)
             return False
+
+    def restore_from_restart(self, path):
+        """托盘「重启软件」把当前工作存进临时文件再拉起新进程，新进程从这里接回。
+
+        临时文件不是用户的项目：接回后必须清掉 project_path，否则之后「保存」会默默写回
+        temp 目录；工作也仍算未保存。文件用完即删，重启一次不能留一份在 temp 里。
+        """
+        if not path or not os.path.isfile(path):
+            return False
+        ok = self.open_project_from_path(path)
+        self.project_path = None
+        self.project_dirty = bool(ok)
+        try:
+            os.remove(path)
+        except OSError:
+            LOGGER.debug("重启恢复文件删除失败: %s", path, exc_info=True)
+        track_event("restart_restored" if ok else "restart_restore_failed", file=os.path.basename(path))
+        return ok
 
     def collect_export_pages(self):
         """白板模式导出每一页（纯净渲染）；批注模式导出当前屏幕 + 批注。"""
@@ -12505,5 +12620,13 @@ if __name__ == "__main__":
     QTimer.singleShot(0, pnl.bind_topmost_stack)
     QTimer.singleShot(200, pnl.bind_topmost_stack)
     pnl.save_settings()
-    pnl.offer_autosave_restore()
+    # 托盘「重启软件」传来的恢复文件：接回它就不再问自动保存（那份更旧）。
+    restart_file = None
+    argv = sys.argv[1:]
+    if "--restore" in argv:
+        idx = argv.index("--restore")
+        if idx + 1 < len(argv):
+            restart_file = argv[idx + 1]
+    if not (restart_file and pnl.restore_from_restart(restart_file)):
+        pnl.offer_autosave_restore()
     sys.exit(app.exec())
