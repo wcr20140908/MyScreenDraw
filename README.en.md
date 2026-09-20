@@ -11,7 +11,7 @@ MyScreenDraw is a fullscreen annotation / whiteboard / math-teaching tool built 
 - **Random name picker, timer, presentation spotlight, calculator** — a whole lesson without switching apps
 - **Offline by default**: no account, and no data is ever uploaded. The only feature that touches the network is the **manual update check**, which is off out of the box and only fires when you click it yourself
 
-Current version **v6.0.0-beta.5**. The UI follows the system language in 8 languages: English, 中文, Français, Español, Deutsch, Русский, 한국어, 日本語.
+Current version **v6.0.0-beta.6**. The UI follows the system language in 8 languages: English, 中文, Français, Español, Deutsch, Русский, 한국어, 日本語.
 
 > Product screenshots are not included in the public release yet; the current local captures contain development-environment details and must not be committed to GitHub.
 
@@ -56,15 +56,17 @@ Current version **v6.0.0-beta.5**. The UI follows the system language in 8 langu
 - Export PNG / PDF / SVG / EPS
 - Drag a `.msd` / `.json` project file onto the main panel to open it
 
-### Settings & appearance (new in v5.5.0)
-The "Settings" button opens a settings page with five sections — appearance, interface, drawing, system, about:
+### Settings & appearance (beta.6)
+The Settings button opens five sections — appearance, interface, drawing, system, and about:
 
-- **Two interchangeable UIs**: the classic text-button toolbar, and an **all-icon toolbar** that is far more compact (every icon carries a tooltip). Both stay available; switch back any time
-- **UI opacity** 35%–100%, applied to the control panels only. **The canvas and your ink are never faded** — fading those would mean the drawing got lighter, not the interface
-- **Corner radius** 0–24px, applied to panels, buttons, sub-panels, menus and sliders together
-- Light/dark theme, toolbar orientation, shape recognition, multi-touch drawing and speed-to-width all moved here
-- **Start with Windows** (off by default): writes the current user's registry Run entry; turning it off deletes it. A portable copy moved to a new folder repairs the stored path automatically
-- **Manual update check** (off by default): one check per click, version number only, no downloads, no auto-update. See "Privacy & data safety" below
+- The toolbar uses one icon-based layout; the mode button is labeled **Mouse**
+- In mouse mode, annotation tools and whiteboard controls are hidden; only mouse, annotation, settings, and close remain. Click **Annotation** to return to drawing mode and reveal the full annotation menu
+- **UI opacity** 35%–100%, applied to the control panels only. **The canvas and your ink are never faded**
+- **Corner radius** 0–24px, applied consistently across panels and controls
+- Light/dark theme, toolbar orientation, shape recognition, multi-touch drawing, and speed-to-width remain in Settings
+- **Start with Windows** is off by default and writes only the current user's Run entry when enabled
+- **Update channel** lets you choose stable or preview releases
+- **In-app updates** ask before downloading and before installing, and preserve `data/`, `exports/`, settings, autosaves, roster data, and logs
 
 ## Usage
 
@@ -76,8 +78,8 @@ Before first use, calibrate: Tools → Drawing aids → **Calibrate this screen*
 - Protractor: align its centre with the angle vertex and its baseline with one side; hover inside the semicircle for a live angle, hold Shift to snap to whole degrees
 - Aids can be dragged to move, rotated with the teal handle, and **removed with a right-click**
 
-### Click-through mode
-Tap "Click-through" so the mouse/touch passes through to the app underneath; tap "Drawing mode" to resume annotating. Existing annotations are never lost.
+### Mouse and annotation modes
+Click **Mouse** to let mouse/touch input pass through the canvas to the application underneath; the toolbar contracts to its basic controls. Click **Annotation** to resume drawing and reveal the full annotation menu. Existing annotations are preserved.
 
 ### Project files & autosave
 - Tools → Open / Save manages `.msd` project files (all whiteboard pages included)
@@ -106,11 +108,12 @@ A: Yes, since v5.2.0. The pen and highlighter accept several contacts at once �
 ## Privacy & data safety
 
 - **No network by default**, and **no data is ever uploaded**. There is exactly one code path that can reach the network, described below
-- **Manual update check** (new in v5.5.0, off by default): only when you enable it in Settings *and* click "Check now" does the app send one HTTPS GET to GitHub's public endpoint `api.github.com/repos/wcr20140908/MyScreenDraw/releases/latest`, reading back nothing but a version number.
-  - No background polling, no check at startup
-  - The request carries only the app name and version (`User-Agent: MyScreenDraw/<version>`) — no machine identifier, no usage data
-  - If a newer version exists the app only asks whether to open the download page. It **never downloads, never auto-updates, and never executes anything from the network**
-  - For an environment that must stay fully offline: leave this switch off (its factory state) and the app makes no requests at all
+- **Update checks** (beta.6, off by default): choose stable or preview releases. The app contacts GitHub's release API (`api.github.com/repos/wcr20140908/MyScreenDraw/releases?per_page=30`) only when you click **Check now**.
+  - Downloads stay inside the application and run in a background thread
+  - The app asks before downloading and asks again before installing
+  - ZIP validation rejects path traversal, symlinks, duplicate entries, oversized archives, excessive member counts, and archives missing `MyScreenDraw.exe`
+  - Installation skips `data/`, `exports/`, settings, roster data, logs, and autosaves
+  - To stay fully offline, leave the switch off (the factory state)
 - **Start with Windows** (new in v5.5.0, off by default): when enabled, the app writes one value named `MyScreenDraw` under `HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run`, holding the path used to launch it. Turning the switch off deletes that value. Current user only — it never touches `HKEY_LOCAL_MACHINE`, needs no administrator rights, and changes nothing else in the system.
 - The local log (`data/events.jsonl`) may include file names — check it before sharing
 - The name list (`data/roster.json`) contains student names; treat it as personal data and never ship it with the program

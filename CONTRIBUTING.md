@@ -39,11 +39,10 @@ python main.py
 ### 跑测试
 
 ```powershell
-python -m unittest discover -s tests
+python -m pytest -q --ignore=tests/test_touch_injection.py --ignore=tests/test_multitouch_injection.py --ignore=tests/test_multitouch.py
 ```
 
-测试全部在**离屏模式**下运行（`QT_QPA_PLATFORM=offscreen`），不会弹窗、不会抢屏，
-可以安全地在开发机上反复执行。
+本地安全回归测试在离屏模式下运行，不会弹窗、不会抢屏；真实触控注入层必须单独运行，不属于默认构建门禁。
 
 ### 打包便携版（Windows）
 

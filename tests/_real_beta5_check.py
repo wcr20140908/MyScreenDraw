@@ -259,6 +259,27 @@ def run(app, pnl, cvs):
     check("real click on mode button leaves drawing mode", not cvs.is_drawing_mode,
           f"is_drawing_mode={cvs.is_drawing_mode}")
 
+    compact_visible = {key for key, button in tb.icon_buttons.items() if button.isVisible()}
+    check("mouse mode shows only compact controls",
+          compact_visible.issubset({"mode", "pen", "settings", "close"}),
+          str(sorted(compact_visible)))
+
+    pen = tb.icon_buttons["pen"]
+    c = pen.mapToGlobal(pen.rect().center())
+    click_logical(c.x(), c.y())
+    pump(600)
+    restored_visible = {key for key, button in tb.icon_buttons.items() if button.isVisible()}
+    check("annotation restores full toolbar", {"eraser", "select", "text", "shape", "tools", "undo", "redo", "clear"}.issubset(restored_visible),
+          str(sorted(restored_visible)))
+    check("annotation click opens annotation menu", bool(visible_subs(pnl)), str([s.__class__.__name__ for s in visible_subs(pnl)]))
+    pnl.show_only_sub(None)
+    mode = tb.icon_buttons["mode"]
+    c = mode.mapToGlobal(mode.rect().center())
+    click_logical(c.x(), c.y())
+    pump(500)
+    check("return to mouse mode after annotation", not cvs.is_drawing_mode,
+          f"is_drawing_mode={cvs.is_drawing_mode}")
+
     # ---- 3. LOGO 真实点击折叠/展开 ----
     c = logo.mapToGlobal(logo.rect().center())
     print("logo click at", c.x(), c.y(), "dragging-before", logo._dragging, "visible", tb.isVisible())

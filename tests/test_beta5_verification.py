@@ -61,6 +61,7 @@ class Beta5SplitUiTests(unittest.TestCase):
         cls.panel.close()
 
     def setUp(self):
+        self.panel.set_drawing_mode(True)
         self.panel.set_orientation("portrait")
         if self.canvas.whiteboard_mode:
             self.panel.toggle_whiteboard()

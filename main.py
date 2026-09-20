@@ -264,6 +264,11 @@ import logging
 import ast
 import contextlib
 import copy
+import tempfile
+import zipfile
+import shutil
+import stat
+import subprocess
 from datetime import datetime
 from persistence import (atomic_write_json, atomic_write_json_gz, read_json_maybe_gz,
                          cleanup_temp_files, normalize_project_data, make_project_data,
@@ -286,7 +291,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QLabel, QPushButton,
                              QVBoxLayout, QHBoxLayout, QWidget, QFrame, QGridLayout, QColorDialog, QSlider,
                              QInputDialog, QMessageBox, QMenu, QFileDialog, QLineEdit, QTextEdit, QListWidget,
                              QAbstractItemView, QSizePolicy, QListWidgetItem, QDialog, QDoubleSpinBox,
-                             QScroller, QToolTip, QScrollArea)
+                             QScroller, QToolTip, QScrollArea, QComboBox)
 from PyQt6.QtCore import (Qt, QPoint, QPointF, QRectF, QTimer, QTranslator, QLibraryInfo, QLine, pyqtSignal, QLocale, QEvent,
                           QSizeF, QMarginsF, QEventLoop, QSize, QUrl, QBuffer, QIODevice, QThread)
 from PyQt6.QtGui import (QPainter, QPen, QColor, QFont, QPainterPath, QFontMetricsF, QTransform, QPolygonF,
@@ -1229,11 +1234,15 @@ def heal_autostart():
 # 设计约束（刻意从严）：
 # ① 默认关闭。程序的默认状态仍然是完全不联网。
 # ② 只在用户亲手点「检查更新」时发一次请求，没有任何后台轮询、没有启动时自动检查。
-# ③ 只读取版本号，绝不下载、绝不执行任何东西。要装新版由用户自己去浏览器里下。
+# ③ 发现新版本后，只有用户分别确认下载和安装，才会在应用内获取并暂存官方 ZIP；不打开浏览器，也不静默执行远程内容。
 # ④ 只发出「当前版本是多少」这一个隐含信息，不带机器标识、不带使用数据。
 UPDATE_API_URL = "https://api.github.com/repos/wcr20140908/MyScreenDraw/releases/latest"
-UPDATE_PAGE_URL = "https://github.com/wcr20140908/MyScreenDraw/releases/latest"
+UPDATE_RELEASES_URL = "https://api.github.com/repos/wcr20140908/MyScreenDraw/releases?per_page=30"
 UPDATE_TIMEOUT_S = 6.0
+UPDATE_DOWNLOAD_TIMEOUT_S = 60.0
+MAX_UPDATE_ARCHIVE_BYTES = 512 * 1024 * 1024
+MAX_UPDATE_ARCHIVE_MEMBERS = 10000
+MAX_UPDATE_UNCOMPRESSED_BYTES = 1024 * 1024 * 1024
 
 
 def parse_version(text):
@@ -1257,6 +1266,50 @@ def parse_version(text):
             break
         parts.append(int(digits))
     return tuple(parts) if parts else None
+
+
+def fetch_release(channel="stable", url=UPDATE_RELEASES_URL, timeout=UPDATE_TIMEOUT_S):
+    """返回所选频道的完整 release 元数据。"""
+    import urllib.request
+    import urllib.error
+    request = urllib.request.Request(url, headers={
+        "Accept": "application/vnd.github+json",
+        "User-Agent": f"MyScreenDraw/{APP_VERSION}",
+    })
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = response.read(1024 * 1024)
+        data = json.loads(payload.decode("utf-8", errors="replace"))
+        releases = data if isinstance(data, list) else [data]
+        for release in releases:
+            if not isinstance(release, dict):
+                continue
+            if channel == "stable" and release.get("prerelease"):
+                continue
+            tag = release.get("tag_name") or release.get("name")
+            if not isinstance(tag, str) or not tag.strip():
+                continue
+            assets = release.get("assets") or []
+            asset = next((a for a in assets if isinstance(a, dict) and str(a.get("name", "")).lower().endswith(".zip")), None)
+            if asset is None:
+                continue
+            return {"tag": tag.strip(), "download_url": asset.get("browser_download_url"),
+                    "asset_name": asset.get("name"), "prerelease": bool(release.get("prerelease"))}, None
+        return None, "no_release"
+    except urllib.error.HTTPError as exc:
+        try:
+            remaining = exc.headers.get("X-RateLimit-Remaining")
+        except Exception:
+            remaining = None
+        if exc.code in (403, 429) and (remaining == "0" or remaining is None):
+            return None, "rate_limited"
+        return None, f"http_{exc.code}"
+    except urllib.error.URLError as exc:
+        return None, f"net_{getattr(exc, 'reason', 'unknown')}"
+    except json.JSONDecodeError:
+        return None, "bad_json"
+    except Exception as exc:
+        return None, f"error_{type(exc).__name__}"
 
 
 def fetch_latest_version(url=UPDATE_API_URL, timeout=UPDATE_TIMEOUT_S):
@@ -1303,21 +1356,111 @@ def fetch_latest_version(url=UPDATE_API_URL, timeout=UPDATE_TIMEOUT_S):
         return None, f"error_{type(exc).__name__}"
 
 
-class UpdateCheckWorker(QThread):
-    """在后台线程里跑那一次 GET。
+def validate_update_zip(path):
+    """Reject malformed or path-traversal update archives before staging."""
+    if os.path.getsize(path) > MAX_UPDATE_ARCHIVE_BYTES:
+        raise ValueError("archive_too_large")
+    with zipfile.ZipFile(path) as archive:
+        infos = archive.infolist()
+        if len(infos) > MAX_UPDATE_ARCHIVE_MEMBERS:
+            raise ValueError("too_many_archive_members")
+        total_uncompressed = 0
+        seen = set()
+        application = False
+        for info in infos:
+            normalized = info.filename.replace("\\", "/")
+            parts = normalized.split("/")
+            if (
+                normalized.startswith("/")
+                or (len(parts[0]) >= 2 and parts[0][1] == ":")
+                or ".." in parts
+            ):
+                raise ValueError("unsafe_archive")
+            mode = (info.external_attr >> 16) & 0xFFFF
+            if stat.S_ISLNK(mode):
+                raise ValueError("unsafe_archive")
+            if normalized in seen:
+                raise ValueError("duplicate_archive_member")
+            seen.add(normalized)
+            total_uncompressed += int(info.file_size)
+            if total_uncompressed > MAX_UPDATE_UNCOMPRESSED_BYTES:
+                raise ValueError("archive_uncompressed_too_large")
+            if not normalized.rstrip("/").split("/")[-1].lower() == "myscreendraw.exe":
+                continue
+            if info.is_dir():
+                continue
+            application = True
+        if not application:
+            raise ValueError("missing_application")
+        return len(infos)
 
-    必须离开 UI 线程：教室网络常常是「能连但极慢」，在 UI 线程上等 6 秒超时，
-    界面就是冻住 6 秒——这正是 5.4.1 刚修掉的那类问题（软键盘冷启动阻塞 UI），
-    不能在新功能里重犯。
-    """
-    finished_check = pyqtSignal(object, object)   # (tag, error)
 
-    def __init__(self, parent=None):
+def make_update_batch(zip_path, install_dir):
+    """Create a local-only Windows updater; user data directories are never copied."""
+    root = tempfile.mkdtemp(prefix="myscreendraw_apply_")
+    stage = os.path.join(root, "stage")
+    batch = os.path.join(root, "apply.cmd")
+    def q(value):
+        return '"' + str(value).replace('"', '""') + '"'
+    lines = [
+        "@echo off",
+        "setlocal",
+        "timeout /t 2 /nobreak >nul",
+        f"set \"MSD_ZIP={zip_path}\"",
+        f"set \"MSD_STAGE={stage}\"",
+        f"set \"MSD_INSTALL={install_dir}\"",
+        "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$ErrorActionPreference='Stop'; Expand-Archive -LiteralPath $env:MSD_ZIP -DestinationPath $env:MSD_STAGE -Force\"",
+        "if errorlevel 1 goto fail",
+        "set \"SRC=%MSD_STAGE%\"",
+        f"if exist {q(os.path.join(stage, 'MyScreenDraw.exe'))} goto copy_files",
+        f"if exist {q(os.path.join(stage, 'MyScreenDraw', 'MyScreenDraw.exe'))} set \"SRC=%MSD_STAGE%\\MyScreenDraw\"",
+        f"if not exist {q(os.path.join(stage, 'MyScreenDraw.exe'))} if not exist {q(os.path.join(stage, 'MyScreenDraw', 'MyScreenDraw.exe'))} goto fail",
+        ":copy_files",
+        "robocopy \"%SRC%\" \"%MSD_INSTALL%\" /E /XF config.json roster.json events.jsonl /XD data exports /NFL /NDL /NJH /NJS /NP",
+        "if errorlevel 8 goto fail",
+        "start \"\" \"%MSD_INSTALL%\\MyScreenDraw.exe\"",
+        f"rmdir /s /q {q(root)}",
+        "exit /b 0",
+        ":fail",
+        f"rmdir /s /q {q(root)}",
+        "exit /b 1",
+    ]
+    with open(batch, "w", encoding="utf-8", newline="\r\n") as handle:
+        handle.write("\r\n".join(lines) + "\r\n")
+    return batch
+
+
+class UpdateDownloadWorker(QThread):
+    finished_download = pyqtSignal(object, object)
+
+    def __init__(self, url, parent=None):
         super().__init__(parent)
+        self.url = url
 
     def run(self):
-        tag, error = fetch_latest_version()
-        self.finished_check.emit(tag, error)
+        import urllib.request
+        try:
+            root = tempfile.mkdtemp(prefix="myscreendraw_update_")
+            path = os.path.join(root, "update.zip")
+            request = urllib.request.Request(self.url, headers={"User-Agent": f"MyScreenDraw/{APP_VERSION}"})
+            with urllib.request.urlopen(request, timeout=UPDATE_DOWNLOAD_TIMEOUT_S) as response, open(path, "wb") as out:
+                shutil.copyfileobj(response, out, length=1024 * 64)
+            self.finished_download.emit(path, None)
+        except Exception as exc:
+            self.finished_download.emit(None, f"error_{type(exc).__name__}")
+
+
+class UpdateCheckWorker(QThread):
+    """在后台线程里读取所选频道的 release 元数据。"""
+    finished_check = pyqtSignal(object, object)
+
+    def __init__(self, channel="stable", parent=None):
+        super().__init__(parent)
+        self.channel = channel
+
+    def run(self):
+        release, error = fetch_release(self.channel)
+        self.finished_check.emit(release, error)
 
 
 # Windows 触控/手写笔手势开关（MSDN: Disabling the press and hold gesture）
@@ -7418,8 +7561,11 @@ class ControlPanel(QWidget):
         self.ui_radius = self.RADIUS_DEFAULT
         self.ui_opacity = 100           # 百分比；作用于浮窗，不作用于画布（否则墨迹跟着淡）
         self.update_check_enabled = False   # 默认关闭：不联网是本程序的默认状态
+        self.update_channel = "stable"
         self.settings_panel = None      # 懒建
         self._update_worker = None
+        self._update_download_worker = None
+        self._pending_update_release = None
         self._bound_key = None
         self._topmost_state = None
         self._topmost_ceiling = None    # 上一拍审计得到的天花板（ClassIsland 最低的可见窗口）
@@ -7464,7 +7610,7 @@ class ControlPanel(QWidget):
         title_row.addWidget(self.title_label)
         self.toolbar_layout.addLayout(title_row)
 
-        self.btn_mode = QPushButton(tr("passthrough")); self.btn_mode.setObjectName("ModeBtn")
+        self.btn_mode = QPushButton(tr("mouse")); self.btn_mode.setObjectName("ModeBtn")
         self.btn_mode.clicked.connect(self.toggle_mode); self.toolbar_layout.addWidget(self.btn_mode)
 
         self.btn_pen = QPushButton(tr("annotate")); self.btn_pen.setObjectName("ActiveTool")
@@ -7980,6 +8126,7 @@ class ControlPanel(QWidget):
             btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
             btn.setObjectName("IconBtn")
             btn.setProperty("icon_name", icon_name)
+            btn.setProperty("wb_compact", True)
             btn.setIcon(make_ui_icon(icon_name, self.theme["text"], ICON_GLYPH))
             btn.setIconSize(QSize(ICON_GLYPH, ICON_GLYPH))
             btn.setText(tr(tip_key))
@@ -8084,11 +8231,18 @@ class ControlPanel(QWidget):
         buttons = getattr(self, "icon_buttons", None)
         if not buttons:
             return
+        compact_keys = {"mode", "pen", "settings", "close"}
+        compact_mouse_mode = self.canvas is not None and not self.canvas.is_drawing_mode
+        layout_changed = False
         for key, icon_name, tip_key, handler_name, mirror_name in self.ICON_ACTIONS + self.ICON_WB_ACTIONS:
             btn = buttons.get(key)
             source = getattr(self, mirror_name, None)
             if btn is None or source is None:
                 continue
+            wanted_visible = not compact_mouse_mode or key in compact_keys
+            if btn.isHidden() != (not wanted_visible):
+                btn.setVisible(wanted_visible)
+                layout_changed = True
             btn.setEnabled(source.isEnabled())
             active = source.objectName() == "ActiveTool"
             want = "IconBtnActive" if active else "IconBtn"
@@ -8101,7 +8255,10 @@ class ControlPanel(QWidget):
             if text and key not in ("pages",):
                 btn.setToolTip(text)
                 btn.setAccessibleName(text)
-        # 页码按钮显示的是「3/7」这种文字，图标之外还要把页码带上
+        # 鼠标模式只保留基础入口；进入批注后恢复完整工具集。
+        if layout_changed and self.ui_mode == "icon" and hasattr(self, "toolbar_window"):
+            self.toolbar_window.refresh_layout()
+            self._sync_split_geometry(follow=not getattr(self, "_toolbar_detached", False))
         page_btn = buttons.get("pages")
         if page_btn is not None and getattr(self, "page_label", None) is not None:
             label = self.page_label.text().strip()
@@ -9127,6 +9284,7 @@ class ControlPanel(QWidget):
         - 其它情况 → 打开三选一
         """
         self.set_drawing_mode(True)
+        self.sync_icon_buttons()
         # 这里必须真正把工具切回批注笔，而不是只把高亮挪到「批注」。
         # 只挪高亮会让画布停在上一个工具（典型是橡皮）：高亮说在批注、鼠标却还拖着橡皮
         # 光标圈、点画布是擦除；而且 draw_state 仍是 ERASER，用户再点「橡皮」时
@@ -9586,6 +9744,7 @@ class ControlPanel(QWidget):
         if not cv:
             return
         if cv.is_drawing_mode == enabled:
+            self.sync_icon_buttons()
             return
         cv.is_drawing_mode = enabled
         if not enabled:
@@ -9612,7 +9771,7 @@ class ControlPanel(QWidget):
         cv.show()
         self._bound_key = None
         self._topmost_state = None
-        self.btn_mode.setText(tr("passthrough") if enabled else tr("drawing_mode"))
+        self.btn_mode.setText(tr("mouse"))
         self.btn_mode.setStyleSheet(f"background-color: {self.theme['mode'] if enabled else self.theme['mode_off']}; color: white;")
         track_event("mode_changed", drawing_mode=enabled)
         # 画布 HWND 刚被 setWindowFlag+show() 重建，新画布默认压在面板之上。
@@ -10060,9 +10219,9 @@ class ControlPanel(QWidget):
         # ---------- 主面板 ----------
         section("settings_panel_group")
         orient_row = QHBoxLayout(); orient_row.setSpacing(3)
-        self.btn_orient_portrait = QPushButton(tr("portrait"))
+        self.btn_orient_portrait = QPushButton(tr("orient_portrait"))
         self.btn_orient_portrait.clicked.connect(lambda: self._set_orientation_from_settings("portrait"))
-        self.btn_orient_landscape = QPushButton(tr("landscape"))
+        self.btn_orient_landscape = QPushButton(tr("orient_landscape"))
         self.btn_orient_landscape.clicked.connect(lambda: self._set_orientation_from_settings("landscape"))
         orient_row.addWidget(self.btn_orient_portrait)
         orient_row.addWidget(self.btn_orient_landscape)
@@ -10090,6 +10249,11 @@ class ControlPanel(QWidget):
         self.btn_update_toggle = QPushButton(tr("update_check_off"))
         self.btn_update_toggle.clicked.connect(self.toggle_update_check)
         form.addWidget(self.btn_update_toggle)
+        self.update_channel_combo = QComboBox()
+        self.update_channel_combo.addItem(tr("update_channel_stable"), "stable")
+        self.update_channel_combo.addItem(tr("update_channel_preview"), "preview")
+        self.update_channel_combo.currentIndexChanged.connect(self.set_update_channel)
+        form.addWidget(self.update_channel_combo)
         self.btn_check_update = QPushButton(tr("check_update_now"))
         self.btn_check_update.clicked.connect(self.check_for_updates)
         form.addWidget(self.btn_check_update)
@@ -10168,6 +10332,8 @@ class ControlPanel(QWidget):
         mark(self.btn_autostart, on)
 
         allowed = bool(self.update_check_enabled)
+        if hasattr(self, "update_channel_combo"):
+            self.update_channel_combo.setCurrentIndex(0 if self.update_channel == "stable" else 1)
         self.btn_update_toggle.setText(tr("update_check_on") if allowed else tr("update_check_off"))
         mark(self.btn_update_toggle, allowed)
         # 更新检查关着的时候，「立即检查」不可点——避免出现「我明明关了它却联网」
@@ -10208,6 +10374,14 @@ class ControlPanel(QWidget):
             self.update_status_label.setText(tr("autostart_saved") if want else "")
         track_event("autostart_toggled", enabled=want, ok=ok)
 
+    def set_update_channel(self, index):
+        channel = self.update_channel_combo.itemData(index)
+        if channel not in ("stable", "preview"):
+            return
+        self.update_channel = channel
+        self.save_settings()
+        track_event("update_channel_changed", channel=channel)
+
     def toggle_update_check(self):
         self.update_check_enabled = not self.update_check_enabled
         self.sync_settings_panel()
@@ -10222,18 +10396,16 @@ class ControlPanel(QWidget):
             return          # 已经在查了，别叠第二个请求
         self.btn_check_update.setEnabled(False)
         self.update_status_label.setText(tr("update_checking"))
-        worker = UpdateCheckWorker(self)
+        worker = UpdateCheckWorker(self.update_channel, self)
         worker.finished_check.connect(self._on_update_result)
         # 线程对象要留着引用：局部变量出作用域被回收会导致 QThread 未结束就析构
         self._update_worker = worker
         worker.start()
         track_event("update_check_started")
 
-    def _on_update_result(self, tag, error):
+    def _on_update_result(self, release, error):
         self.btn_check_update.setEnabled(bool(self.update_check_enabled))
         if error == "rate_limited":
-            # 不用 update_failed 那句「检查失败：xxx」。被限流不是失败，是「现在问不了，
-            # 过会儿再问」，而且用户什么都不用修——照着「检查失败」的措辞，人会去翻网络设置。
             self.update_status_label.setText(tr("update_rate_limited"))
             track_event("update_check_rate_limited")
             return
@@ -10241,6 +10413,21 @@ class ControlPanel(QWidget):
             self.update_status_label.setText(trf("update_failed", detail=str(error)))
             track_event("update_check_failed", error=str(error))
             return
+        if isinstance(release, str):
+            remote = parse_version(release)
+            local = parse_version(APP_VERSION)
+            if remote is None or local is None:
+                self.update_status_label.setText(trf("update_failed", detail="bad_version"))
+            elif remote > local:
+                self.update_status_label.setText(trf("update_available", value=release))
+                self._offer_update_page(release)
+            else:
+                self.update_status_label.setText(tr("update_current"))
+            return
+        if not isinstance(release, dict):
+            self.update_status_label.setText(trf("update_failed", detail="bad_release"))
+            return
+        tag = release.get("tag")
         remote = parse_version(tag)
         local = parse_version(APP_VERSION)
         if remote is None or local is None:
@@ -10248,44 +10435,82 @@ class ControlPanel(QWidget):
             return
         if remote > local:
             self.update_status_label.setText(trf("update_available", value=str(tag)))
-            self._offer_update_page(tag)
+            self._offer_update_page(release)
         else:
             self.update_status_label.setText(tr("update_current"))
-        track_event("update_check_done", remote=str(tag), newer=bool(remote > local))
+        track_event("update_check_done", remote=str(tag), newer=bool(remote > local), channel=self.update_channel)
 
     def stop_update_worker(self):
-        """退出前等检查更新的线程收尾。
+        """Stop network workers before the Qt event loop exits."""
+        for attr in ("_update_worker", "_update_download_worker"):
+            worker = getattr(self, attr, None)
+            if worker is None:
+                continue
+            try:
+                if worker.isRunning():
+                    worker.wait(2000)
+            except RuntimeError:
+                pass
+            setattr(self, attr, None)
 
-        wait 给 2 秒上限：请求本身有 6 秒超时，但退出时不该让用户对着一个不消失的
-        窗口等 6 秒。超时就放弃等待——线程只做一次只读 HTTP GET，没有需要回滚的副作用。
-        """
-        worker = self._update_worker
-        if worker is None:
+    def _offer_update_page(self, release):
+        """Ask before downloading; the download stays inside the application."""
+        if isinstance(release, str):
+            release = {"tag": release, "download_url": None, "asset_name": ""}
+        url = release.get("download_url") if isinstance(release, dict) else None
+        tag = release.get("tag", "") if isinstance(release, dict) else ""
+        if not url:
+            self.update_status_label.setText(trf("update_failed", detail="missing_asset"))
             return
-        try:
-            if worker.isRunning():
-                worker.wait(2000)
-        except RuntimeError:
-            pass
-        self._update_worker = None
-
-    def _offer_update_page(self, tag):
-        """发现新版本：问一句，用户同意才打开浏览器。不下载、不执行任何东西。"""
         box = QMessageBox(self)
         box.setWindowTitle(tr("settings"))
         box.setText(trf("update_available", value=str(tag)))
-        box.setInformativeText(tr("update_open_page"))
-        box.setStandardButtons(QMessageBox.StandardButton.Open | QMessageBox.StandardButton.Cancel)
+        box.setInformativeText(tr("update_download"))
+        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
         box.setDefaultButton(QMessageBox.StandardButton.Cancel)
         box.setStyleSheet(self.styleSheet())
-        self.timer.stop()          # 弹窗期间停心跳，避免置顶重排把它压下去
+        self.timer.stop()
         try:
-            if box.exec() == QMessageBox.StandardButton.Open:
-                import webbrowser
-                webbrowser.open(UPDATE_PAGE_URL)
-                track_event("update_page_opened")
+            if box.exec() == QMessageBox.StandardButton.Yes:
+                self.btn_check_update.setEnabled(False)
+                self.update_status_label.setText(tr("update_checking"))
+                worker = UpdateDownloadWorker(url, self)
+                worker.finished_download.connect(self._on_update_downloaded)
+                self._update_download_worker = worker
+                worker.start()
+                track_event("update_download_started", tag=str(tag), channel=self.update_channel)
         finally:
             self.timer.start(self.HEARTBEAT_MS)
+
+    def _on_update_downloaded(self, path, error):
+        if error:
+            self.update_status_label.setText(trf("update_failed", detail=str(error)))
+            self.btn_check_update.setEnabled(bool(self.update_check_enabled))
+            return
+        try:
+            validate_update_zip(path)
+        except Exception as exc:
+            self.update_status_label.setText(trf("update_failed", detail=str(exc)))
+            self.btn_check_update.setEnabled(bool(self.update_check_enabled))
+            return
+        box = QMessageBox(self)
+        box.setWindowTitle(tr("settings"))
+        box.setText(tr("update_install_prompt"))
+        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        box.setStyleSheet(self.styleSheet())
+        if box.exec() != QMessageBox.StandardButton.Yes:
+            self.btn_check_update.setEnabled(bool(self.update_check_enabled))
+            return
+        try:
+            batch = make_update_batch(path, APP_DIR)
+            subprocess.Popen(["cmd.exe", "/d", "/c", batch], close_fds=True)
+            track_event("update_install_started", install_dir=APP_DIR)
+            self.save_settings()
+            QApplication.quit()
+        except Exception as exc:
+            self.update_status_label.setText(trf("update_failed", detail=str(exc)))
+            self.btn_check_update.setEnabled(bool(self.update_check_enabled))
 
     def opacity_targets(self):
         """哪些窗口跟随透明度设置。
@@ -10642,6 +10867,7 @@ class ControlPanel(QWidget):
             "ui_radius": int(self.ui_radius),
             "ui_opacity": int(self.ui_opacity),
             "update_check_enabled": bool(self.update_check_enabled),
+            "update_channel": self.update_channel if self.update_channel in ("stable", "preview") else "stable",
         }
 
     def save_settings(self):
@@ -10932,6 +11158,9 @@ class ControlPanel(QWidget):
             update_check = settings.get("update_check_enabled")
             if isinstance(update_check, bool):
                 self.update_check_enabled = update_check
+            update_channel = settings.get("update_channel")
+            if update_channel in ("stable", "preview"):
+                self.update_channel = update_channel
 
             self.sync_settings_ui()
             track_event("settings_loaded", tool=cv.draw_state, theme=self.theme_name)

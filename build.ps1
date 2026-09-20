@@ -4,8 +4,8 @@ $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $root
 
 $version = (& python -c "from version import VERSION; print(VERSION)").Trim()
-if ($version -ne "6.0.0-beta.5") {
-    throw "Release build requires version 6.0.0-beta.5, found '$version'"
+if ($version -ne "6.0.0-beta.6") {
+    throw "Release build requires version 6.0.0-beta.6, found '$version'"
 }
 
 # Never package checked-out runtime data or stale PyInstaller output.
@@ -28,7 +28,7 @@ $env:QT_QPA_PLATFORM = "offscreen"
 $previousErrorAction = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
 try {
-    python -m unittest discover -s tests
+    python -m pytest -q --ignore=tests/test_touch_injection.py --ignore=tests/test_multitouch_injection.py --ignore=tests/test_multitouch.py
     $testsExit = $LASTEXITCODE
 } finally {
     $ErrorActionPreference = $previousErrorAction

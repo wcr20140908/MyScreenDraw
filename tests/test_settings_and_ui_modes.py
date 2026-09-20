@@ -467,11 +467,9 @@ class UpdateCheckTests(_PanelCase):
 
         ui_thread = QThread.currentThread()
         seen = []
-        original = self.main.fetch_latest_version
-        # 回一个远低于当前版本的号，_on_update_result 就走「已是最新」那支，
-        # 不会弹出模态的 _offer_update_page 把测试挂住。
-        self.main.fetch_latest_version = lambda *a, **k: (
-            seen.append(QThread.currentThread()), ("v0.0.1", None))[1]
+        original = self.main.fetch_release
+        self.main.fetch_release = lambda *a, **k: (
+            seen.append(QThread.currentThread()), ({"tag": "v0.0.1", "download_url": "https://example.invalid/update.zip"}, None))[1]
         self.panel.open_settings_panel()
         was_enabled = self.panel.update_check_enabled
         self.panel.update_check_enabled = True
@@ -487,7 +485,7 @@ class UpdateCheckTests(_PanelCase):
                              self.main.tr("update_current"),
                              "比当前版本旧的号应当报「已是最新」")
         finally:
-            self.main.fetch_latest_version = original
+            self.main.fetch_release = original
             self.panel.update_check_enabled = was_enabled
             self.panel.stop_update_worker()
             self.panel.sync_settings_panel()

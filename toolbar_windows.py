@@ -211,6 +211,7 @@ class ToolbarWindow(QWidget):
         self.orientation = "portrait"
         self.icon_buttons = {}
         self._button_width = BUTTON_WIDTH
+        self._wb_button_width = BUTTON_WIDTH
         self._button_height = BUTTON_HEIGHT
         self._wb_columns = 1
         self._main_rows = 1
@@ -317,6 +318,7 @@ class ToolbarWindow(QWidget):
         """根据方向重排按钮：横版单行，竖版单列，然后按内容收紧并收进屏幕。"""
         self._place_buttons()
         self._button_width = self._measure_button_width()
+        self._wb_button_width = max(44, min(self._button_width, 52))
         # 先按标准高度试，放不下再压矮；压到底还放不下就把白板控制区折成两列。
         self._button_height = BUTTON_HEIGHT
         self._wb_columns = 1
@@ -364,8 +366,8 @@ class ToolbarWindow(QWidget):
             cols = max(1, self._wb_columns)
             for i, btn in enumerate(wb_buttons):
                 self.icon_wb_grid.addWidget(btn, i // cols, i % cols)
-        for btn in main_buttons + wb_buttons:
-            btn.setVisible(True)
+        # Button visibility is owned by sync_icon_buttons(); relayout must not
+        # resurrect controls hidden by mouse mode.
 
     def _measure_button_width(self):
         """按钮宽度由最长文案决定：英文/德文的「穿透」比中文长得多，56px 会把字截掉。"""
@@ -453,6 +455,10 @@ class ToolbarWindow(QWidget):
             QToolButton#IconBtnActive {{
                 background-color: {theme['accent']};
                 color: {theme['active_text']};
+            }}
+            QToolButton[wb_compact="true"] {{
+                min-width: {self._wb_button_width}px;
+                max-width: {self._wb_button_width}px;
             }}
         """)
         self.setWindowOpacity(opacity / 100.0)
