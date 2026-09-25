@@ -1,5 +1,7 @@
 param([Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$Commit)
 $ErrorActionPreference = 'Stop'
+# PS 5.1 progress rendering makes multi-MB uploads CPU-bound.
+$ProgressPreference = 'SilentlyContinue'
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location -LiteralPath $root
 $token = $env:GITHUB_TOKEN
@@ -12,7 +14,7 @@ $asset = "MyScreenDraw-$tag-windows-x64.zip"
 $assetPath = Join-Path $root $asset
 $notesPath = Join-Path $root "release-notes-$tag.md"
 if (-not (Test-Path -LiteralPath $assetPath -PathType Leaf)) { throw "Missing release asset: $asset" }
-$notes = Get-Content -LiteralPath $notesPath -Raw -Encoding UTF8
+$notes = [IO.File]::ReadAllText($notesPath, [Text.Encoding]::UTF8)
 python -c "import sys; from main import validate_update_zip; validate_update_zip(sys.argv[1])" $assetPath
 if ($LASTEXITCODE -ne 0) { throw 'Update archive validation failed' }
 $hash = (Get-FileHash -LiteralPath $assetPath -Algorithm SHA256).Hash.ToLowerInvariant()
