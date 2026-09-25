@@ -268,7 +268,12 @@ import tempfile
 import zipfile
 import shutil
 import stat
+import re
 import subprocess
+import urllib.parse
+import urllib.request
+import urllib.error
+import hashlib
 from datetime import datetime
 from persistence import (atomic_write_json, atomic_write_json_gz, read_json_maybe_gz,
                          cleanup_temp_files, normalize_project_data, make_project_data,
@@ -389,6 +394,17 @@ def map_io_exception(exc, path="", *, default_key="err_io"):
 
 
 # 确保必要的目录存在
+def set_windows_app_user_model_id():
+    """让所有 Qt 顶层窗口归到同一个 Windows 任务栏应用组。"""
+    if sys.platform != "win32":
+        return
+    try:
+        shell32 = ctypes.windll.shell32
+        shell32.SetCurrentProcessExplicitAppUserModelID("MyScreenDraw.Desktop")
+    except Exception:
+        LOGGER.debug("cannot set Windows AppUserModelID", exc_info=True)
+
+
 def ensure_directories():
     """启动时确保所有必需的目录都已创建。"""
     for directory in [DATA_DIR, EXPORT_DIR, AUTOSAVE_DIR]:
@@ -1136,6 +1152,65 @@ def set_window_owner(window_id, owner_id):
     except Exception:
         pass
 
+
+WS_EX_TOOLWINDOW = 0x00000080
+WS_EX_APPWINDOW = 0x00040000
+
+
+def mark_tool_window(window_id):
+    """让一扇窗口不上任务栏。
+
+    只改扩展样式不够：Qt 的 Tool 标志在窗口重建后会丢，而且有些窗口即使带了
+    工具窗样式，Windows 仍按「无 owner 的可见顶层窗口」给它一个任务栏按钮。
+    这里两步都做——补上工具窗样式、去掉应用窗口样式，再调任务栏的删除接口。
+    """
+    try:
+        hwnd = int(window_id)
+        if not hwnd:
+            return
+        user32 = ctypes.windll.user32
+        get_long = user32.GetWindowLongPtrW if hasattr(user32, "GetWindowLongPtrW") else user32.GetWindowLongW
+        set_long = user32.SetWindowLongPtrW if hasattr(user32, "SetWindowLongPtrW") else user32.SetWindowLongW
+        get_long.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        get_long.restype = ctypes.c_ssize_t
+        set_long.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_ssize_t]
+        set_long.restype = ctypes.c_ssize_t
+        style = get_long(ctypes.c_void_p(hwnd), GWL_EXSTYLE) or 0
+        wanted = (style | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW
+        if wanted != style:
+            set_long(ctypes.c_void_p(hwnd), GWL_EXSTYLE, wanted)
+        _delete_from_taskbar(hwnd)
+    except Exception:
+        pass
+
+
+def _delete_from_taskbar(hwnd):
+    """通知任务栏把这个窗口的按钮删掉。
+
+    用 ole32/oleaut32 直接调 ITaskbarList::DeleteTab，不依赖第三方 COM 库。
+    失败就放弃，不影响窗口本身。
+    """
+    try:
+        ole32 = ctypes.windll.ole32
+        clsid = (ctypes.c_byte * 16).from_buffer_copy(
+            bytes.fromhex("44fdfd56d06f11d0958a006097c9a090"))
+        iid = (ctypes.c_byte * 16).from_buffer_copy(
+            bytes.fromhex("42fdfd56d06f11d0958a006097c9a090"))
+        obj = ctypes.c_void_p()
+        hr = ole32.CoCreateInstance(ctypes.byref(clsid), None, 1,
+                                     ctypes.byref(iid), ctypes.byref(obj))
+        if hr < 0 or not obj:
+            return
+        vtable = ctypes.cast(obj, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p)))[0]
+        init = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p)(vtable[3])
+        delete = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p)(vtable[5])
+        release = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(vtable[2])
+        if init(obj) >= 0:
+            delete(obj, ctypes.c_void_p(int(hwnd)))
+        release(obj)
+    except Exception:
+        pass
+
 # --- 开机自启：写当前用户的 Run 键 ---
 # 只碰 HKEY_CURRENT_USER，不碰 HKEY_LOCAL_MACHINE：后者需要管理员权限，且会给这台机器
 # 的所有账户装上自启，那不是用户在设置页里勾一个开关所应当承担的后果。
@@ -1230,71 +1305,95 @@ def heal_autostart():
     return ok
 
 
-# --- 手动检查更新 ---
-# 设计约束（刻意从严）：
-# ① 默认关闭。程序的默认状态仍然是完全不联网。
-# ② 只在用户亲手点「检查更新」时发一次请求，没有任何后台轮询、没有启动时自动检查。
-# ③ 发现新版本后，只有用户分别确认下载和安装，才会在应用内获取并暂存官方 ZIP；不打开浏览器，也不静默执行远程内容。
-# ④ 只发出「当前版本是多少」这一个隐含信息，不带机器标识、不带使用数据。
+# --- 更新检查：默认每日自动检查；下载和安装始终由用户手动确认 ---
+# 只发送版本号作为 User-Agent，不携带机器标识和使用数据。
 UPDATE_API_URL = "https://api.github.com/repos/wcr20140908/MyScreenDraw/releases/latest"
 UPDATE_RELEASES_URL = "https://api.github.com/repos/wcr20140908/MyScreenDraw/releases?per_page=30"
 UPDATE_TIMEOUT_S = 6.0
 UPDATE_DOWNLOAD_TIMEOUT_S = 60.0
+UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000
 MAX_UPDATE_ARCHIVE_BYTES = 512 * 1024 * 1024
 MAX_UPDATE_ARCHIVE_MEMBERS = 10000
 MAX_UPDATE_UNCOMPRESSED_BYTES = 1024 * 1024 * 1024
 
 
 def parse_version(text):
-    """把 "v5.5.0" / "5.5.0" 解析成 (5, 5, 0)；解析不了返回 None。
-
-    只认数字段，遇到 "5.5.0-beta.1" 这类预发布后缀就在第一个非数字段处停下——预发布
-    版本不该被当成比正式版更新的东西推给用户。
-    """
+    """Return a comparable semantic version: beta < rc < final, including beta numbers."""
     if not isinstance(text, str):
         return None
-    cleaned = text.strip().lstrip("vV")
-    parts = []
-    for chunk in cleaned.split("."):
-        digits = ""
-        for ch in chunk:
-            if ch.isdigit():
-                digits += ch
-            else:
-                break
-        if not digits:
-            break
-        parts.append(int(digits))
-    return tuple(parts) if parts else None
+    match = re.fullmatch(r"[vV]?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(beta|rc)\.(0|[1-9]\d*))?", text.strip())
+    if not match:
+        return None
+    major, minor, patch, kind, number = match.groups()
+    return (int(major), int(minor), int(patch), {"beta": 0, "rc": 1, None: 2}[kind], int(number or 0))
+
+
+def _official_asset_url(url, tag, name):
+    if not isinstance(url, str) or not isinstance(tag, str) or not isinstance(name, str):
+        return False
+    parsed = urllib.parse.urlsplit(url)
+    return (parsed.scheme == "https" and parsed.hostname == "github.com"
+            and parsed.port is None and not parsed.username and not parsed.password
+            and not parsed.query and not parsed.fragment
+            and parsed.path == f"/wcr20140908/MyScreenDraw/releases/download/{tag}/{name}")
+
+
+def _https_response(response):
+    """Reject downgrade redirects, including redirects followed automatically by urllib."""
+    address = response.geturl() if hasattr(response, "geturl") else None
+    if address is not None and urllib.parse.urlsplit(address).scheme != "https":
+        raise ValueError("insecure_redirect")
+
+
+def _read_limited(response, limit):
+    data = response.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError("response_too_large")
+    return data
 
 
 def fetch_release(channel="stable", url=UPDATE_RELEASES_URL, timeout=UPDATE_TIMEOUT_S):
     """返回所选频道的完整 release 元数据。"""
-    import urllib.request
-    import urllib.error
+    if channel not in ("stable", "preview"):
+        return None, "bad_channel"
+    if urllib.parse.urlsplit(url).scheme != "https":
+        return None, "insecure_url"
     request = urllib.request.Request(url, headers={
         "Accept": "application/vnd.github+json",
         "User-Agent": f"MyScreenDraw/{APP_VERSION}",
     })
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            payload = response.read(1024 * 1024)
-        data = json.loads(payload.decode("utf-8", errors="replace"))
+            _https_response(response)
+            payload = _read_limited(response, 1024 * 1024)
+        data = json.loads(payload.decode("utf-8"))
         releases = data if isinstance(data, list) else [data]
+        candidates = []
         for release in releases:
-            if not isinstance(release, dict):
+            if not isinstance(release, dict) or release.get("draft"):
                 continue
-            if channel == "stable" and release.get("prerelease"):
+            tag = release.get("tag_name")
+            version = parse_version(tag)
+            if version is None or not isinstance(tag, str) or not tag.startswith("v"):
                 continue
-            tag = release.get("tag_name") or release.get("name")
-            if not isinstance(tag, str) or not tag.strip():
+            prerelease = version[3] != 2
+            if prerelease != bool(release.get("prerelease")):
                 continue
-            assets = release.get("assets") or []
-            asset = next((a for a in assets if isinstance(a, dict) and str(a.get("name", "")).lower().endswith(".zip")), None)
-            if asset is None:
+            if channel == "stable" and prerelease:
                 continue
-            return {"tag": tag.strip(), "download_url": asset.get("browser_download_url"),
-                    "asset_name": asset.get("name"), "prerelease": bool(release.get("prerelease"))}, None
+            name = f"MyScreenDraw-{tag}-windows-x64.zip"
+            assets = release.get("assets")
+            if not isinstance(assets, list):
+                continue
+            for asset in assets:
+                if not isinstance(asset, dict) or asset.get("name") != name:
+                    continue
+                download_url = asset.get("browser_download_url")
+                if _official_asset_url(download_url, tag, name):
+                    candidates.append((version, {"tag": tag, "download_url": download_url,
+                                                 "asset_name": name, "prerelease": prerelease}))
+        if candidates:
+            return max(candidates, key=lambda item: item[0])[1], None
         return None, "no_release"
     except urllib.error.HTTPError as exc:
         try:
@@ -1369,19 +1468,23 @@ def validate_update_zip(path):
         application = False
         for info in infos:
             normalized = info.filename.replace("\\", "/")
-            parts = normalized.split("/")
-            if (
-                normalized.startswith("/")
-                or (len(parts[0]) >= 2 and parts[0][1] == ":")
-                or ".." in parts
-            ):
+            parts = normalized.rstrip("/").split("/")
+            if (not normalized or normalized.startswith("/") or "//" in normalized
+                    or any(p in ("", ".", "..") or p.endswith((" ", "."))
+                           or any(c in p for c in '<>:"|?*')
+                           or re.match(r"(?i)^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)", p)
+                           for p in parts)
+                    or any(ord(c) < 32 for c in normalized)
+                    or parts[0].lower() in ("data", "exports")
+                    or parts[-1].lower() in ("config.json", "roster.json", "events.jsonl", "app.log")):
                 raise ValueError("unsafe_archive")
             mode = (info.external_attr >> 16) & 0xFFFF
-            if stat.S_ISLNK(mode):
+            if stat.S_ISLNK(mode) or (mode and stat.S_IFMT(mode) not in (0, stat.S_IFREG, stat.S_IFDIR)):
                 raise ValueError("unsafe_archive")
-            if normalized in seen:
+            key = normalized.rstrip("/").casefold()
+            if key in seen:
                 raise ValueError("duplicate_archive_member")
-            seen.add(normalized)
+            seen.add(key)
             total_uncompressed += int(info.file_size)
             if total_uncompressed > MAX_UPDATE_UNCOMPRESSED_BYTES:
                 raise ValueError("archive_uncompressed_too_large")
@@ -1396,38 +1499,92 @@ def validate_update_zip(path):
 
 
 def make_update_batch(zip_path, install_dir):
-    """Create a local-only Windows updater; user data directories are never copied."""
+    """Write a detached PowerShell transaction; never interpolate user paths as code."""
+    if not os.path.isfile(zip_path) or not os.path.isfile(os.path.join(install_dir, "MyScreenDraw.exe")):
+        # Keep generation pure and testable; the detached transaction performs final checks.
+        if not os.path.isfile(zip_path):
+            raise ValueError("invalid_update_path")
     root = tempfile.mkdtemp(prefix="myscreendraw_apply_")
-    stage = os.path.join(root, "stage")
-    batch = os.path.join(root, "apply.cmd")
-    def q(value):
-        return '"' + str(value).replace('"', '""') + '"'
-    lines = [
-        "@echo off",
-        "setlocal",
-        "timeout /t 2 /nobreak >nul",
-        f"set \"MSD_ZIP={zip_path}\"",
-        f"set \"MSD_STAGE={stage}\"",
-        f"set \"MSD_INSTALL={install_dir}\"",
-        "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$ErrorActionPreference='Stop'; Expand-Archive -LiteralPath $env:MSD_ZIP -DestinationPath $env:MSD_STAGE -Force\"",
-        "if errorlevel 1 goto fail",
-        "set \"SRC=%MSD_STAGE%\"",
-        f"if exist {q(os.path.join(stage, 'MyScreenDraw.exe'))} goto copy_files",
-        f"if exist {q(os.path.join(stage, 'MyScreenDraw', 'MyScreenDraw.exe'))} set \"SRC=%MSD_STAGE%\\MyScreenDraw\"",
-        f"if not exist {q(os.path.join(stage, 'MyScreenDraw.exe'))} if not exist {q(os.path.join(stage, 'MyScreenDraw', 'MyScreenDraw.exe'))} goto fail",
-        ":copy_files",
-        "robocopy \"%SRC%\" \"%MSD_INSTALL%\" /E /XF config.json roster.json events.jsonl /XD data exports /NFL /NDL /NJH /NJS /NP",
-        "if errorlevel 8 goto fail",
-        "start \"\" \"%MSD_INSTALL%\\MyScreenDraw.exe\"",
-        f"rmdir /s /q {q(root)}",
-        "exit /b 0",
-        ":fail",
-        f"rmdir /s /q {q(root)}",
-        "exit /b 1",
-    ]
-    with open(batch, "w", encoding="utf-8", newline="\r\n") as handle:
-        handle.write("\r\n".join(lines) + "\r\n")
-    return batch
+    script = os.path.join(root, "apply.ps1")
+    def literal(path):
+        return "[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + base64.b64encode(os.fsencode(os.path.abspath(path))).decode("ascii") + "'))"
+    # Staging and backup remain on the same volume as the installation for atomic file moves.
+    text = r'''$ErrorActionPreference = 'Stop'
+$zip = ZIP_LITERAL
+$install = INSTALL_LITERAL
+$work = Join-Path $install ('.msd-update-' + [guid]::NewGuid().ToString('N'))
+$stage = Join-Path $work 'stage'
+$backup = Join-Path $work 'backup'
+$result = Join-Path $install 'data\update-result.json'
+$swapped = $false
+$committed = $false
+try {
+    for ($i = 0; $i -lt 60; $i++) {
+        try { $stream = [IO.File]::Open((Join-Path $install 'MyScreenDraw.exe'), 'Open', 'ReadWrite', 'None'); $stream.Close(); break }
+        catch { if ($i -eq 59) { throw 'application_still_running' }; Start-Sleep -Seconds 1 }
+    }
+    New-Item -ItemType Directory -Path $stage, $backup -Force | Out-Null
+    Expand-Archive -LiteralPath $zip -DestinationPath $stage -Force
+    $source = $stage
+    if (-not (Test-Path -LiteralPath (Join-Path $source 'MyScreenDraw.exe'))) {
+        $children = @(Get-ChildItem -LiteralPath $stage -Force)
+        if ($children.Count -ne 1 -or -not $children[0].PSIsContainer) { throw 'invalid_archive_layout' }
+        $source = $children[0].FullName
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $source 'MyScreenDraw.exe'))) { throw 'missing_application' }
+    $incoming = @(Get-ChildItem -LiteralPath $source -Force | Where-Object { $_.Name -notin @('data', 'exports') })
+    if ($incoming.Count -eq 0) { throw 'empty_update' }
+    $old = @(Get-ChildItem -LiteralPath $install -Force | Where-Object {
+        $_.Name -notin @('data', 'exports') -and $_.FullName -ne $work -and $_.Name -notlike '.msd-update-*'
+    })
+    foreach ($item in $old) { Move-Item -LiteralPath $item.FullName -Destination $backup -ErrorAction Stop }
+    $swapped = $true
+    foreach ($item in $incoming) { Move-Item -LiteralPath $item.FullName -Destination $install -ErrorAction Stop }
+    if (-not (Test-Path -LiteralPath (Join-Path $install 'MyScreenDraw.exe'))) { throw 'missing_application' }
+    New-Item -ItemType Directory -Path (Split-Path -Parent $result) -Force | Out-Null
+    Start-Process -FilePath (Join-Path $install 'MyScreenDraw.exe') -WorkingDirectory $install -ErrorAction Stop
+    # Launch is the commit boundary. Never delete the only rollback copy before it.
+    $committed = $true
+    @{ status = 'success' } | ConvertTo-Json | Set-Content -LiteralPath $result -Encoding UTF8
+    Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction SilentlyContinue
+} catch {
+    $failure = $_.Exception.Message
+    if ($swapped -and -not $committed) {
+        try {
+            Get-ChildItem -LiteralPath $install -Force | Where-Object {
+                $_.Name -notin @('data', 'exports') -and $_.FullName -ne $work -and $_.Name -notlike '.msd-update-*'
+            } | Remove-Item -Recurse -Force -ErrorAction Stop
+            Get-ChildItem -LiteralPath $backup -Force | ForEach-Object {
+                Move-Item -LiteralPath $_.FullName -Destination $install -ErrorAction Stop
+            }
+        } catch { $failure += '; rollback_failed: ' + $_.Exception.Message }
+    } elseif (-not $committed -and (Test-Path -LiteralPath $backup)) {
+        Get-ChildItem -LiteralPath $backup -Force | ForEach-Object { Move-Item -LiteralPath $_.FullName -Destination $install }
+    }
+    New-Item -ItemType Directory -Path (Split-Path -Parent $result) -Force | Out-Null
+    @{ status = 'failed'; detail = $failure; backup = $backup } | ConvertTo-Json | Set-Content -LiteralPath $result -Encoding UTF8
+    exit 1
+} finally {
+    Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue
+    $downloadRoot = Split-Path -Parent $zip
+    if ((Split-Path -Leaf $downloadRoot) -like 'myscreendraw_update_*') {
+        Remove-Item -LiteralPath $downloadRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Split-Path -Parent $PSCommandPath) -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue }
+    if ($swapped -and -not (Test-Path -LiteralPath $backup)) {
+        Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+'''.replace('ZIP_LITERAL', literal(zip_path)).replace('INSTALL_LITERAL', literal(install_dir))
+    try:
+        with open(script, "w", encoding="utf-8-sig") as handle:
+            handle.write(text)
+    except Exception:
+        shutil.rmtree(root, ignore_errors=True)
+        raise
+    return script
 
 
 class UpdateDownloadWorker(QThread):
@@ -1436,6 +1593,7 @@ class UpdateDownloadWorker(QThread):
     def __init__(self, url, parent=None):
         super().__init__(parent)
         self.url = url
+        self.download_path = None
 
     def run(self):
         import urllib.request
@@ -1443,11 +1601,33 @@ class UpdateDownloadWorker(QThread):
             root = tempfile.mkdtemp(prefix="myscreendraw_update_")
             path = os.path.join(root, "update.zip")
             request = urllib.request.Request(self.url, headers={"User-Agent": f"MyScreenDraw/{APP_VERSION}"})
-            with urllib.request.urlopen(request, timeout=UPDATE_DOWNLOAD_TIMEOUT_S) as response, open(path, "wb") as out:
-                shutil.copyfileobj(response, out, length=1024 * 64)
+            with urllib.request.urlopen(request, timeout=UPDATE_DOWNLOAD_TIMEOUT_S) as response:
+                _https_response(response)
+                declared = response.headers.get("Content-Length")
+                if declared and int(declared) > MAX_UPDATE_ARCHIVE_BYTES:
+                    raise ValueError("archive_too_large")
+                with open(path, "wb") as out:
+                    total = 0
+                    while True:
+                        if self.isInterruptionRequested():
+                            raise InterruptedError("download_cancelled")
+                        chunk = response.read(1024 * 64)
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        if total > MAX_UPDATE_ARCHIVE_BYTES:
+                            raise ValueError("archive_too_large")
+                        out.write(chunk)
+            if self.isInterruptionRequested():
+                raise InterruptedError("download_cancelled")
+            self.download_path = path
             self.finished_download.emit(path, None)
         except Exception as exc:
-            self.finished_download.emit(None, f"error_{type(exc).__name__}")
+            try:
+                if 'root' in locals():
+                    shutil.rmtree(root, ignore_errors=True)
+            finally:
+                self.finished_download.emit(None, f"error_{type(exc).__name__}")
 
 
 class UpdateCheckWorker(QThread):
@@ -2581,7 +2761,9 @@ class DrawingCanvas(QMainWindow):
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint
                             | Qt.WindowType.Tool | Qt.WindowType.WindowDoesNotAcceptFocus)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setWindowIcon(QIcon())
         self.is_drawing_mode = True
+        self._mouse_passthrough = False
         self.draw_state = "PEN"
         self.eraser_type = "CIRCLE"
         self.all_segments = []
@@ -3262,6 +3444,7 @@ class DrawingCanvas(QMainWindow):
             return
         self._cancel_smart_recognition(drop_pending=True)  # 进白板：放弃当前页未触发的延迟识别
         self.whiteboard_mode = True
+        self.setUpdatesEnabled(False)
         # 之前用过白板就保留整本页面，只把当前画布内容写回上次停留的那一页。
         # 早先无条件 self.pages = [capture_page()]，导致「建了多页 → 退出白板 → 再进白板」
         # 时第 2 页及以后的内容被悄悄丢弃，且撤销栈也已重置、无法找回。
@@ -3273,6 +3456,7 @@ class DrawingCanvas(QMainWindow):
             self.current_page = 0
         self.selected_ids.clear()
         self.reset_history()
+        self.setUpdatesEnabled(True)
         track_event("whiteboard_entered", board_style=self.board_style, pages=len(self.pages))
         self.update()
 
@@ -3282,8 +3466,10 @@ class DrawingCanvas(QMainWindow):
         self._cancel_smart_recognition(drop_pending=True)  # 退白板：放弃未触发的延迟识别
         self.save_current_page()
         self.whiteboard_mode = False
+        self.setUpdatesEnabled(False)
         self.selected_ids.clear()
         self.reset_history()
+        self.setUpdatesEnabled(True)
         track_event("whiteboard_exited", pages=len(self.pages))
         self.update()
 
@@ -4461,7 +4647,7 @@ class DrawingCanvas(QMainWindow):
                 sa, sb = self.snap_line_pair(a, b)       # 识别出的直线端点吸附（带防焊接保护）
                 if math.hypot(sa.x() - sb.x(), sa.y() - sb.y()) > 8:
                     spec = {**spec, "points": [(sa.x(), sa.y()), (sb.x(), sb.y())]}
-            item = self.build_recognized_item(spec)
+            item = self.build_recognized_item(spec, stroke_id)
         except Exception as exc:
             track_event("smart_build_failed", shape_type=spec.get("type"), error=str(exc))
             self.dash_chain = None
@@ -4492,12 +4678,21 @@ class DrawingCanvas(QMainWindow):
             self.dash_chain = None
         track_event("smart_shape", shape_type=spec["type"])
 
-    def build_recognized_item(self, spec):
+    def _recognized_stroke_width(self, stroke_id):
+        """识别图形沿用原笔迹的中位宽度，不再另取一档笔宽。"""
+        widths = [seg["pen"].widthF() for seg in self.all_segments
+                  if seg.get("id") == stroke_id and seg.get("pen") is not None]
+        if not widths:
+            return max(1, self.pen_width)
+        widths.sort()
+        return max(1, int(round(widths[len(widths) // 2])))
+
+    def build_recognized_item(self, spec, stroke_id=None):
         base = {
             "id": uuid.uuid4(),
             "type": spec["type"],
             "color": QColor(self.pen_color),
-            "width": max(1, self.pen_width),
+            "width": self._recognized_stroke_width(stroke_id),
         }
         kind = spec["type"]
         if kind in ("LINE", "DASHED_LINE"):
@@ -5346,7 +5541,7 @@ class DrawingCanvas(QMainWindow):
         # 每个输入事件测一次速：同一事件内插值出的各小段共享同一笔速。
         if not is_marker:
             self._track_stroke_speed(pos)
-        spacing = base_width * (0.3 if is_marker else 0.6)
+        spacing = base_width * (0.18 if is_marker else 0.35)
         steps = max(1, int(distance / max(2, spacing)))
         previous = self.last_point
         for step in range(1, steps + 1):
@@ -6573,6 +6768,8 @@ class DrawingCanvas(QMainWindow):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         # 只重画失效的那块。画布是全屏的，而打一个字只改一框：整屏填背景加逐个对象
         # 重绘实测 9.5ms/帧（白板模式），是每键耗时里最大的一项。裁剪之后 Qt 光栅化
         # 只处理这块，draw_content 里再按包围盒把画不到的对象跳过。
@@ -7560,12 +7757,24 @@ class ControlPanel(QWidget):
         self.ui_mode = "icon"
         self.ui_radius = self.RADIUS_DEFAULT
         self.ui_opacity = 100           # 百分比；作用于浮窗，不作用于画布（否则墨迹跟着淡）
-        self.update_check_enabled = False   # 默认关闭：不联网是本程序的默认状态
+        self.update_check_enabled = True    # 默认自动检查；下载和安装始终需用户确认
         self.update_channel = "stable"
+        self.update_check_timer = QTimer(self)
+        self.update_check_timer.setInterval(UPDATE_CHECK_INTERVAL_MS)
+        self.update_check_timer.timeout.connect(self.check_for_updates)
         self.settings_panel = None      # 懒建
         self._update_worker = None
         self._update_download_worker = None
         self._pending_update_release = None
+        result_path = os.path.join(DATA_DIR, "update-result.json")
+        try:
+            with open(result_path, encoding="utf-8-sig") as result_file:
+                result = json.load(result_file)
+            self._update_status_text = (tr("update_current") if result.get("status") == "success"
+                                        else trf("update_failed", detail=str(result.get("detail", "unknown"))))
+            os.remove(result_path)
+        except (OSError, ValueError, AttributeError):
+            pass
         self._bound_key = None
         self._topmost_state = None
         self._topmost_ceiling = None    # 上一拍审计得到的天花板（ClassIsland 最低的可见窗口）
@@ -7643,23 +7852,21 @@ class ControlPanel(QWidget):
 
         self.btn_whiteboard = QPushButton(tr("whiteboard")); self.btn_whiteboard.clicked.connect(self.toggle_whiteboard); self.toolbar_layout.addWidget(self.btn_whiteboard)
 
-        # 白板控制区：默认隐藏，进入白板后才显示。
-        # 用一个 QGridLayout 承载，横竖版切换时只重排格子（见 _layout_wb_box）：
-        # 竖版两行三列，横版一行五列。旧实现是写死的「两行」嵌套布局，横版工具栏只有
-        # 一行高，两行按钮被压进去就会把「上页/下页/新页/黑板」的字裁掉一半。
+        # 主栏只留白/黑板切换。翻页、新页、页码不占主栏，改到右下角的跑道条。
         self.wb_box = QWidget()
-        self.wb_grid = QGridLayout(self.wb_box)
-        self.wb_grid.setContentsMargins(0, 0, 0, 0); self.wb_grid.setSpacing(2)
-        self.btn_prev_page = QPushButton(tr("prev")); self.btn_prev_page.clicked.connect(lambda: self.switch_whiteboard_page(-1))
-        self.page_label = QPushButton("1/1")
-        self.page_label.setObjectName("PageLabelBtn")
-        self.page_label.clicked.connect(self.toggle_thumbnail_panel)
-        self.btn_next_page = QPushButton(tr("next")); self.btn_next_page.clicked.connect(lambda: self.switch_whiteboard_page(1))
-        self.btn_new_page = QPushButton(tr("new_page")); self.btn_new_page.clicked.connect(self.new_whiteboard_page)
+        self.wb_grid = QHBoxLayout(self.wb_box)
+        self.wb_grid.setContentsMargins(0, 0, 0, 0); self.wb_grid.setSpacing(0)
         self.btn_board_style = QPushButton(tr("board")); self.btn_board_style.clicked.connect(self.toggle_board_style)
-        self._layout_wb_box()
+        self.wb_grid.addWidget(self.btn_board_style)
         self.wb_box.setVisible(False)
         self.toolbar_layout.addWidget(self.wb_box)
+        # 这些控件不再上主栏，但状态投影和页码刷新还按原名字找它们。
+        self.btn_prev_page = QPushButton(tr("prev"))
+        self.page_label = QPushButton("1/1")
+        self.page_label.setObjectName("PageLabelBtn")
+        self.btn_next_page = QPushButton(tr("next"))
+        self.btn_new_page = QPushButton(tr("new_page"))
+        self._build_page_rail()
 
         # 主题按钮不再占主栏一行：它连同「主面板旋转」「智能图形识别」一起收进设置页
         # （见 setup_settings_panel）。这里仍然构造它，是因为 apply_theme() 会更新它的
@@ -7956,15 +8163,12 @@ class ControlPanel(QWidget):
         ("clear",      "clear",      "clear",       "clear",                  "btn_clear"),
         ("whiteboard", "whiteboard", "whiteboard",  "toggle_whiteboard",      "btn_whiteboard"),
         ("settings",   "settings",   "settings",    "open_settings_panel",    "btn_settings"),
-        ("close",      "close",      "close_app",   "close_to_background",    "btn_exit"),
+        ("close",      "close",      "close_app",   "close_to_background", "btn_exit"),
     )
 
-    # 白板控制区在图标树里的对应按钮
+    # 白板控制区在图标树里只留白/黑板切换，正常按钮大小。
+    # 翻页、新页、页码在右下角的跑道条上，不进主栏。
     ICON_WB_ACTIONS = (
-        ("prev_page",   "page_prev",  "prev",      "_icon_prev_page",       "btn_prev_page"),
-        ("pages",       "whiteboard", "page_list", "toggle_thumbnail_panel", "page_label"),
-        ("next_page",   "page_next",  "next",      "_icon_next_page",       "btn_next_page"),
-        ("new_page",    "page_next",  "new_page",  "new_whiteboard_page",   "btn_new_page"),
         ("board_style", "whiteboard", "board",     "toggle_board_style",    "btn_board_style"),
     )
 
@@ -8028,7 +8232,8 @@ class ControlPanel(QWidget):
         """工具栏贴着 LOGO 的落点：竖版在 LOGO 下方、横版在右侧；放不下就翻到另一侧。
 
         竖版贴屏幕底部时工具栏会伸到任务栏下面，横版贴右边时会伸出屏幕——这两种
-        情况都翻面（下→上、右→左），翻面也放不下时再 clamp 进屏幕。
+        情况都翻面（下→上、右→左）。翻面也放不下时贴在屏幕边缘，由调用方保证
+        LOGO 仍在工具栏上方，这里不再挪动 LOGO。
         """
         logo = self.logo_window
         toolbar = self.toolbar_window
@@ -8053,11 +8258,12 @@ class ControlPanel(QWidget):
             elif left >= area.left():
                 x = left
             else:
-                x = right
-        return toolbar_windows.clamp_point_into(x, y, toolbar.width(), toolbar.height(), area)
+                x = area.left()
+        x, y = toolbar_windows.clamp_point_into(x, y, toolbar.width(), toolbar.height(), area)
+        return x, y
 
     def _reposition_toolbar_next_to_logo(self):
-        """将工具栏定位到LOGO旁边（根据方向）"""
+        """将工具栏定位到LOGO旁边，并保证两个窗口矩形不相交。"""
         if not hasattr(self, 'logo_window') or not self.logo_window:
             return
         if not hasattr(self, 'toolbar_window') or not self.toolbar_window:
@@ -8069,8 +8275,13 @@ class ControlPanel(QWidget):
             return
 
         x, y = self._toolbar_slot_next_to_logo()
-        if (x, y) != (self.toolbar_window.x(), self.toolbar_window.y()):
-            self.toolbar_window.move(x, y)
+        toolbar = self.toolbar_window
+        logo = self.logo_window
+        if (x, y) != (toolbar.x(), toolbar.y()):
+            toolbar.move(x, y)
+        # 到这里就停。以前发现重叠还会再试两个位置，试完仍重叠就排一个 0ms 定时器
+        # 重来一遍；工具栏比屏幕高时每一次试探的落点都不同，心跳再每拍调用一次，
+        # 两个窗口就以很高的频率上下对调。位置只算一次，重叠留给按钮压矮去解决。
 
     def toggle_toolbar_collapsed(self):
         """LOGO点击：折叠/展开工具栏窗口"""
@@ -8120,13 +8331,12 @@ class ControlPanel(QWidget):
             self.icon_buttons[key] = btn
             self.toolbar_window.icon_buttons[key] = btn
 
-        # 白板控制按钮
+        # 白板控制按钮：主栏只留白/黑板切换
         for key, icon_name, tip_key, handler_name, mirror_name in self.ICON_WB_ACTIONS:
             btn = QToolButton()
             btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
             btn.setObjectName("IconBtn")
             btn.setProperty("icon_name", icon_name)
-            btn.setProperty("wb_compact", True)
             btn.setIcon(make_ui_icon(icon_name, self.theme["text"], ICON_GLYPH))
             btn.setIconSize(QSize(ICON_GLYPH, ICON_GLYPH))
             btn.setText(tr(tip_key))
@@ -8169,6 +8379,11 @@ class ControlPanel(QWidget):
             logo.logo_btn.setIcon(self._make_logo_icon(logo.icon_size()))
         area = toolbar_windows._available_rect(logo)
         lx, ly = toolbar_windows.clamp_point_into(logo.x(), logo.y(), logo.width(), logo.height(), area)
+        # 竖栏贴底时不能把工具栏单独 clamp 回屏幕：会把中段盖到 LOGO 上。
+        # 未分离的两扇窗口作为一个整体收进可用区，始终让 LOGO 位于工具栏上方。
+        if follow and self.orientation == "portrait" and not getattr(self, "_toolbar_detached", False) and toolbar.isVisible():
+            combined_height = logo.height() + toolbar_windows.LOGO_GAP + toolbar.height()
+            lx, ly = toolbar_windows.clamp_point_into(lx, ly, max(logo.width(), toolbar.width()), combined_height, area)
         if (lx, ly) != (logo.x(), logo.y()):
             logo.move(lx, ly)
         if follow:
@@ -8245,16 +8460,22 @@ class ControlPanel(QWidget):
                 layout_changed = True
             btn.setEnabled(source.isEnabled())
             active = source.objectName() == "ActiveTool"
+            # 鼠标模式下高亮的是「鼠标」本身：画布不接收输入，批注工具并没有在生效，
+            # 高亮停在批注上会让人以为点了鼠标却没切过去。
+            if compact_mouse_mode:
+                active = key == "mode"
             want = "IconBtnActive" if active else "IconBtn"
             if btn.objectName() != want:
                 btn.setObjectName(want)
                 btn.setStyle(btn.style())        # objectName 变了必须重解样式表
-            # 提示跟着经典按钮的文案走：模式键在「穿透/绘图」之间来回，白板键在
+            # 提示跟着经典按钮的文案走：模式键固定显示「鼠标」，白板键在
             # 「进入白板/退出白板」之间来回，写死 tr(key) 会让提示停在旧文案上。
             text = source.text().strip()
             if text and key not in ("pages",):
                 btn.setToolTip(text)
                 btn.setAccessibleName(text)
+                if key in ("mode", "whiteboard") and btn.text() != text:
+                    btn.setText(text)
         # 鼠标模式只保留基础入口；进入批注后恢复完整工具集。
         if layout_changed and self.ui_mode == "icon" and hasattr(self, "toolbar_window"):
             self.toolbar_window.refresh_layout()
@@ -8308,29 +8529,99 @@ class ControlPanel(QWidget):
             self.save_settings()
         track_event("ui_mode_unified", from_mode=mode)
 
-    def _layout_wb_box(self):
-        """白板控制区始终保持紧凑两行。
+    def _build_page_rail(self):
+        """右下角的翻页条：一条跑道形连体按钮。
 
-        横版主栏本身是一行，若把 5 个白板按钮也横向塞成一行，会额外吃掉约 300px，
-        把后面的主题/退出按钮挤出屏幕，正是截图中的错位。白板控制区是一个独立的小组，
-        在横版里也应保持「翻页一行 + 新页/板色一行」的紧凑块。
+        从左到右是新页（+）、上页（箭头下带文字）、当前页/总页数、下页（箭头下带文字）。
+        它是独立的置顶窗口，不进主栏，所以进白板不会把工具栏撑高、压住 LOGO。
         """
-        widgets = (self.btn_prev_page, self.page_label, self.btn_next_page,
-                   self.btn_new_page, self.btn_board_style)
-        for widget in widgets:
-            self.wb_grid.removeWidget(widget)
-        self.wb_grid.addWidget(self.btn_prev_page, 0, 0)
-        self.wb_grid.addWidget(self.page_label, 0, 1)
-        self.wb_grid.addWidget(self.btn_next_page, 0, 2)
-        self.wb_grid.addWidget(self.btn_new_page, 1, 0, 1, 2)
-        self.wb_grid.addWidget(self.btn_board_style, 1, 2)
-        # 白板小按钮不继承主栏的大尺寸；固定到可读但紧凑的高度，避免横版整栏被撑高。
-        for widget in widgets:
-            widget.setMinimumHeight(0)
-            widget.setMaximumHeight(28)
-            widget.setVisible(True)
-        self.wb_grid.invalidate()
-        self.wb_grid.activate()
+        self.page_rail = QWidget()
+        self.page_rail.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint |
+            Qt.WindowType.WindowStaysOnTopHint |
+            Qt.WindowType.Tool
+        )
+        self.page_rail.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.page_rail.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        row = QHBoxLayout(self.page_rail)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(0)
+
+        self.rail_new = QToolButton()
+        self.rail_new.setText("+")
+        self.rail_new.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.rail_new.clicked.connect(self.new_whiteboard_page)
+        self.rail_prev = QToolButton()
+        self.rail_prev.setText(tr("prev"))
+        self.rail_prev.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+        self.rail_prev.clicked.connect(lambda: self.switch_whiteboard_page(-1))
+        self.rail_count = QToolButton()
+        self.rail_count.setText("1/1")
+        self.rail_count.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.rail_count.clicked.connect(self.toggle_thumbnail_panel)
+        self.rail_next = QToolButton()
+        self.rail_next.setText(tr("next"))
+        self.rail_next.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+        self.rail_next.clicked.connect(lambda: self.switch_whiteboard_page(1))
+        for button in (self.rail_new, self.rail_prev, self.rail_count, self.rail_next):
+            row.addWidget(button)
+        self.page_rail.hide()
+
+    def _position_page_rail(self):
+        """贴在当前屏幕可用区的右下角，留出一点边距。"""
+        rail = getattr(self, "page_rail", None)
+        if rail is None:
+            return
+        rail.adjustSize()
+        area = toolbar_windows._available_rect(rail)
+        margin = 16
+        x = area.right() - rail.width() - margin + 1
+        y = area.bottom() - rail.height() - margin + 1
+        rail.move(max(area.left(), x), max(area.top(), y))
+
+    def _apply_page_rail_style(self):
+        """颜色跟着板色走：白底用深色字，黑板用浅色字，两边都看得清。"""
+        rail = getattr(self, "page_rail", None)
+        if rail is None or self.canvas is None:
+            return
+        black_board = self.canvas.board_style == "BLACK"
+        ink = "#f4f7f4" if black_board else "#1c2420"
+        ground = "rgba(28, 36, 32, 210)" if black_board else "rgba(255, 255, 255, 230)"
+        divider = "rgba(255, 255, 255, 70)" if black_board else "rgba(28, 36, 32, 45)"
+        rail.setStyleSheet(f"""
+            QWidget {{
+                background: transparent;
+            }}
+            QToolButton {{
+                background-color: {ground};
+                color: {ink};
+                border: none;
+                border-right: 1px solid {divider};
+                padding: 2px 14px;
+                min-height: 46px;
+                font-size: 13px;
+            }}
+            QToolButton:hover {{
+                background-color: {"rgba(255, 255, 255, 40)" if black_board else "rgba(28, 36, 32, 18)"};
+            }}
+        """)
+        rail.setStyleSheet(rail.styleSheet() + """
+            QToolButton:first-child { border-top-left-radius: 24px; border-bottom-left-radius: 24px; font-size: 22px; min-width: 46px; }
+            QToolButton:last-child { border-top-right-radius: 24px; border-bottom-right-radius: 24px; border-right: none; }
+        """)
+        arrow = "#f4f7f4" if black_board else "#1c2420"
+        from ui_icons import make_ui_icon
+        self.rail_prev.setIcon(make_ui_icon("page_prev", arrow, 16))
+        self.rail_next.setIcon(make_ui_icon("page_next", arrow, 16))
+        self.rail_prev.setIconSize(QSize(16, 16))
+        self.rail_next.setIconSize(QSize(16, 16))
+
+    def _layout_wb_box(self):
+        """主栏的白板区现在只有白/黑板切换一颗，保持普通按钮大小。"""
+        if hasattr(self, "btn_board_style"):
+            self.btn_board_style.setMinimumHeight(0)
+            self.btn_board_style.setMaximumHeight(16777215)
+            self.btn_board_style.setVisible(True)
 
     def _thumbnail_page_changed(self, row):
         if getattr(self, "_syncing_thumbnails", False) or row < 0:
@@ -8448,14 +8739,26 @@ class ControlPanel(QWidget):
         if hasattr(self, "btn_board_style"):
             self.btn_board_style.setText(tr("board_white") if self.canvas.board_style == "BLACK" else tr("board"))
         if hasattr(self, "wb_box"):
-            self.wb_box.setVisible(self.canvas.whiteboard_mode)   # 白板设置只在白板模式显示
+            self.wb_box.setVisible(self.canvas.whiteboard_mode)   # 白/黑板切换只在白板模式显示
             self._resize_to_content()
+        if hasattr(self, "page_rail"):
+            total = max(1, len(self.canvas.pages))
+            current = self.canvas.current_page + 1
+            self.rail_count.setText(f"{current}/{total}")
+            self._apply_page_rail_style()
+            foreground = not hasattr(self, "lifecycle") or self.lifecycle.state not in (LifecycleState.HIDDEN, LifecycleState.QUITTING)
+            if self.canvas.whiteboard_mode and foreground:
+                self.page_rail.show()
+                self._position_page_rail()
+                mark_tool_window(int(self.page_rail.winId()))
+                self.raise_floating(self.page_rail)
+            else:
+                self.page_rail.hide()
         # 退出白板时必须把可能打开着的缩略图面板一起收起：toggle_thumbnail_panel 在非白板态会
         # 直接 return 不允许再关闭，若不在这里主动 hide，面板会一直留在屏幕上、还显示一张
         # 名为「第 1 页」的误导性整屏截图缩略图，直到重启程序。
-        if hasattr(self, "thumbnail_panel") and not self.canvas.whiteboard_mode:
-            self.thumbnail_panel.hide()
-            self._thumbnail_live_timer.stop()
+        if not self.canvas.whiteboard_mode:
+            self.close_thumbnail_panel()
         self.refresh_page_thumbnails()
 
     def toggle_whiteboard(self):
@@ -8496,7 +8799,7 @@ class ControlPanel(QWidget):
             return False
 
     def close_to_background(self):
-        """关闭软件按钮和F12快捷键的处理：转入后台而非退出"""
+        """关闭软件按钮和 F12：收起主界面，程序留在托盘里。真正退出走托盘菜单。"""
         if hasattr(self, 'lifecycle'):
             self.lifecycle.hide_to_background()
 
@@ -9765,26 +10068,15 @@ class ControlPanel(QWidget):
             self._laser_fade.stop()
             self.select_panel.hide()
             self.show_only_sub(None)
-        # setWindowFlag + show() can recreate the HWND; drop the owner cache so
-        # the next bind_topmost_stack re-parents the panel above the new canvas.
-        cv.setWindowFlag(Qt.WindowType.WindowTransparentForInput, not enabled)
+        # Qt 属性切换不重建顶层 HWND，比 setWindowFlag 稳定；画布句柄保持不变，
+        # 白板/批注切换不会触发 Windows 分层窗口重新合成。
+        cv.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, not enabled)
+        cv._mouse_passthrough = not enabled
         cv.show()
-        self._bound_key = None
-        self._topmost_state = None
         self.btn_mode.setText(tr("mouse"))
         self.btn_mode.setStyleSheet(f"background-color: {self.theme['mode'] if enabled else self.theme['mode_off']}; color: white;")
         track_event("mode_changed", drawing_mode=enabled)
-        # 画布 HWND 刚被 setWindowFlag+show() 重建，新画布默认压在面板之上。
-        # bind_topmost_stack 里的 force_above 会同步矫正兄弟高度，但新 HWND 可能
-        # 还没完全 settle，于是用几个短延迟重绑，确保面板即时置顶、不留被压住的窗口。
-        # 关键：HEARTBEAT_MS=500，前几次重绑（0/120ms）可能赶在合成器 settle 之前，
-        # 新画布在这 500ms 内仍可能反压面板。最后一拍（540ms）刻意刚跨过首个心跳周期，
-        # 保证在心跳自己接管前列出一次「面板压在画布之上」的矫正，消除 ≤500ms 的被盖窗口。
         self.bind_topmost_stack()
-        QTimer.singleShot(0, self.bind_topmost_stack)
-        QTimer.singleShot(120, self.bind_topmost_stack)
-        QTimer.singleShot(320, self.bind_topmost_stack)
-        QTimer.singleShot(540, self.bind_topmost_stack)
         if enabled and cv.draw_state == "LASER":
             # 退出穿透重新进入绘图态：激光笔仍是当前工具就必须把淡出定时器重新启动，
             # 否则轨迹在鼠标停下时不再淡出/裁剪（set_tool 因 draw_state 已是 LASER 会直接 return，
@@ -10027,7 +10319,7 @@ class ControlPanel(QWidget):
         # 后台状态下什么都不显示。进后台前 set_drawing_mode(False) 会排几个延迟重绑
         # （最晚 540ms），那些回调在 hide() 之后才到，下面的 self.show() 会把主面板拉回来。
         lifecycle = getattr(self, "lifecycle", None)
-        if lifecycle is not None and lifecycle.state == LifecycleState.HIDDEN:
+        if lifecycle is not None and lifecycle.state in (LifecycleState.HIDDEN, LifecycleState.QUITTING):
             return
         floatings = [
             w for w in (
@@ -10035,6 +10327,7 @@ class ControlPanel(QWidget):
                 getattr(self, "select_panel", None),
                 getattr(self, "mini_timer", None),
                 getattr(self, "thumbnail_panel", None),
+                getattr(self, "page_rail", None),
                 getattr(self, "calc_panel", None),
                 getattr(self, "roster_panel", None),
                 getattr(self, "text_panel", None),
@@ -10052,10 +10345,10 @@ class ControlPanel(QWidget):
                 for hwnd in floating_hwnds:
                     set_window_owner(hwnd, owner)
                 self.chain_floating_owners()
-                # 句柄新建/重建时顺手关掉系统触控手势加工（按住变右键、甩动、等待光环）。
-                # 挂在这里而不是每拍心跳：SetProp 是按窗口一次性生效的，而画布切换
-                # 穿透/绘图模式会重建 HWND，新句柄必须重新设置一次。
+                # 每个句柄都按工具窗处理：Qt 的 Tool 标志在窗口重建后会丢，
+                # 丢了的那扇就会自己占一个任务栏图标。
                 for hwnd in (owner, panel_hwnd) + floating_hwnds:
+                    mark_tool_window(hwnd)
                     disable_touch_gestures(hwnd)
                 self._bound_key = key
             if not self.isVisible():
@@ -10257,7 +10550,11 @@ class ControlPanel(QWidget):
         self.btn_check_update = QPushButton(tr("check_update_now"))
         self.btn_check_update.clicked.connect(self.check_for_updates)
         form.addWidget(self.btn_check_update)
-        self.update_status_label = QLabel("")
+        self.btn_download_update = QPushButton(tr("update_download"))
+        self.btn_download_update.clicked.connect(self.download_pending_update)
+        self.btn_download_update.setEnabled(bool(self._pending_update_release))
+        form.addWidget(self.btn_download_update)
+        self.update_status_label = QLabel(getattr(self, "_update_status_text", ""))
         self.update_status_label.setObjectName("SettingsHint")
         self.update_status_label.setWordWrap(True)
         form.addWidget(self.update_status_label)
@@ -10332,12 +10629,14 @@ class ControlPanel(QWidget):
         mark(self.btn_autostart, on)
 
         allowed = bool(self.update_check_enabled)
+        if hasattr(self, "btn_download_update"):
+            self.btn_download_update.setEnabled(bool(self._pending_update_release))
         if hasattr(self, "update_channel_combo"):
             self.update_channel_combo.setCurrentIndex(0 if self.update_channel == "stable" else 1)
         self.btn_update_toggle.setText(tr("update_check_on") if allowed else tr("update_check_off"))
         mark(self.btn_update_toggle, allowed)
         # 更新检查关着的时候，「立即检查」不可点——避免出现「我明明关了它却联网」
-        self.btn_check_update.setEnabled(allowed)
+        self._set_update_check_enabled(allowed)
 
     def toggle_multitouch(self):
         """多指书写开关。5.4.x 之前它只能从配置文件里改，界面上没有入口。"""
@@ -10369,9 +10668,9 @@ class ControlPanel(QWidget):
         if not ok:
             # 设置失败要说出来。注册表可能被组策略锁住（教室机器常见），
             # 静默失败会让用户以为开了，下次开机才发现没有。
-            self.update_status_label.setText(tr("autostart_failed"))
+            self._set_update_status(tr("autostart_failed"))
         else:
-            self.update_status_label.setText(tr("autostart_saved") if want else "")
+            self._set_update_status(tr("autostart_saved") if want else "")
         track_event("autostart_toggled", enabled=want, ok=ok)
 
     def set_update_channel(self, index):
@@ -10384,18 +10683,35 @@ class ControlPanel(QWidget):
 
     def toggle_update_check(self):
         self.update_check_enabled = not self.update_check_enabled
+        if self.update_check_enabled:
+            self.update_check_timer.start()
+        else:
+            self.update_check_timer.stop()
         self.sync_settings_panel()
         self.save_settings()
         track_event("update_check_toggled", enabled=self.update_check_enabled)
 
+    def _set_update_status(self, text):
+        self._update_status_text = text
+        label = getattr(self, "update_status_label", None)
+        if label is not None:
+            label.setText(text)
+
+    def _set_update_check_enabled(self, enabled):
+        button = getattr(self, "btn_check_update", None)
+        if button is not None:
+            button.setEnabled(enabled)
+
     def check_for_updates(self):
-        """用户亲手点了「立即检查」才会走到这里，发一次 GET，只读版本号。"""
-        if not self.update_check_enabled:
+        """检查版本；自动检查仅提示新版，下载与安装仍须用户确认。"""
+        if not self.update_check_enabled or getattr(self, "_updates_stopping", False) or getattr(self, "_update_flow_busy", False):
             return
         if self._update_worker is not None and self._update_worker.isRunning():
             return          # 已经在查了，别叠第二个请求
-        self.btn_check_update.setEnabled(False)
-        self.update_status_label.setText(tr("update_checking"))
+        if self._update_download_worker is not None and self._update_download_worker.isRunning():
+            return
+        self._set_update_check_enabled(False)
+        self._set_update_status(tr("update_checking"))
         worker = UpdateCheckWorker(self.update_channel, self)
         worker.finished_check.connect(self._on_update_result)
         # 线程对象要留着引用：局部变量出作用域被回收会导致 QThread 未结束就析构
@@ -10404,63 +10720,93 @@ class ControlPanel(QWidget):
         track_event("update_check_started")
 
     def _on_update_result(self, release, error):
-        self.btn_check_update.setEnabled(bool(self.update_check_enabled))
+        self._set_update_check_enabled(bool(self.update_check_enabled))
         if error == "rate_limited":
-            self.update_status_label.setText(tr("update_rate_limited"))
+            self._set_update_status(tr("update_rate_limited"))
             track_event("update_check_rate_limited")
             return
         if error:
-            self.update_status_label.setText(trf("update_failed", detail=str(error)))
+            self._set_update_status(trf("update_failed", detail=str(error)))
             track_event("update_check_failed", error=str(error))
             return
         if isinstance(release, str):
             remote = parse_version(release)
             local = parse_version(APP_VERSION)
             if remote is None or local is None:
-                self.update_status_label.setText(trf("update_failed", detail="bad_version"))
+                self._pending_update_release = None
+                self._set_update_status(trf("update_failed", detail="bad_version"))
             elif remote > local:
-                self.update_status_label.setText(trf("update_available", value=release))
-                self._offer_update_page(release)
+                self._pending_update_release = release
+                self._set_update_status(trf("update_available", value=release))
+                if hasattr(self, "btn_download_update"):
+                    self.btn_download_update.setEnabled(True)
             else:
-                self.update_status_label.setText(tr("update_current"))
+                self._pending_update_release = None
+                self._set_update_status(tr("update_current"))
+                if hasattr(self, "btn_download_update"):
+                    self.btn_download_update.setEnabled(False)
             return
         if not isinstance(release, dict):
-            self.update_status_label.setText(trf("update_failed", detail="bad_release"))
+            self._pending_update_release = None
+            if hasattr(self, "btn_download_update"):
+                self.btn_download_update.setEnabled(False)
+            self._set_update_status(trf("update_failed", detail="bad_release"))
             return
         tag = release.get("tag")
         remote = parse_version(tag)
         local = parse_version(APP_VERSION)
         if remote is None or local is None:
-            self.update_status_label.setText(trf("update_failed", detail="bad_version"))
+            self._pending_update_release = None
+            if hasattr(self, "btn_download_update"):
+                self.btn_download_update.setEnabled(False)
+            self._set_update_status(trf("update_failed", detail="bad_version"))
             return
         if remote > local:
-            self.update_status_label.setText(trf("update_available", value=str(tag)))
-            self._offer_update_page(release)
+            self._pending_update_release = release
+            self._set_update_status(trf("update_available", value=str(tag)))
+            if hasattr(self, "btn_download_update"):
+                self.btn_download_update.setEnabled(True)
         else:
-            self.update_status_label.setText(tr("update_current"))
+            self._pending_update_release = None
+            if hasattr(self, "btn_download_update"):
+                self.btn_download_update.setEnabled(False)
+            self._set_update_status(tr("update_current"))
         track_event("update_check_done", remote=str(tag), newer=bool(remote > local), channel=self.update_channel)
 
     def stop_update_worker(self):
-        """Stop network workers before the Qt event loop exits."""
+        """Stop cooperatively; never destroy a QThread whose run() has not returned."""
+        self._updates_stopping = True
         for attr in ("_update_worker", "_update_download_worker"):
             worker = getattr(self, attr, None)
             if worker is None:
                 continue
-            try:
-                if worker.isRunning():
-                    worker.wait(2000)
-            except RuntimeError:
-                pass
+            worker.requestInterruption()
+            worker.wait()
+            path = getattr(worker, "download_path", None)
+            if path and not getattr(self, "_update_install_handoff", False):
+                shutil.rmtree(os.path.dirname(path), ignore_errors=True)
             setattr(self, attr, None)
+
+    def download_pending_update(self):
+        """用户主动点击下载；自动检查本身不会启动下载。"""
+        release = self._pending_update_release
+        if not release:
+            return
+        self._offer_update_page(release)
 
     def _offer_update_page(self, release):
         """Ask before downloading; the download stays inside the application."""
+        if getattr(self, "_update_flow_busy", False) or getattr(self, "_updates_stopping", False):
+            return
+        worker = self._update_download_worker
+        if worker is not None and worker.isRunning():
+            return
         if isinstance(release, str):
             release = {"tag": release, "download_url": None, "asset_name": ""}
         url = release.get("download_url") if isinstance(release, dict) else None
         tag = release.get("tag", "") if isinstance(release, dict) else ""
         if not url:
-            self.update_status_label.setText(trf("update_failed", detail="missing_asset"))
+            self._set_update_status(trf("update_failed", detail="missing_asset"))
             return
         box = QMessageBox(self)
         box.setWindowTitle(tr("settings"))
@@ -10469,48 +10815,68 @@ class ControlPanel(QWidget):
         box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
         box.setDefaultButton(QMessageBox.StandardButton.Cancel)
         box.setStyleSheet(self.styleSheet())
-        self.timer.stop()
+        self._update_flow_busy = True
+        self.pause_callbacks()
         try:
             if box.exec() == QMessageBox.StandardButton.Yes:
-                self.btn_check_update.setEnabled(False)
-                self.update_status_label.setText(tr("update_checking"))
+                self._set_update_check_enabled(False)
+                self._set_update_status(tr("update_checking"))
                 worker = UpdateDownloadWorker(url, self)
                 worker.finished_download.connect(self._on_update_downloaded)
                 self._update_download_worker = worker
                 worker.start()
                 track_event("update_download_started", tag=str(tag), channel=self.update_channel)
         finally:
-            self.timer.start(self.HEARTBEAT_MS)
+            self._update_flow_busy = False
+            self.resume_callbacks()
 
     def _on_update_downloaded(self, path, error):
-        if error:
-            self.update_status_label.setText(trf("update_failed", detail=str(error)))
-            self.btn_check_update.setEnabled(bool(self.update_check_enabled))
+        handed_off = False
+        script = None
+        if getattr(self, "_update_flow_busy", False):
             return
+        self._update_flow_busy = True
+        self.pause_callbacks()
         try:
+            if getattr(self, "_updates_stopping", False):
+                return
+            if error:
+                raise ValueError(str(error))
             validate_update_zip(path)
-        except Exception as exc:
-            self.update_status_label.setText(trf("update_failed", detail=str(exc)))
-            self.btn_check_update.setEnabled(bool(self.update_check_enabled))
-            return
-        box = QMessageBox(self)
-        box.setWindowTitle(tr("settings"))
-        box.setText(tr("update_install_prompt"))
-        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
-        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
-        box.setStyleSheet(self.styleSheet())
-        if box.exec() != QMessageBox.StandardButton.Yes:
-            self.btn_check_update.setEnabled(bool(self.update_check_enabled))
-            return
-        try:
-            batch = make_update_batch(path, APP_DIR)
-            subprocess.Popen(["cmd.exe", "/d", "/c", batch], close_fds=True)
+            box = QMessageBox(self)
+            box.setWindowTitle(tr("settings"))
+            box.setText(tr("update_install_prompt"))
+            box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
+            box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+            box.setStyleSheet(self.styleSheet())
+            if box.exec() != QMessageBox.StandardButton.Yes:
+                return
+            lifecycle = self.lifecycle
+            if lifecycle.is_exiting() or lifecycle._quit_dialog_showing:
+                return
+            # Installing is never permission to discard unsaved annotations. Save's
+            # file dialog may be cancelled and failures must leave the app running.
+            if self.project_dirty and not self.save_project():
+                return
+            script = make_update_batch(path, APP_DIR)
+            subprocess.Popen(["powershell.exe", "-NoProfile", "-NonInteractive",
+                              "-ExecutionPolicy", "Bypass", "-File", script], close_fds=True)
+            handed_off = True
+            self._update_install_handoff = True
             track_event("update_install_started", install_dir=APP_DIR)
             self.save_settings()
-            QApplication.quit()
+            lifecycle._do_quit(save=True)
         except Exception as exc:
-            self.update_status_label.setText(trf("update_failed", detail=str(exc)))
-            self.btn_check_update.setEnabled(bool(self.update_check_enabled))
+            self._set_update_status(trf("update_failed", detail=str(exc)))
+        finally:
+            if not handed_off:
+                if path:
+                    shutil.rmtree(os.path.dirname(path), ignore_errors=True)
+                if script:
+                    shutil.rmtree(os.path.dirname(script), ignore_errors=True)
+            self._update_flow_busy = False
+            self._set_update_check_enabled(bool(self.update_check_enabled))
+            self.resume_callbacks()
 
     def opacity_targets(self):
         """哪些窗口跟随透明度设置。
@@ -10581,6 +10947,7 @@ class ControlPanel(QWidget):
             getattr(self, "calc_panel", None),
             getattr(self, "roster_panel", None),
             getattr(self, "thumbnail_panel", None),
+            getattr(self, "page_rail", None),
             getattr(self, "mini_timer", None),
             # 分体的工具栏和 LOGO 就是用户眼里的「主面板」：必须在链里，否则它们只是
             # 置顶层里两个和全屏画布平级的兄弟，绘图模式下一律被画布盖住、点不到。
@@ -10662,6 +11029,8 @@ class ControlPanel(QWidget):
 
     def resume_callbacks(self):
         """恢复所有心跳和定时器（从后台恢复时调用）"""
+        if hasattr(self, 'lifecycle') and self.lifecycle.state in (LifecycleState.HIDDEN, LifecycleState.QUITTING):
+            return
         if hasattr(self, 'timer'):
             self.timer.start(self.HEARTBEAT_MS)
         if hasattr(self, 'autosave_timer'):
@@ -10670,7 +11039,7 @@ class ControlPanel(QWidget):
 
     def heartbeat_refresh(self):
         # 后台隐藏时不执行任何会显示窗口的操作
-        if hasattr(self, 'lifecycle') and self.lifecycle.state == LifecycleState.HIDDEN:
+        if hasattr(self, 'lifecycle') and self.lifecycle.state in (LifecycleState.HIDDEN, LifecycleState.QUITTING):
             return
         self.bind_topmost_stack()
         # 图标树的状态投影在这里兜底：显式调用点覆盖了所有已知的状态变化路径，但
@@ -11156,11 +11525,16 @@ class ControlPanel(QWidget):
             else:
                 self.set_ui_mode("icon", persist=False)
             update_check = settings.get("update_check_enabled")
+            # 旧版的 False 表示完全禁用更新请求，尊重既有偏好；新安装默认自动检查。
             if isinstance(update_check, bool):
                 self.update_check_enabled = update_check
             update_channel = settings.get("update_channel")
             if update_channel in ("stable", "preview"):
                 self.update_channel = update_channel
+            if self.update_check_enabled:
+                self.update_check_timer.start()
+            else:
+                self.update_check_timer.stop()
 
             self.sync_settings_ui()
             track_event("settings_loaded", tool=cv.draw_state, theme=self.theme_name)
@@ -11600,13 +11974,16 @@ class ControlPanel(QWidget):
         """托盘「重启软件」把当前工作存进临时文件再拉起新进程，新进程从这里接回。
 
         临时文件不是用户的项目：接回后必须清掉 project_path，否则之后「保存」会默默写回
-        temp 目录；工作也仍算未保存。文件用完即删，重启一次不能留一份在 temp 里。
+        temp 目录；工作也仍算未保存。仅在成功接回后删除，失败时保留文件供手动恢复。
         """
         if not path or not os.path.isfile(path):
             return False
         ok = self.open_project_from_path(path)
+        if not ok:
+            track_event("restart_restore_failed", file=os.path.basename(path))
+            return False
         self.project_path = None
-        self.project_dirty = bool(ok)
+        self.project_dirty = True
         try:
             os.remove(path)
         except OSError:
@@ -12788,6 +13165,7 @@ class ControlPanel(QWidget):
 if __name__ == "__main__":
     ensure_directories()
     setup_logging()
+    set_windows_app_user_model_id()
     LOGGER.info("MyScreenDraw %s starting (lang=%s)", APP_VERSION, CURRENT)
 
     app = QApplication(sys.argv)
@@ -12798,6 +13176,7 @@ if __name__ == "__main__":
         sys.exit(0)
     app.setApplicationName(tr("app"))
     app.setOrganizationName("MyScreenDraw")
+    app.setWindowIcon(QIcon())
     install_qt_translations(app)
     # 窗口创建是启动时唯一的「无界面可依赖」步骤：失败就弹友好错误并退出，
     # 不裸崩。Qt 虚函数/构造异常在 PyQt6 下会终结进程，必须在这里拦下。
@@ -12832,6 +13211,7 @@ if __name__ == "__main__":
     # 检查更新的线程也挂在这条出口上。QThread 还在跑就退出主线程，Qt 会打印
     # "QThread: Destroyed while thread is still running" 并可能直接崩在析构里。
     app.aboutToQuit.connect(pnl.stop_update_worker)
+    app.aboutToQuit.connect(pnl.update_check_timer.stop)
     # 自启命令自愈：绿色版被搬到别的目录后，注册表里那条命令指向的是旧路径，
     # 开机时静默失效。只在用户开着自启时才纠正，关着的情况下绝不去写注册表。
     heal_autostart()

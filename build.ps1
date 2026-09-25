@@ -4,8 +4,8 @@ $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $root
 
 $version = (& python -c "from version import VERSION; print(VERSION)").Trim()
-if ($version -ne "6.0.0-beta.6") {
-    throw "Release build requires version 6.0.0-beta.6, found '$version'"
+if ($version -ne "6.0.0-beta.7") {
+    throw "Release build requires version 6.0.0-beta.7, found '$version'"
 }
 
 # Never package checked-out runtime data or stale PyInstaller output.
@@ -109,8 +109,21 @@ $manifest = [ordered]@{
     app_version = $version
     executable = "MyScreenDraw.exe"
     sha256 = $hash
+    hash_algorithm = "SHA-256"
+    signature = "none"
     built_at_utc = (Get-Date).ToUniversalTime().ToString("o")
     package_type = "PyInstaller onedir portable"
 }
 $manifest | ConvertTo-Json | Set-Content (Join-Path $package "RELEASE-MANIFEST.json") -Encoding utf8
-Write-Host "Portable build verified: $package (v$version, SHA-256 $hash)"
+$zipPath = Join-Path $root ("MyScreenDraw-v{0}-windows-x64.zip" -f $version)
+if (Test-Path $zipPath) { Remove-Item -Force $zipPath }
+$updateEntries = Get-ChildItem -LiteralPath $package | Where-Object { $_.Name -notin @('data', 'exports') }
+Compress-Archive -LiteralPath $updateEntries.FullName -DestinationPath $zipPath -CompressionLevel Optimal
+$previousPlatform = $env:QT_QPA_PLATFORM
+$env:QT_QPA_PLATFORM = 'offscreen'
+try {
+    python -c "import sys; from main import validate_update_zip; print(validate_update_zip(sys.argv[1]))" $zipPath
+    if ($LASTEXITCODE -ne 0) { throw 'Built ZIP rejected by the application updater' }
+} finally { $env:QT_QPA_PLATFORM = $previousPlatform }
+$zipHash = (Get-FileHash -Algorithm SHA256 $zipPath).Hash.ToLowerInvariant()
+Write-Host "Portable build verified: $package (v$version, EXE SHA-256 $hash, ZIP SHA-256 $zipHash)"

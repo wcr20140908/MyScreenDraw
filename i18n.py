@@ -48,7 +48,7 @@ _BASE = {
     "clear": ("清屏", "Clear", "Effacer", "Borrar", "Löschen", "Очистить", "지우기", "クリア"),
     "annotate": ("批注", "Annotate", "Annoter", "Anotar", "Annotieren", "Аннотация", "주석", "注釈"),
     "mouse": ("鼠标", "Mouse", "Souris", "Ratón", "Maus", "Мышь", "마우스", "マウス"),
-    "passthrough": ("穿透模式", "Click-through", "Mode transparent", "Modo transparente", "Durchklicken", "Прозрачный режим", "클릭 통과", "透過モード"),
+    "passthrough": ("鼠标", "Mouse", "Souris", "Ratón", "Maus", "Мышь", "마우스", "マウス"),
     "drawing_mode": ("绘图模式", "Drawing Mode", "Mode dessin", "Modo dibujo", "Zeichenmodus", "Режим рисования", "그리기 모드", "描画モード"),
     "exit": ("退出软件", "Exit", "Quitter", "Salir", "Beenden", "Выход", "종료", "終了"),
     # 「关闭软件」= 转入后台驻留（托盘图标还在）；「退出软件」= 彻底结束进程。

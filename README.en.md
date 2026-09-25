@@ -9,9 +9,9 @@ MyScreenDraw is a fullscreen annotation / whiteboard / math-teaching tool built 
 - **Multi-page whiteboard** with white/black board switching; export page by page to PNG / PDF / SVG / EPS
 - **Real millimetre-scaled ruler, protractor and set squares** (per-screen calibration) with live readings
 - **Random name picker, timer, presentation spotlight, calculator** — a whole lesson without switching apps
-- **Offline by default**: no account, and no data is ever uploaded. The only feature that touches the network is the **manual update check**, which is off out of the box and only fires when you click it yourself
+- **No account; drawings, rosters and logs are not uploaded**. Automatic update checks are enabled by default and can be disabled in Settings. Downloads and installation each require separate confirmation; neither happens silently
 
-Current version **v6.0.0-beta.6**. The UI follows the system language in 8 languages: English, 中文, Français, Español, Deutsch, Русский, 한국어, 日本語.
+Current version **v6.0.0-beta.7**. The UI follows the system language in 8 languages: English, 中文, Français, Español, Deutsch, Русский, 한국어, 日本語.
 
 > Product screenshots are not included in the public release yet; the current local captures contain development-environment details and must not be committed to GitHub.
 
@@ -89,7 +89,7 @@ Click **Mouse** to let mouse/touch input pass through the canvas to the applicat
 ## FAQ
 
 **Q: Windows says "Windows protected your PC" / antivirus flags the app?**
-A: This is Windows' normal warning for **unsigned programs** — it does **not** mean your PC is infected. Click "More info → Run anyway" to use it, or run an antivirus scan to confirm — the app is **open-source**, so every line can be reviewed, and it is offline by default and never uploads any data. If you need a machine that stays fully off the network, leave "Check for updates" in Settings switched off (that is the factory state).
+A: The release is not code-signed and may trigger Windows reputation warnings. A warning is not proof of malware, but being open-source is not proof of safety either. Verify the download source and SHA-256 checksum and check with security software rather than ignoring the warning. Automatic update checks are enabled by default; drawings, rosters and logs are not uploaded. For offline use, disable update checks and do not download updates. Strictly isolated environments should block network access before the first launch.
 
 Why does it appear? The distributed exe is not yet code-signed. Fully removing the prompt requires the **publisher (developer)** to purchase a code-signing certificate and sign the release — that is a distribution-trust matter, not a program-security one, and virtually every free/open-source desktop app shows the same prompt on first run. If you are unsure, you can also build it yourself from source (see [CONTRIBUTING.md](CONTRIBUTING.md)).
 
@@ -107,13 +107,13 @@ A: Yes, since v5.2.0. The pen and highlighter accept several contacts at once �
 
 ## Privacy & data safety
 
-- **No network by default**, and **no data is ever uploaded**. There is exactly one code path that can reach the network, described below
-- **Update checks** (beta.6, off by default): choose stable or preview releases. The app contacts GitHub's release API (`api.github.com/repos/wcr20140908/MyScreenDraw/releases?per_page=30`) only when you click **Check now**.
+- **Drawings, rosters and logs are not uploaded**. Update checks retrieve public release metadata.
+- **Update checks**: beta.7 enables them for new installations and respects an existing disabled setting. Choose stable or preview releases. A 24-hour timer starts when settings load; the first automatic check is about 24 hours later, not immediately at startup. You can also click **Check now**. Checks contact GitHub's release API (`api.github.com/repos/wcr20140908/MyScreenDraw/releases?per_page=30`). Automatic results only notify you; they never start a download or installation.
   - Downloads stay inside the application and run in a background thread
   - The app asks before downloading and asks again before installing
   - ZIP validation rejects path traversal, symlinks, duplicate entries, oversized archives, excessive member counts, and archives missing `MyScreenDraw.exe`
   - Installation skips `data/`, `exports/`, settings, roster data, logs, and autosaves
-  - To stay fully offline, leave the switch off (the factory state)
+  - For offline use, disable update checks and do not download updates; strictly isolated environments should block network access before the first launch
 - **Start with Windows** (new in v5.5.0, off by default): when enabled, the app writes one value named `MyScreenDraw` under `HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run`, holding the path used to launch it. Turning the switch off deletes that value. Current user only — it never touches `HKEY_LOCAL_MACHINE`, needs no administrator rights, and changes nothing else in the system.
 - The local log (`data/events.jsonl`) may include file names — check it before sharing
 - The name list (`data/roster.json`) contains student names; treat it as personal data and never ship it with the program

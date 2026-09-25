@@ -7,10 +7,10 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ReleaseMetadataTests(unittest.TestCase):
-    def test_version_is_stable_release(self):
+    def test_version_is_current_preview(self):
         from version import VERSION, APP_VERSION
-        self.assertEqual(VERSION, "6.0.0-beta.6")
-        self.assertEqual(APP_VERSION, "v6.0.0-beta.6")
+        self.assertEqual(VERSION, "6.0.0-beta.7")
+        self.assertEqual(APP_VERSION, "v6.0.0-beta.7")
 
     def test_version_info_resource_matches_version_py(self):
         """version_info.txt 里的四处版本必须和 version.py 一致。
@@ -84,10 +84,8 @@ class ReleaseMetadataTests(unittest.TestCase):
     def test_offline_claims_are_not_absolute(self):
         """文档不能再声称「完全离线 / 无更新服务 / 不写注册表」。
 
-        v5.5.0 加了手动检查更新（默认关）和开机自启（写 HKCU\\...\\Run，默认关）。
-        这两件事都是用户自己打开才发生的，但只要代码里存在这两条路径，
-        「完全离线」「不内置更新服务」「不写注册表」就是不实描述——
-        而这些话恰恰是用来安抚在意隐私的用户的，说错了性质最严重。
+        beta.7 默认定时检查更新，开机自启仍需手动开启并写 HKCU Run 项。
+        文档必须披露网络与注册表行为，不能以绝对离线声明安抚用户。
         """
         banned = ["完全离线", "无更新服务", "不内置更新服务", "不写注册表",
                   "no update service", "no registry changes"]

@@ -101,11 +101,13 @@ def atomic_write_json_gz(path: str, data: Any, *, compresslevel: int = 6) -> Non
 
 def read_json_maybe_gz(path: str) -> Any:
     """Load a .json or .json.gz payload. Autosaves written before 5.2.2 are plain."""
-    if path.endswith(".gz"):
-        with gzip.open(path, "rt", encoding="utf-8") as handle:
-            return json.load(handle)
-    with open(path, encoding="utf-8") as handle:
-        return json.load(handle)
+    ensure_file_size(path)
+    opener = gzip.open if str(path).endswith(".gz") else open
+    with opener(path, "rb") as handle:
+        payload = handle.read(MAX_PROJECT_BYTES + 1)
+    if len(payload) > MAX_PROJECT_BYTES:
+        raise ValueError("项目解压后大小超出限制")
+    return json.loads(payload.decode("utf-8"))
 
 
 def cleanup_temp_files(directory: str) -> int:

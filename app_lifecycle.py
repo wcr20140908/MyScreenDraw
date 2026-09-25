@@ -17,7 +17,7 @@ import json
 import tempfile
 from pathlib import Path
 
-from PyQt6.QtWidgets import QSystemTrayIcon, QMenu, QMessageBox, QWidgetAction, QLabel
+from PyQt6.QtWidgets import QSystemTrayIcon, QMenu, QMessageBox, QWidgetAction, QLabel, QDialog
 from PyQt6.QtGui import QAction, QIcon, QPainter, QColor, QFont
 from PyQt6.QtCore import Qt, QTimer
 
@@ -188,7 +188,14 @@ class AppLifecycleManager:
                         orig_action.trigger()
                     return trigger
 
-                label.mousePressEvent = lambda e, fn=make_trigger(action): (fn(), self.tray_menu.hide())
+                def on_label_pressed(event, fn=make_trigger(action)):
+                    # 先结束托盘菜单的嵌套事件循环，再排队打开退出确认框。
+                    # 否则 QMessageBox.exec() 期间仍处于菜单事件循环，第二次点击
+                    # 可能重入退出路径并绕过确认。
+                    self.tray_menu.hide()
+                    QTimer.singleShot(0, fn)
+
+                label.mousePressEvent = on_label_pressed
 
                 # 替换action
                 self.tray_menu.insertAction(action, widget_action)
@@ -227,6 +234,8 @@ class AppLifecycleManager:
 
     def _restart_app(self):
         """重启软件：保留当前未保存工作"""
+        if self._quit_dialog_showing or self.state == LifecycleState.QUITTING:
+            return
         import subprocess
         import sys
         import os
@@ -235,13 +244,21 @@ class AppLifecycleManager:
         # 保存当前状态到临时恢复文件
         recovery_file = os.path.join(tempfile.gettempdir(),
                                      f'myscreendraw_restart_{os.getpid()}.msd')
+        original_path = self.panel.project_path
+        original_dirty = self.panel.project_dirty
+        original_title = self.panel.windowTitle()
         try:
             success = self.panel.save_project(recovery_file)
-            if not success:
-                recovery_file = None
         except Exception:
-            # 保存失败也继续重启，只是不恢复数据
-            recovery_file = None
+            success = False
+        finally:
+            # 临时快照不能改变用户当前文件的保存目标或未保存标记。
+            self.panel.project_path = original_path
+            self.panel.project_dirty = original_dirty
+            self.panel.setWindowTitle(original_title)
+        if not success:
+            # 保存失败时继续重启会丢掉所有未保存工作，必须留在当前进程。
+            return
 
         # 构建启动命令
         if getattr(sys, "frozen", False):
@@ -281,14 +298,10 @@ class AppLifecycleManager:
 
         self._quit_dialog_showing = True
         state_before_quit = self.state
-        self.state = LifecycleState.QUITTING
 
         def stay_in_app():
-            # 「不再退出」：后台状态就恢复主界面；本来就显示着的保持原样（折叠的仍折叠）
-            if state_before_quit == LifecycleState.HIDDEN:
-                self.restore_from_background()
-            else:
-                self.state = state_before_quit
+            # 取消退出必须保持打开确认框前的真实状态；后台状态不能被取消操作唤回前台。
+            self.state = state_before_quit
 
         try:
             # 暂停可能改动状态的回调
@@ -310,11 +323,18 @@ class AppLifecycleManager:
             btn_save_and_quit = dialog.addButton(self._tr("exit_save"),
                                                 QMessageBox.ButtonRole.AcceptRole)
             dialog.setDefaultButton(btn_save_and_quit)
+            dialog.setEscapeButton(btn_cancel)
 
-            dialog.exec()
+            # 直接退出是破坏性操作，单独标红；另外两个按钮保持普通样式。
+            btn_quit_directly.setStyleSheet("color: #ffffff; background-color: #d64545; font-weight: bold;")
+            result = dialog.exec()
             clicked = dialog.clickedButton()
+            # 点右上角关闭按钮时 Qt 返回 Rejected 且 clickedButton() 为空。
+            # 这种情况只表示取消退出，绝不能把整个程序一起关掉。
+            if result == QDialog.DialogCode.Rejected or clicked is None or clicked == btn_cancel:
 
-            if clicked == btn_quit_directly:
+                stay_in_app()
+            elif clicked == btn_quit_directly:
                 # 直接退出：不保存
                 self._do_quit(save=False)
             elif clicked == btn_save_and_quit:
@@ -326,7 +346,6 @@ class AppLifecycleManager:
                     # 保存失败：留在程序里
                     stay_in_app()
             else:
-                # 不再退出（含按 Esc / 关闭对话框）
                 stay_in_app()
         finally:
             self._quit_dialog_showing = False
@@ -337,6 +356,8 @@ class AppLifecycleManager:
 
     def _do_quit(self, save):
         """执行退出清理"""
+        if getattr(self, "_quit_done", False):
+            return
         self._quit_done = True
         self.state = LifecycleState.QUITTING
         # 停止所有定时器和监听器
@@ -352,6 +373,23 @@ class AppLifecycleManager:
             self.panel.autosave_timer.stop()
         except Exception:
             pass
+        # 所有独立顶层浮窗必须在 QApplication.quit() 前收走；否则 Windows 上
+        # 它们可能在退出过渡期继续显示，尤其是页面预览窗口。
+        try:
+            self.panel.close_thumbnail_panel()
+        except Exception:
+            pass
+        for name in (
+            "page_rail", "menu_panel", "select_panel", "settings_panel",
+            "text_panel", "calc_panel", "roster_panel", "mini_timer",
+            "toolbar_window", "logo_window", "canvas", "panel",
+        ):
+            try:
+                window = self.panel if name == "panel" else getattr(self.panel, name, None)
+                if window is not None:
+                    window.hide()
+            except Exception:
+                pass
 
         # 清理托盘图标
         if self.tray_icon:
@@ -363,17 +401,21 @@ class AppLifecycleManager:
 
     def hide_to_background(self):
         """转入后台：隐藏所有窗口，保持托盘图标"""
-        if self.state == LifecycleState.HIDDEN:
+        if self._quit_dialog_showing or self.state in (LifecycleState.HIDDEN, LifecycleState.QUITTING):
             return
 
         self._state_before_hidden = self.state
         if hasattr(self.panel, 'canvas') and self.panel.canvas and self.panel.canvas.editing_text_item():
             self.panel.canvas.end_text_edit(discard_empty=True)
 
+        # 在任何延迟心跳/重排回调运行前先建立 HIDDEN 状态，回调即可安全早退。
+        self.state = LifecycleState.HIDDEN
+
         # 进入穿透模式
         self.panel.set_drawing_mode(False)
 
         # 隐藏所有窗口（包括分体窗口）
+        self.panel.close_thumbnail_panel()
         if self.panel.canvas:
             self.panel.canvas.hide()
         self.panel.hide()
@@ -381,6 +423,8 @@ class AppLifecycleManager:
             self.panel.logo_window.hide()
         if hasattr(self.panel, 'toolbar_window') and self.panel.toolbar_window:
             self.panel.toolbar_window.hide()
+        if hasattr(self.panel, 'page_rail') and self.panel.page_rail:
+            self.panel.page_rail.hide()
         if hasattr(self.panel, 'settings_panel') and self.panel.settings_panel:
             self.panel.settings_panel.hide()
         # 隐藏所有子菜单
@@ -394,8 +438,6 @@ class AppLifecycleManager:
             except Exception:
                 pass
 
-        self.state = LifecycleState.HIDDEN
-
         # 更新托盘菜单文字
         if hasattr(self, 'action_toggle_ui') and self.action_toggle_ui:
             self._set_action_text(self.action_toggle_ui, self._tr("show_main_ui"))
@@ -405,7 +447,7 @@ class AppLifecycleManager:
 
     def restore_from_background(self):
         """从后台恢复完整主界面"""
-        if self.state == LifecycleState.SHOWING:
+        if self._quit_dialog_showing or self.state in (LifecycleState.SHOWING, LifecycleState.QUITTING):
             return
 
         # 画布也要回来：进后台时把它藏了，不重新显示的话已有批注全部不见，用户要再
@@ -424,6 +466,12 @@ class AppLifecycleManager:
                 self.panel.toolbar_window.show()
         if hasattr(self.panel, '_sync_split_geometry'):
             self.panel._sync_split_geometry()
+        if getattr(self.panel, "page_rail", None) is not None:
+            if self.panel.canvas and self.panel.canvas.whiteboard_mode:
+                self.panel.page_rail.show()
+                self.panel._position_page_rail()
+            else:
+                self.panel.page_rail.hide()
 
         # 保持穿透模式，直到用户主动选择绘图工具
         # （防止恢复时误画）

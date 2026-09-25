@@ -115,10 +115,9 @@ class OrientationClampTests(PanelTestCase):
         self.assertEqual(self.panel.collect_settings().get("orientation"), "portrait")
 
     def test_whiteboard_controls_stay_a_compact_two_row_group_in_landscape(self):
-        """横版不能把 5 个白板按钮横摊成一长排，否则主题/退出按钮会被挤出屏幕。"""
+        """主栏只留白/黑板切换一颗；翻页在右下角的跑道条上，不占主栏宽度。"""
         self.panel.set_orientation("landscape")
-        # wb_grid 是 QGridLayout，横版仍应保持两行（翻页一行 + 新页/板色一行）
-        self.assertEqual(self.panel.wb_grid.rowCount(), 2, "白板控制区应保持紧凑两行")
+        self.assertEqual(self.panel.wb_grid.count(), 1, "主栏白板区只该有白/黑板切换")
         self.assertLessEqual(self.panel.wb_box.sizeHint().width(), 190,
                              "白板控制区过宽会挤乱横版主栏")
 
@@ -129,8 +128,7 @@ class OrientationClampTests(PanelTestCase):
         self.panel.set_orientation("landscape")
         self.canvas.whiteboard_mode = True
         self.panel.update_whiteboard_ui()
-        for button in (self.panel.btn_prev_page, self.panel.btn_next_page,
-                       self.panel.btn_new_page, self.panel.btn_board_style):
+        for button in (self.panel.btn_board_style,):
             metrics = QFontMetrics(button.font())
             self.assertGreaterEqual(button.sizeHint().width(),
                                     metrics.horizontalAdvance(button.text()),

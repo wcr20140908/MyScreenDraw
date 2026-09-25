@@ -15,6 +15,17 @@ import persistence
 
 
 class FileSizeLimitTests(unittest.TestCase):
+    def test_compressed_autosave_has_decompressed_limit(self):
+        import gzip
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as root:
+            path = str(Path(root) / "oversized.json.gz")
+            with gzip.open(path, "wb") as handle:
+                handle.write(json.dumps({"text": "x" * 2048}).encode("utf-8"))
+            with patch.object(persistence, "MAX_PROJECT_BYTES", 1024):
+                with self.assertRaisesRegex(ValueError, "解压后"):
+                    persistence.read_json_maybe_gz(path)
+
     def test_oversized_project_is_rejected_before_parsing(self):
         with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".json") as tmp:
             tmp.write("x" * (persistence.MAX_PROJECT_BYTES + 1))

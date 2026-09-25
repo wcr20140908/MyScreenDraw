@@ -5,7 +5,7 @@
 from PyQt6.QtWidgets import (QWidget, QPushButton, QToolButton, QVBoxLayout, QHBoxLayout,
                              QGridLayout, QFrame, QLabel, QApplication)
 from PyQt6.QtCore import Qt, QSize, QRect, pyqtSignal, QPoint
-from PyQt6.QtGui import QCursor, QFontMetrics
+from PyQt6.QtGui import QCursor, QFontMetrics, QIcon
 import logging
 
 logger = logging.getLogger(__name__)
@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 # 又不会像 66×58 那样把竖版整栏顶出任务栏。
 BUTTON_WIDTH = 56
 BUTTON_HEIGHT = 44
-BUTTON_HEIGHT_MIN = 36      # 屏幕矮时允许压到这里；再矮文字就贴着图标了
+BUTTON_HEIGHT_MIN = 28      # 再矮图标和文字就叠在一起了
 BUTTON_WIDTH_MAX = 76       # 最长的文案（如 Durchsichtig）也不至于把栏撑得太宽
 LOGO_THICKNESS = 40         # 竖版 LOGO 的高度 / 横版 LOGO 的宽度
 LOGO_GAP = 2                # LOGO 与工具栏之间的缝
@@ -59,6 +59,7 @@ class LogoWindow(QWidget):
             Qt.WindowType.Tool
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setWindowIcon(QIcon())
 
         self._drag_offset = None
         self._dragging = False
@@ -195,8 +196,8 @@ class ToolbarWindow(QWidget):
     """工具栏独立窗口：显示所有工具按钮，可独立拖动"""
 
     position_changed = pyqtSignal(QPoint)
-    # 白板控制按钮的key
-    WB_KEYS = frozenset({'prev_page', 'pages', 'next_page', 'new_page', 'board_style'})
+    # 白板控制按钮的key。翻页条已经挪到右下角的跑道控件，主栏只留白/黑板切换。
+    WB_KEYS = frozenset({'board_style'})
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -206,12 +207,12 @@ class ToolbarWindow(QWidget):
             Qt.WindowType.Tool
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setWindowIcon(QIcon())
 
         self._drag_offset = None
         self.orientation = "portrait"
         self.icon_buttons = {}
         self._button_width = BUTTON_WIDTH
-        self._wb_button_width = BUTTON_WIDTH
         self._button_height = BUTTON_HEIGHT
         self._wb_columns = 1
         self._main_rows = 1
@@ -231,19 +232,25 @@ class ToolbarWindow(QWidget):
         self.toolbar_layout.setSpacing(2)
         self.toolbar_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
-        # 工具按钮网格
+        # 工具按钮网格（白板入口之前的按钮）
         self.icon_grid = QGridLayout()
         self.icon_grid.setContentsMargins(0, 0, 0, 0)
         self.icon_grid.setSpacing(2)
         self.toolbar_layout.addLayout(self.icon_grid)
 
-        # 白板控制区
+        # 白板控制区：插在「进入/退出白板」按钮正下方，关闭按钮之前
         self.icon_wb_box = QWidget()
         self.icon_wb_grid = QGridLayout(self.icon_wb_box)
         self.icon_wb_grid.setContentsMargins(0, 0, 0, 0)
         self.icon_wb_grid.setSpacing(2)
         self.icon_wb_box.setVisible(False)
         self.toolbar_layout.addWidget(self.icon_wb_box)
+
+        # 白板入口之后的按钮（设置、关闭）：关闭始终在最下方
+        self.icon_grid_tail = QGridLayout()
+        self.icon_grid_tail.setContentsMargins(0, 0, 0, 0)
+        self.icon_grid_tail.setSpacing(2)
+        self.toolbar_layout.addLayout(self.icon_grid_tail)
 
     # --- 拖动 ---
     def mousePressEvent(self, event):
@@ -309,7 +316,17 @@ class ToolbarWindow(QWidget):
         self._relayout_buttons()
 
     def _main_buttons(self):
-        return [btn for key, btn in self.icon_buttons.items() if key not in self.WB_KEYS]
+        # 白板入口按钮排在主区末尾：白板控制区紧跟在它下方，关闭按钮再排在最底。
+        buttons = [btn for key, btn in self.icon_buttons.items() if key not in self.WB_KEYS]
+        entry = self.icon_buttons.get("whiteboard")
+        close = self.icon_buttons.get("close")
+        if entry is not None and entry in buttons:
+            buttons.remove(entry)
+            if close is not None and close in buttons:
+                buttons.insert(buttons.index(close), entry)
+            else:
+                buttons.append(entry)
+        return buttons
 
     def _wb_buttons(self):
         return [btn for key, btn in self.icon_buttons.items() if key in self.WB_KEYS]
@@ -318,24 +335,27 @@ class ToolbarWindow(QWidget):
         """根据方向重排按钮：横版单行，竖版单列，然后按内容收紧并收进屏幕。"""
         self._place_buttons()
         self._button_width = self._measure_button_width()
-        self._wb_button_width = max(44, min(self._button_width, 52))
-        # 先按标准高度试，放不下再压矮；压到底还放不下就把白板控制区折成两列。
+        # 先按标准高度排一次，量到的才是真实高度；超高再压矮重排。
+        # 白板翻页不在主栏里，主栏不再为它折列。
         self._button_height = BUTTON_HEIGHT
         self._wb_columns = 1
         self._main_rows = 1
         self._reapply_button_size()
+        self._place_buttons()
         self._fit_to_content()
         avail = _available_rect(self)
         if self.orientation == "portrait":
+            # LOGO 固定在工具栏上方，所以工具栏自己只能用掉「屏幕高度减去 LOGO」的部分。
+            # 放不下就按颗数把按钮压矮，压到能整栏放下为止；不能靠把 LOGO 挪到下面来腾地方。
             limit = avail.height() - LOGO_THICKNESS - LOGO_GAP
-            if self.height() > limit:
-                self._button_height = BUTTON_HEIGHT_MIN
+            count = max(1, sum(1 for btn in self.icon_buttons.values() if not btn.isHidden()))
+            while self.height() > limit and self._button_height > BUTTON_HEIGHT_MIN:
+                overflow = self.height() - limit
+                shrink = max(2, -(-overflow // count))
+                self._button_height = max(BUTTON_HEIGHT_MIN, self._button_height - shrink)
                 self._reapply_button_size()
+                self._place_buttons()
                 self._fit_to_content()
-                if self.height() > limit and self._wb_buttons():
-                    self._wb_columns = 2
-                    self._place_buttons()
-                    self._fit_to_content()
         else:
             # 横版一行 14 个按钮约 850px，窄屏（200% 缩放的 1080p 只有 960 逻辑像素）
             # 放不下就折成两行，比让整栏伸出屏幕右边被 clamp 到 x=0 好。
@@ -347,32 +367,48 @@ class ToolbarWindow(QWidget):
         self.clamp_into_screen()
 
     def _place_buttons(self):
-        for grid in (self.icon_grid, self.icon_wb_grid):
+        for grid in (self.icon_grid, self.icon_grid_tail, self.icon_wb_grid):
             while grid.count():
                 grid.takeAt(0)
         main_buttons = self._main_buttons()
         wb_buttons = self._wb_buttons()
+        # 白/黑板切换紧跟在「进入/退出白板」按钮后面：竖版在它下方，横版在它右侧。
+        entry = self.icon_buttons.get("whiteboard")
+        split_at = main_buttons.index(entry) + 1 if entry in main_buttons else len(main_buttons)
+        head, tail = main_buttons[:split_at], main_buttons[split_at:]
         if self.orientation == "landscape":
             rows = max(1, self._main_rows)
             per_row = max(1, -(-len(main_buttons) // rows))
-            for i, btn in enumerate(main_buttons):
+            for i, btn in enumerate(head):
                 self.icon_grid.addWidget(btn, i // per_row, i % per_row)
             wb_per_row = max(1, -(-len(wb_buttons) // rows))
             for i, btn in enumerate(wb_buttons):
                 self.icon_wb_grid.addWidget(btn, i // wb_per_row, i % wb_per_row)
+            start = len(head)
+            for i, btn in enumerate(tail):
+                pos = start + i
+                self.icon_grid_tail.addWidget(btn, pos // per_row, pos % per_row)
         else:
-            for i, btn in enumerate(main_buttons):
+            for i, btn in enumerate(head):
                 self.icon_grid.addWidget(btn, i, 0)
             cols = max(1, self._wb_columns)
             for i, btn in enumerate(wb_buttons):
                 self.icon_wb_grid.addWidget(btn, i // cols, i % cols)
+            for i, btn in enumerate(tail):
+                self.icon_grid_tail.addWidget(btn, i, 0)
         # Button visibility is owned by sync_icon_buttons(); relayout must not
         # resurrect controls hidden by mouse mode.
 
     def _measure_button_width(self):
-        """按钮宽度由最长文案决定：英文/德文的「穿透」比中文长得多，56px 会把字截掉。"""
+        """按钮宽度由最长文案决定：英文的 "Whiteboard" 比中文长得多，56px 会把字截掉。
+
+        白板入口的文案在「进入白板/退出白板」之间切换，退出文案更长，
+        把它算进去会让进白板时整栏变宽。入口按钮单独放宽，其它按钮保持原宽。
+        """
         widest = 0
-        for btn in self.icon_buttons.values():
+        for key, btn in self.icon_buttons.items():
+            if key == "whiteboard":
+                continue
             text = btn.text()
             if not text:
                 continue
@@ -391,7 +427,7 @@ class ToolbarWindow(QWidget):
         半透明无边框窗口只 adjustSize() 不够：嵌套布局的 sizeHint 有缓存，白板区
         显隐或按钮改尺寸后窗口只会变大不会缩回，底部留一截透明却仍拦点击的空白。
         """
-        for nested in (self.icon_grid, self.icon_wb_grid, self.toolbar_layout, self.layout()):
+        for nested in (self.icon_grid, self.icon_grid_tail, self.icon_wb_grid, self.toolbar_layout, self.layout()):
             if nested is not None:
                 nested.invalidate()
                 nested.activate()
@@ -455,10 +491,6 @@ class ToolbarWindow(QWidget):
             QToolButton#IconBtnActive {{
                 background-color: {theme['accent']};
                 color: {theme['active_text']};
-            }}
-            QToolButton[wb_compact="true"] {{
-                min-width: {self._wb_button_width}px;
-                max-width: {self._wb_button_width}px;
             }}
         """)
         self.setWindowOpacity(opacity / 100.0)

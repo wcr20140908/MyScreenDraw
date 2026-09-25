@@ -285,7 +285,7 @@ class AutostartTests(unittest.TestCase):
     def test_only_touches_the_current_user(self):
         source = (ROOT / "main.py").read_text(encoding="utf-8")
         start = source.index("AUTOSTART_ROOT")
-        block = source[start:source.index("# --- 手动检查更新", start)]
+        block = source[start:source.index("UPDATE_API_URL", start)]
         self.assertNotIn("HKEY_LOCAL_MACHINE", block,
                          "写 HKLM 需要管理员权限，还会给所有账户装上自启")
         self.assertIn("HKEY_CURRENT_USER", block)
@@ -301,10 +301,16 @@ class AutostartTests(unittest.TestCase):
 
 
 class UpdateCheckTests(_PanelCase):
-    def test_disabled_by_default(self):
-        source = (ROOT / "main.py").read_text(encoding="utf-8")
-        self.assertIn("self.update_check_enabled = False", source,
-                      "不联网必须仍然是默认状态")
+    def setUp(self):
+        super().setUp()
+        self.panel._updates_stopping = False
+
+    def test_default_check_only_notifies(self):
+        from unittest.mock import patch
+        with patch.object(self.panel, '_offer_update_page') as offer:
+            self.panel._on_update_result({'tag': 'v99.0.0'}, None)
+            offer.assert_not_called()
+            self.assertEqual(self.panel._pending_update_release['tag'], 'v99.0.0')
 
     def test_no_request_while_disabled(self):
         """关着的时候，check_for_updates 必须在建线程之前就掉头。
@@ -320,6 +326,7 @@ class UpdateCheckTests(_PanelCase):
         self.panel._update_worker = None
         try:
             self.panel.update_check_enabled = False
+            self.panel.sync_settings_panel()
             self.panel.check_for_updates()
             self.assertIsNone(self.panel._update_worker, "关着的时候不该建检查线程")
             self.assertNotEqual(self.panel.update_status_label.text(),
@@ -332,23 +339,18 @@ class UpdateCheckTests(_PanelCase):
             self.main.fetch_latest_version = original
             self.panel.settings_panel.hide()
 
-    def test_nothing_checks_on_startup(self):
-        """启动时不能有任何自动检查——包括延时的、包括心跳里的。"""
-        source = (ROOT / "main.py").read_text(encoding="utf-8")
-        for hook in ("singleShot", "heartbeat_refresh", "aboutToQuit"):
-            index = 0
-            while True:
-                index = source.find(hook, index + 1)
-                if index < 0:
-                    break
-                window = source[index:index + 200]
-                self.assertNotIn("check_for_updates", window,
-                                 f"{hook} 附近出现了自动检查更新")
+    def test_manual_download_is_separate_from_check(self):
+        from unittest.mock import patch
+        with patch.object(self.panel, '_offer_update_page') as offer:
+            self.panel._on_update_result({'tag': 'v99.0.0'}, None)
+            offer.assert_not_called()
+            self.panel.download_pending_update()
+            offer.assert_called_once_with({'tag': 'v99.0.0'})
 
     def test_version_parsing(self):
         parse = self.main.parse_version
-        self.assertEqual(parse("v5.5.0"), (5, 5, 0))
-        self.assertEqual(parse("5.5.0"), (5, 5, 0))
+        self.assertEqual(parse("v5.5.0"), (5, 5, 0, 2, 0))
+        self.assertEqual(parse("5.5.0"), (5, 5, 0, 2, 0))
         self.assertIsNone(parse("nonsense"))
         self.assertIsNone(parse(None))
         self.assertGreater(parse("v5.6.0"), parse("v5.5.0"))
@@ -362,10 +364,10 @@ class UpdateCheckTests(_PanelCase):
         try:
             self.panel.open_settings_panel()
             self.panel._on_update_result("v99.0.0", None)
-            self.assertEqual(offered, ["v99.0.0"])
+            self.assertEqual(offered, [])
             self.assertIn("99.0.0", self.panel.update_status_label.text())
             self.panel._on_update_result("v0.0.1", None)
-            self.assertEqual(offered, ["v99.0.0"], "旧版本不该弹框")
+            self.assertEqual(offered, [], "旧版本不该弹框")
             self.assertEqual(self.panel.update_status_label.text(),
                              self.main.tr("update_current"))
         finally:
@@ -444,14 +446,13 @@ class UpdateCheckTests(_PanelCase):
             self.assertTrue(text.strip(), f"第 {index} 种语言缺文案")
             self.assertNotIn("{", text, "这句不需要占位符")
 
-    def test_never_downloads_or_executes(self):
-        source = (ROOT / "main.py").read_text(encoding="utf-8")
-        start = source.index("# --- 手动检查更新")
-        block = source[start:source.index("class UpdateCheckWorker") + 400]
-        for forbidden in ("urlretrieve", "subprocess", "os.system", "os.startfile",
-                          "ShellExecute", "extractall"):
-            self.assertNotIn(forbidden, block,
-                             f"检查更新的代码里出现了 {forbidden}；它只该读版本号")
+    def test_check_does_not_download_or_execute(self):
+        from unittest.mock import patch
+        with patch.object(self.main, 'UpdateDownloadWorker') as download, \
+                patch.object(self.main.subprocess, 'Popen') as launch:
+            self.panel._on_update_result({'tag': 'v99.0.0', 'download_url': 'https://example.invalid/u.zip'}, None)
+            download.assert_not_called()
+            launch.assert_not_called()
 
     def test_worker_runs_off_the_ui_thread(self):
         from PyQt6.QtCore import QThread
@@ -490,6 +491,90 @@ class UpdateCheckTests(_PanelCase):
             self.panel.stop_update_worker()
             self.panel.sync_settings_panel()
             self.panel.settings_panel.hide()
+
+    def test_install_confirmation_save_gate_and_powershell_handoff(self):
+        import tempfile
+        import zipfile
+        from unittest.mock import patch
+        panel = self.panel
+        yes = self.main.QMessageBox.StandardButton.Yes
+        cancel = self.main.QMessageBox.StandardButton.Cancel
+        for choice, saved, launched in ((cancel, True, False), (yes, False, False), (yes, True, True)):
+            with self.subTest(choice=choice, saved=saved), tempfile.TemporaryDirectory() as root:
+                folder = Path(root) / 'download'
+                folder.mkdir()
+                archive = folder / 'update.zip'
+                with zipfile.ZipFile(archive, 'w') as z:
+                    z.writestr('MyScreenDraw.exe', b'fake')
+                panel.project_dirty = True
+                panel._update_install_handoff = False
+                with patch.object(self.main.QMessageBox, 'exec', return_value=choice), \
+                        patch.object(panel, 'save_project', return_value=saved) as save, \
+                        patch.object(panel, 'save_settings'), \
+                        patch.object(self.main, 'make_update_batch', return_value=str(Path(root) / 'apply.ps1')), \
+                        patch.object(self.main.subprocess, 'Popen') as popen, \
+                        patch.object(panel.lifecycle, '_do_quit') as quit_app:
+                    panel._on_update_downloaded(str(archive), None)
+                    self.assertEqual(popen.called, launched)
+                    self.assertEqual(quit_app.called, launched)
+                    self.assertEqual(save.called, choice == yes)
+                    if launched:
+                        command = popen.call_args.args[0]
+                        self.assertEqual(command[0], 'powershell.exe')
+                        self.assertIn('-File', command)
+                    else:
+                        self.assertFalse(folder.exists())
+        panel.project_dirty = False
+        panel._update_install_handoff = False
+
+    def test_download_cancel_and_hidden_do_not_restart_heartbeat(self):
+        from unittest.mock import patch
+        panel = self.panel
+        previous = panel.lifecycle.state
+        panel.lifecycle.state = self.main.LifecycleState.HIDDEN
+        panel.timer.stop()
+        try:
+            with patch.object(self.main.QMessageBox, 'exec', return_value=self.main.QMessageBox.StandardButton.Cancel), \
+                    patch.object(self.main, 'UpdateDownloadWorker') as worker:
+                panel._offer_update_page({'tag': 'v99.0.0', 'download_url': 'https://example.invalid/u.zip'})
+                worker.assert_not_called()
+                self.assertFalse(panel.timer.isActive())
+        finally:
+            panel.lifecycle.state = previous
+
+    def test_update_ui_regressions_kill_known_bad_methods(self):
+        import inspect
+        import textwrap
+        from unittest.mock import patch
+        cases = [
+            ('_on_update_result', 'self._pending_update_release = release',
+             'self._pending_update_release = release; self._offer_update_page(release)',
+             self.test_default_check_only_notifies),
+            ('download_pending_update', 'self._offer_update_page(release)', 'pass',
+             self.test_manual_download_is_separate_from_check),
+            ('_on_update_downloaded', 'if self.project_dirty and not self.save_project():', 'if False:',
+             self.test_install_confirmation_save_gate_and_powershell_handoff),
+            ('_on_update_downloaded', '"powershell.exe"', '"cmd.exe"',
+             self.test_install_confirmation_save_gate_and_powershell_handoff),
+            ('_offer_update_page', 'self.resume_callbacks()', 'self.timer.start(self.HEARTBEAT_MS)',
+             self.test_download_cancel_and_hidden_do_not_restart_heartbeat),
+        ]
+        # unittest subTest normally records rather than raises failures; a plain
+        # assertion context is needed when deliberately running a broken method.
+        import contextlib
+        for method, old, new, check in cases:
+            source = textwrap.dedent(inspect.getsource(getattr(self.main.ControlPanel, method)))
+            self.assertIn(old, source)
+            namespace = dict(self.main.__dict__)
+            exec(source.replace(old, new), namespace)
+            import types
+            with patch.object(self.panel, method, types.MethodType(namespace[method], self.panel)), \
+                    patch.object(self, 'subTest', side_effect=lambda **kw: contextlib.nullcontext()):
+                with self.assertRaises(AssertionError, msg=method + ' / ' + old):
+                    check()
+            self.panel._update_flow_busy = False
+            self.panel._update_install_handoff = False
+            self.panel.project_dirty = False
 
     def test_stop_worker_is_safe_without_one(self):
         self.panel._update_worker = None

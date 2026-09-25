@@ -1,56 +1,51 @@
+param([Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$Commit)
+$ErrorActionPreference = 'Stop'
+$root = Split-Path -Parent $MyInvocation.MyCommand.Path
+Set-Location -LiteralPath $root
 $token = $env:GITHUB_TOKEN
-if (-not $token) {
-    Write-Host "Error: GITHUB_TOKEN environment variable not set"
-    exit 1
+if (-not $token) { throw 'GITHUB_TOKEN environment variable not set' }
+$repo = 'wcr20140908/MyScreenDraw'
+$version = (& python -c "from version import VERSION; print(VERSION)").Trim()
+if ($LASTEXITCODE -ne 0 -or $version -ne '6.0.0-beta.7') { throw 'Unexpected release version' }
+$tag = "v$version"
+$asset = "MyScreenDraw-$tag-windows-x64.zip"
+$assetPath = Join-Path $root $asset
+$notesPath = Join-Path $root "release-notes-$tag.md"
+if (-not (Test-Path -LiteralPath $assetPath -PathType Leaf)) { throw "Missing release asset: $asset" }
+$notes = Get-Content -LiteralPath $notesPath -Raw -Encoding UTF8
+python -c "import sys; from main import validate_update_zip; validate_update_zip(sys.argv[1])" $assetPath
+if ($LASTEXITCODE -ne 0) { throw 'Update archive validation failed' }
+$hash = (Get-FileHash -LiteralPath $assetPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$checksumPath = "$assetPath.sha256"
+"$hash  $asset" | Set-Content -LiteralPath $checksumPath -Encoding ascii
+$headers = @{
+    Authorization = "Bearer $token"
+    Accept = 'application/vnd.github+json'
+    'X-GitHub-Api-Version' = '2022-11-28'
+    'User-Agent' = 'MyScreenDraw-release'
 }
-$repo = "wcr20140908/MyScreenDraw"
-$tag = "v6.0.0-beta.1"
-
-$releaseNotes = Get-Content "release-notes-v6.0.0-beta.1.md" -Raw -Encoding UTF8
-
+$api = "https://api.github.com/repos/$repo"
+# Refuse to overwrite an existing release or asset. A failed upload leaves a draft.
+$existing = $null
+try { $existing = Invoke-RestMethod -Uri "$api/releases/tags/$tag" -Headers $headers }
+catch { if (-not $_.Exception.Response -or [int]$_.Exception.Response.StatusCode -ne 404) { throw } }
+if ($existing) { throw "Release $tag already exists; refusing to overwrite" }
 $payload = @{
     tag_name = $tag
-    name = "MyScreenDraw v6.0.0-beta.1 (Preview)"
-    body = $releaseNotes
-    draft = $false
+    target_commitish = $Commit
+    name = "MyScreenDraw $tag (Preview)"
+    body = $notes
+    draft = $true
     prerelease = $true
+} | ConvertTo-Json -Depth 10
+$release = Invoke-RestMethod -Uri "$api/releases" -Method Post -Headers $headers -Body ([Text.Encoding]::UTF8.GetBytes($payload)) -ContentType 'application/json; charset=utf-8'
+$upload = $release.upload_url -replace '\{.*\}', ''
+foreach ($path in @($assetPath, $checksumPath)) {
+    $name = Split-Path -Leaf $path
+    $mime = if ($path.EndsWith('.zip')) { 'application/zip' } else { 'text/plain' }
+    $uploaded = Invoke-RestMethod -Uri ($upload + '?name=' + [uri]::EscapeDataString($name)) -Method Post -Headers $headers -ContentType $mime -InFile $path
+    if ($uploaded.state -ne 'uploaded' -or $uploaded.size -ne (Get-Item -LiteralPath $path).Length) { throw "Asset upload verification failed: $name" }
 }
-
-$jsonPayload = $payload | ConvertTo-Json -Depth 10
-$utf8Bytes = [System.Text.Encoding]::UTF8.GetBytes($jsonPayload)
-
-$headers = @{
-    "Authorization" = "Bearer $token"
-    "Accept" = "application/vnd.github+json"
-    "X-GitHub-Api-Version" = "2022-11-28"
-    "User-Agent" = "PowerShell"
-}
-
-try {
-    $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases" `
-        -Method Post `
-        -Headers $headers `
-        -Body $utf8Bytes `
-        -ContentType "application/json; charset=utf-8"
-
-    Write-Host "✓ Release created successfully!"
-    Write-Host "URL: $($release.html_url)"
-    Write-Host "Release ID: $($release.id)"
-
-    # Save for asset upload
-    $release.id | Out-File "release_id.txt"
-    ($release.upload_url -replace '\{.*\}', '') | Out-File "upload_url.txt"
-
-    $release
-} catch {
-    Write-Host "Error creating release:"
-    Write-Host $_.Exception.Message
-    if ($_.Exception.Response) {
-        $reader = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())
-        $reader.BaseStream.Position = 0
-        $reader.DiscardBufferedData()
-        $responseBody = $reader.ReadToEnd()
-        Write-Host "Response: $responseBody"
-    }
-    exit 1
-}
+$published = Invoke-RestMethod -Uri "$api/releases/$($release.id)" -Method Patch -Headers $headers -Body '{"draft":false}' -ContentType 'application/json'
+Write-Host "Release published: $($published.html_url)"
+Write-Host "ZIP SHA-256: $hash"
