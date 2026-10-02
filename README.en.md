@@ -17,7 +17,11 @@ Current version **v6.0.0-beta.7**. The UI follows the system language in 8 langu
 
 ## Quick start
 
-1. **Get the app**: extract the portable `MyScreenDraw` folder to your Desktop, another drive, or a USB stick (no installation; the only registry write happens if you turn on "Start with Windows" in Settings — see below).
+**[Download Windows x64 portable v6.0.0-beta.7 (includes EXE, no installation)](https://github.com/wcr20140908/MyScreenDraw/releases/download/v6.0.0-beta.7/MyScreenDraw-v6.0.0-beta.7-windows-x64.zip)**
+
+> Do not download GitHub's automatic **Source code (zip)** / **Source code (tar.gz)** assets or **Code → Download ZIP**. Those contain source code, not the runnable application.
+
+1. **Get the app**: download the portable ZIP above and extract **all its contents** into a new folder on your Desktop, another drive, or a USB stick. Do not run inside the ZIP or extract only the EXE: keep `MyScreenDraw.exe` beside the `_internal` folder. No installation or Python required; the only registry write happens if you turn on "Start with Windows" in Settings — see below.
 2. **Launch**: double-click `MyScreenDraw.exe`. It creates `data/` (settings & autosave) and `exports/` (exports) beside itself on first run.
 3. **Exit**: press **F12** (global hotkey, works even on the fullscreen canvas).
 

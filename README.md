@@ -16,7 +16,11 @@ MyScreenDraw 是一个面向**教室触控大屏**的全屏批注 / 白板 / 数
 
 ## 快速开始
 
-1. **获取程序**：解压便携版 `MyScreenDraw` 整个文件夹到桌面、D 盘或 U 盘（免安装；只有在设置页里打开「开机自动启动」时才会写一条注册表值，见下）。
+**[下载 Windows x64 便携版 v6.0.0-beta.7（含 EXE，免安装）](https://github.com/wcr20140908/MyScreenDraw/releases/download/v6.0.0-beta.7/MyScreenDraw-v6.0.0-beta.7-windows-x64.zip)**
+
+> 不要下载 GitHub 自动生成的 **Source code (zip)** / **Source code (tar.gz)**，也不要使用仓库的 **Code → Download ZIP**：这些都是源码，不含可直接运行的程序。
+
+1. **获取程序**：下载上面的便携包，将压缩包的**全部内容**解压到一个新文件夹（例如 `D:\MyScreenDraw`），不要在压缩包内直接运行，也不要只提取 EXE。`MyScreenDraw.exe` 与 `_internal` 文件夹必须保持在同一目录。免安装，无需安装 Python；只有在设置页里打开「开机自动启动」时才会写一条注册表值，见下。
 2. **启动**：双击 `MyScreenDraw.exe`。程序会在同目录自动创建 `data/`（配置与自动保存）和 `exports/`（导出文件）。
 3. **退出**：按 **F12**（全局热键，全屏画布下也有效）。
 
