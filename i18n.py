@@ -110,6 +110,10 @@ _BASE = {
     "rotate": ("旋转", "Rotate", "Pivoter", "Girar", "Drehen", "Повернуть", "회전", "回転"),
 
     # ---------- 白板 ----------
+    "first_page": ("此是第一页", "This is the first page", "C’est la première page", "Esta es la primera página", "Dies ist die erste Seite", "Это первая страница", "첫 페이지입니다", "最初のページです"),
+    "last_page": ("此是最后一页", "This is the last page", "C’est la dernière page", "Esta es la última página", "Dies ist die letzte Seite", "Это последняя страница", "마지막 페이지입니다", "最後のページです"),
+    "delete_page": ("删除", "Delete", "Supprimer", "Eliminar", "Löschen", "Удалить", "삭제", "削除"),
+    "delete_page_confirm": ("确定删除第 {index} 页？此操作不可撤销。", "Delete page {index}? This cannot be undone.", "Supprimer la page {index} ? Cette action est irréversible.", "¿Eliminar la página {index}? No se puede deshacer.", "Seite {index} löschen? Dies kann nicht rückgängig gemacht werden.", "Удалить страницу {index}? Это действие нельзя отменить.", "{index} 페이지를 삭제할까요? 이 작업은 취소할 수 없습니다.", "{index} ページを削除しますか？この操作は取り消せません。"),
     "whiteboard": ("进入白板", "Whiteboard", "Tableau blanc", "Pizarra", "Whiteboard", "Доска", "화이트보드", "ホワイトボード"),
     "exit_whiteboard": ("退出白板", "Exit Whiteboard", "Quitter le tableau", "Salir de pizarra", "Whiteboard beenden", "Выйти с доски", "화이트보드 종료", "ホワイトボード終了"),
     "prev": ("上页", "Previous", "Précédent", "Anterior", "Zurück", "Назад", "이전", "前へ"),

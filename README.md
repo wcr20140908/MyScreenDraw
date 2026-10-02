@@ -11,12 +11,12 @@ MyScreenDraw 是一个面向**教室触控大屏**的全屏批注 / 白板 / 数
 - **随机点名、计时器、演示聚光灯、计算器**——一节课无需切换任何软件
 - **无账号，不上传绘图、名单或日志**：默认自动检查更新，仅获取 GitHub 发布信息；下载和安装分别需要手动确认，不静默下载或安装。可在设置中关闭自动检查
 
-当前版本 **v6.0.0-beta.8**（本地构建，尚未发布到 GitHub Release），界面支持 8 种语言（自动跟随系统）：中文、English（英语）、Français（法语）、Español（西班牙语）、Deutsch（德语）、Русский（俄语）、한국어（韩语）、日本語（日语）。
+当前版本 **v6.0.0-beta.8**（预览版），界面支持 8 种语言（自动跟随系统）：中文、English（英语）、Français（法语）、Español（西班牙语）、Deutsch（德语）、Русский（俄语）、한국어（韩语）、日本語（日语）。
 
 
 ## 快速开始
 
-**[下载 Windows x64 便携版 v6.0.0-beta.7（含 EXE，免安装）](https://github.com/wcr20140908/MyScreenDraw/releases/download/v6.0.0-beta.7/MyScreenDraw-v6.0.0-beta.7-windows-x64.zip)**
+**[下载 Windows x64 便携版 v6.0.0-beta.8（含 EXE，免安装）](https://github.com/wcr20140908/MyScreenDraw/releases/download/v6.0.0-beta.8/MyScreenDraw-v6.0.0-beta.8-windows-x64.zip)**
 
 > 不要下载 GitHub 自动生成的 **Source code (zip)** / **Source code (tar.gz)**，也不要使用仓库的 **Code → Download ZIP**：这些都是源码，不含可直接运行的程序。
 

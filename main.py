@@ -546,13 +546,24 @@ def style_texture(style, color, options=None):
     image = QImage(48, 48, QImage.Format.Format_ARGB32_Premultiplied)
     image.fill(Qt.GlobalColor.transparent)
     base_alpha = color.alpha() / 255.0
+    # 铅笔是细密石墨排线；蜡笔是连续蜡质底色加粗颗粒；粉笔是疏松粉块与空隙。
+    cells = [[rng.random() for _ in range(16)] for _ in range(16)]
     for y in range(48):
         for x in range(48):
             roll = rng.random()
-            if roll < density:
-                alpha = grain_alpha * (0.55 + 0.45 * rng.random())
+            if style == "pencil":
+                ridge = (x + 2 * y) % 5
+                coverage = (0.8 if ridge == 0 else 0.34) if roll < density else 0.06
+                alpha = grain_alpha * coverage
+            elif style == "crayon":
+                wax = cells[((y + rng.randrange(3)) // 3) % 16][((x + rng.randrange(3)) // 3) % 16]
+                coverage = 0.68 + 0.32 * wax if wax < density else 0.32
+                # 偶发划痕，不把蜡质底色打散成粉笔颗粒。
+                alpha = grain_alpha * coverage * (0.35 if (x - y) % 17 == 0 else 1.0)
             else:
-                alpha = grain_alpha * 0.12 * rng.random()
+                dust = cells[((y + rng.randrange(3)) // 3) % 16][((x + rng.randrange(3)) // 3) % 16]
+                coverage = (0.65 + 0.35 * roll) if dust < density else 0.015
+                alpha = grain_alpha * coverage * (0.35 if roll < 0.16 else 1.0)
             grain = QColor(color)
             grain.setAlpha(max(0, min(255, int(alpha * base_alpha))))
             image.setPixelColor(x, y, grain)
@@ -1257,6 +1268,29 @@ def set_window_owner(window_id, owner_id):
 
 WS_EX_TOOLWINDOW = 0x00000080
 WS_EX_APPWINDOW = 0x00040000
+WS_EX_TRANSPARENT = 0x00000020
+WS_EX_LAYERED = 0x00080000
+
+
+def set_canvas_passthrough(window_id, enabled):
+    """顶层分层窗口必须使用原生穿透；Qt 的鼠标透明属性只管进程内事件分发。"""
+    if QApplication.platformName() == "offscreen":
+        return
+    user32 = ctypes.windll.user32
+    get_long = user32.GetWindowLongPtrW if hasattr(user32, "GetWindowLongPtrW") else user32.GetWindowLongW
+    set_long = user32.SetWindowLongPtrW if hasattr(user32, "SetWindowLongPtrW") else user32.SetWindowLongW
+    get_long.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    get_long.restype = ctypes.c_ssize_t
+    set_long.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_ssize_t]
+    set_long.restype = ctypes.c_ssize_t
+    hwnd = ctypes.c_void_p(int(window_id))
+    style = int(get_long(hwnd, GWL_EXSTYLE) or 0)
+    wanted = (style | WS_EX_LAYERED | WS_EX_TRANSPARENT) if enabled else (style & ~WS_EX_TRANSPARENT)
+    if style != wanted:
+        set_long(hwnd, GWL_EXSTYLE, wanted)
+        actual = int(get_long(hwnd, GWL_EXSTYLE) or 0)
+        if bool(actual & WS_EX_TRANSPARENT) != bool(enabled):
+            raise OSError("Cannot change canvas native mouse passthrough")
 
 
 def mark_tool_window(window_id):
@@ -2839,6 +2873,37 @@ class RulerCalibrationDialog(QDialog):
 
 # --- 1. 全屏画布类 ---
 class DrawingCanvas(QMainWindow):
+    def pen_profile(self, style=None):
+        style = style or getattr(self, "pen_style", "pen")
+        if not hasattr(self, "pen_profiles"):
+            self.pen_profiles = {}
+        return self.pen_profiles.setdefault(style, {"color": "#ff4757", "width": 4, "speed_width": True})
+
+    @property
+    def pen_color(self):
+        return QColor(self.pen_profile()["color"])
+
+    @pen_color.setter
+    def pen_color(self, color):
+        color = QColor(color)
+        self.pen_profile()["color"] = color.name(QColor.NameFormat.HexArgb) if color.alpha() != 255 else color.name()
+
+    @property
+    def pen_width(self):
+        return self.pen_profile()["width"]
+
+    @pen_width.setter
+    def pen_width(self, width):
+        self.pen_profile()["width"] = width
+
+    @property
+    def speed_width_enabled(self):
+        return self.pen_profile()["speed_width"]
+
+    @speed_width_enabled.setter
+    def speed_width_enabled(self, enabled):
+        self.pen_profile()["speed_width"] = bool(enabled)
+
     MAGNIFIER_ZOOM_STEP = 0.5   # 放大倍率步长：每档 50%
     MAGNIFIER_ZOOM_MIN = 1.5
     MAGNIFIER_ZOOM_MAX = 5.0
@@ -3589,6 +3654,32 @@ class DrawingCanvas(QMainWindow):
         self.load_page(self.pages[self.current_page])
         self.reset_history()
         track_event("whiteboard_page_new", page=self.current_page + 1)
+
+    def delete_page(self, index=None):
+        """Delete a whiteboard page, retaining live ink on every surviving page."""
+        if not self.whiteboard_mode or not self.pages:
+            return False
+        index = self.current_page if index is None else index
+        if not 0 <= index < len(self.pages):
+            return False
+        self._cancel_all_pointers()
+        self._cancel_smart_recognition(drop_pending=True)
+        self.current_stroke_id = None
+        self.current_stroke_points = []
+        self.current_stroke_widths = []
+        self.last_point = None
+        self.save_current_page()  # Also stops a delayed snapshot before indices change.
+        del self.pages[index]
+        if not self.pages:
+            self.pages = [{"segments": [], "texts": [], "shapes": [], "images": []}]
+        if index < self.current_page:
+            self.current_page -= 1
+        self.current_page = min(self.current_page, len(self.pages) - 1)
+        self.load_page(self.pages[self.current_page])
+        self.reset_history()
+        if self.panel:
+            self.panel.project_dirty = True
+        return True
 
     def switch_page(self, offset):
         if not self.whiteboard_mode or not self.pages:
@@ -5697,7 +5788,7 @@ class DrawingCanvas(QMainWindow):
                     width = pen.width()
                 elif style != "pen":
                     self._stroke_length += math.hypot(point.x() - previous.x(), point.y() - previous.y())
-                    width = self._style_width(style)
+                    width = self._style_width(style, dx, dy)
                     pen = QPen(self._style_color(style), 1, Qt.PenStyle.SolidLine,
                                Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
                     pen.setWidthF(width)
@@ -5726,11 +5817,15 @@ class DrawingCanvas(QMainWindow):
     # --- 笔形：宽度、颜色、收笔 ---
     TAPER_START_FACTOR = 0.35     # 钢笔/毛笔起笔从笔宽的 35% 渐粗
 
-    def _style_width(self, style):
+    def _style_width(self, style, dx=0, dy=1):
         base = float(max(1, self.pen_width))
         if style in ("fountain", "brush"):
             pressure = 1.0 - (1.0 - max(0.08, min(1.0, self.current_pressure))) * self._stroke_options.get("pressure", 100) / 100.0
             speed = self._speed_width_factor()
+            if style == "fountain":
+                # 固定斜尖：沿笔尖方向为细线，横过笔尖为粗线；鼠标无压感也清晰可见。
+                direction = math.atan2(dy, dx)
+                base *= 0.35 + 1.45 * abs(math.sin(direction - math.pi / 4))
             if style == "brush":
                 speed = speed ** 1.8          # 毛笔对速度更敏感：快写出飞白般的细锋
                 base *= 1.7
@@ -8205,7 +8300,8 @@ class ControlPanel(QWidget):
         thumb_layout = QVBoxLayout(self.thumbnail_panel)
         self.thumbnail_list = QListWidget(); self.thumbnail_list.setViewMode(QListWidget.ViewMode.IconMode)
         self.thumbnail_list.setIconSize(QSize(260, 170)); self.thumbnail_list.setGridSize(QSize(280, 205))
-        self.thumbnail_list.setMinimumSize(580, 430)
+        self.thumbnail_list.setMinimumSize(0, 0)
+        self.thumbnail_list.setMovement(QListWidget.Movement.Static)
         self.thumbnail_list.setResizeMode(QListWidget.ResizeMode.Adjust)
         self.thumbnail_list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.thumbnail_list.currentRowChanged.connect(self._thumbnail_page_changed)
@@ -8216,6 +8312,11 @@ class ControlPanel(QWidget):
         except Exception:
             pass
         thumb_layout.addWidget(self.thumbnail_list)
+        self.btn_delete_page = QPushButton(tr("delete_page"))
+        self.btn_delete_page.setMinimumHeight(36)
+        self.btn_delete_page.setStyleSheet("QPushButton { background: #d93025; color: white; border: none; border-radius: 6px; } QPushButton:hover { background: #b3261e; }")
+        self.btn_delete_page.clicked.connect(self.delete_whiteboard_page)
+        thumb_layout.addWidget(self.btn_delete_page)
         self.thumbnail_panel.hide()
         self.thumbnail_panel.setStyleSheet(self.styleSheet())
 
@@ -8901,6 +9002,21 @@ class ControlPanel(QWidget):
         x = area.right() - rail.width() - margin + 1
         y = area.bottom() - rail.height() - margin + 1
         rail.move(max(area.left(), x), max(area.top(), y))
+        if getattr(self, "thumbnail_panel", None) is not None and self.thumbnail_panel.isVisible():
+            self._position_thumbnail_panel()
+
+    def _position_thumbnail_panel(self):
+        """Compact page list aligned with the rail, never with the main toolbar."""
+        area = toolbar_windows._available_rect(self.page_rail)
+        rail = self.page_rail.geometry()
+        gap = 8
+        width = min(320, area.width())
+        height = min(300, max(1, rail.top() - area.top() - gap))
+        self.thumbnail_panel.setMinimumSize(0, 0)
+        self.thumbnail_panel.resize(width, height)
+        x = max(area.left(), min(rail.right() - width + 1, area.right() - width + 1))
+        y = max(area.top(), rail.top() - height - gap)
+        self.thumbnail_panel.move(x, y)
 
     def _apply_page_rail_style(self):
         """颜色跟着板色走：白底用深色字，黑板用浅色字，两边都看得清。"""
@@ -8934,8 +9050,15 @@ class ControlPanel(QWidget):
         """)
         arrow = "#f4f7f4" if black_board else "#1c2420"
         from ui_icons import make_ui_icon
-        self.rail_prev.setIcon(make_ui_icon("page_prev", arrow, 16))
-        self.rail_next.setIcon(make_ui_icon("page_next", arrow, 16))
+        muted = "#9aa89f" if black_board else "#919991"
+        first = self.canvas.current_page <= 0
+        last = self.canvas.current_page >= len(self.canvas.pages) - 1
+        self.rail_prev.setEnabled(True)
+        self.rail_next.setEnabled(True)
+        self.rail_prev.setStyleSheet(f"color: {muted if first else ink};")
+        self.rail_next.setStyleSheet(f"color: {muted if last else ink};")
+        self.rail_prev.setIcon(make_ui_icon("page_prev", muted if first else arrow, 16))
+        self.rail_next.setIcon(make_ui_icon("page_next", muted if last else arrow, 16))
         self.rail_prev.setIconSize(QSize(16, 16))
         self.rail_next.setIconSize(QSize(16, 16))
 
@@ -8984,9 +9107,7 @@ class ControlPanel(QWidget):
         # 两个浮窗又并存，争抢原样复现。
         self.show_only_sub(None)
         self.refresh_page_thumbnails(force=True)
-        self.thumbnail_panel.adjustSize()
-        x, y = self._floating_anchor(self.thumbnail_panel.width(), self.thumbnail_panel.height())
-        self.thumbnail_panel.move(x, y)
+        self._position_thumbnail_panel()
         self.thumbnail_panel.show()
         self.raise_floating(self.thumbnail_panel)
         self._thumbnail_live_timer.start()      # 打开即进入实时渲染
@@ -9099,7 +9220,45 @@ class ControlPanel(QWidget):
         self.update_whiteboard_ui()
         self.select_panel.hide()
 
+    def delete_whiteboard_page(self):
+        if not self.canvas or not self.canvas.whiteboard_mode:
+            return
+        index = self.canvas.current_page
+        box = QMessageBox(self.thumbnail_panel)
+        box.setWindowTitle(tr("delete_page"))
+        box.setText(trf("delete_page_confirm", index=index + 1))
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        box.setEscapeButton(QMessageBox.StandardButton.Cancel)
+        box.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        box.setStyleSheet(self.styleSheet())
+        was_live = self._thumbnail_live_timer.isActive()
+        self.pause_callbacks()
+        try:
+            box.show()
+            self.raise_floating(box, bind_owner=False)
+            if box.exec() == QMessageBox.StandardButton.Yes:
+                if self.canvas.delete_page(index):
+                    self.select_panel.hide()
+                    self.update_whiteboard_ui()
+        finally:
+            box.hide()
+            box.deleteLater()
+            self.resume_callbacks()
+            foreground = not hasattr(self, "lifecycle") or self.lifecycle.state not in (LifecycleState.HIDDEN, LifecycleState.QUITTING)
+            if was_live and foreground and self.thumbnail_panel.isVisible() and self.canvas.whiteboard_mode:
+                self._thumbnail_live_timer.start()
+
     def switch_whiteboard_page(self, offset):
+        if not self.canvas or not self.canvas.whiteboard_mode:
+            return
+        if offset < 0 and self.canvas.current_page == 0:
+            notify_user(self, tr("page_list"), tr("first_page"), level="information")
+            return
+        if offset > 0 and self.canvas.current_page >= len(self.canvas.pages) - 1:
+            notify_user(self, tr("page_list"), tr("last_page"), level="information")
+            return
         self.canvas.switch_page(offset)
         self.update_whiteboard_ui()
         self.select_panel.hide()
@@ -9267,11 +9426,11 @@ class ControlPanel(QWidget):
             btn.setIcon(self._badged_icon(name, color, ICON_GLYPH, rainbow))
             self._annotate_badge_key = key
         buttons = getattr(self, "pen_style_buttons", None)
-        grid_key = (cv.pen_color.rgb(), cv.marker_color.rgb(), cv.laser_color.rgb(), theme_key)
+        grid_key = (tuple(cv.pen_profile(style)["color"] for style in PEN_STYLES), cv.marker_color.rgb(), cv.laser_color.rgb(), theme_key)
         if buttons and (force or getattr(self, "_annotate_grid_key", None) != grid_key):
             size = self.ANNOTATE_ICON
             for style, style_btn in buttons.items():
-                style_btn.setIcon(self._badged_icon(self.PEN_STYLE_META[style][1], cv.pen_color, size,
+                style_btn.setIcon(self._badged_icon(self.PEN_STYLE_META[style][1], QColor(cv.pen_profile(style)["color"]), size,
                                                     style == "rainbow"))
             self.btn_ann_marker.setIcon(self._badged_icon("highlighter", cv.marker_color, size))
             self.btn_ann_laser.setIcon(self._badged_icon("laser", cv.laser_color, size))
@@ -10062,6 +10221,13 @@ class ControlPanel(QWidget):
             self.canvas.finish_active_ink()
             self.canvas.dash_chain = None
         self.canvas.pen_style = style
+        self.pen_slider.blockSignals(True)
+        self.pen_slider.setValue(self.canvas.pen_width)
+        self.pen_slider.blockSignals(False)
+        self.label_w.setText(trf("width_value", value=self.canvas.pen_width))
+        self.update_button_highlight(self.highlight_color_for(self.color_buttons, self.canvas.pen_color.name()))
+        self.color_preview.setStyleSheet(f"background-color: {self.canvas.pen_color.name()}; border: 1px solid white;")
+        self._schedule_split_save()
         self.last_annotate_tool = "PEN"
         self.set_tool("PEN", self.btn_pen)
         self.canvas.selected_ids.clear()
@@ -10525,8 +10691,14 @@ class ControlPanel(QWidget):
         if not cv:
             return
         if cv.is_drawing_mode == enabled:
+            set_canvas_passthrough(cv.winId(), not enabled)
             self.sync_icon_buttons()
             return
+        if not enabled:
+            cv.finish_active_ink()
+            if cv.editing_text_id is not None:
+                cv.end_text_edit()
+            self.close_text_input()
         cv.is_drawing_mode = enabled
         if not enabled:
             # 进入穿透模式：彻底隔离交互状态——清空选择、取消未完成图形与延迟识别，
@@ -10551,6 +10723,7 @@ class ControlPanel(QWidget):
         cv.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, not enabled)
         cv._mouse_passthrough = not enabled
         cv.show()
+        set_canvas_passthrough(cv.winId(), not enabled)
         self.btn_mode.setText(tr("mouse"))
         self.btn_mode.setStyleSheet(f"background-color: {self.theme['mode'] if enabled else self.theme['mode_off']}; color: white;")
         track_event("mode_changed", drawing_mode=enabled)
@@ -10822,6 +10995,7 @@ class ControlPanel(QWidget):
         ]
         try:
             owner = int(self.canvas.winId())
+            set_canvas_passthrough(owner, not self.canvas.is_drawing_mode)
             panel_hwnd = int(self.winId())
             floating_hwnds = tuple(int(w.winId()) for w in floatings)
             key = (owner, panel_hwnd) + floating_hwnds
@@ -11685,6 +11859,7 @@ class ControlPanel(QWidget):
             "theme": self.theme_name,
             "pen_color": cv.pen_color.name(),
             "pen_width": int(cv.pen_width),
+            "pen_profiles": {style: dict(cv.pen_profile(style)) for style in PEN_STYLES},
             "pen_style": cv.pen_style if cv.pen_style in PEN_STYLES else "pen",
             "calligraphy_angle": int(cv.calligraphy_angle),
             "pen_options": {style: normalize_pen_options(style, cv.pen_options.get(style)) for style in PEN_STYLE_OPTIONS},
@@ -11864,6 +12039,8 @@ class ControlPanel(QWidget):
                     loaded = json.load(f)
                     if isinstance(loaded, dict):
                         settings.update(loaded)
+                        if "pen_profiles" not in loaded:
+                            settings.pop("pen_profiles", None)
                     else:
                         track_event("config_invalid_format")
             else:
@@ -11879,16 +12056,29 @@ class ControlPanel(QWidget):
                 self.theme = self.THEMES[self.theme_name]
                 self.apply_theme()
 
-            color = QColor(str(settings.get("pen_color", cv.pen_color.name())))
-            if color.isValid():
-                cv.pen_color = color
-            # 直接写 canvas：slider 值未变时 setValue 不发信号，不能只靠滑条回写
-            cv.pen_width = max(1, min(40, int(settings.get("pen_width", cv.pen_width))))
+            # 旧配置的共享值迁移为独立副本，新配置逐笔验证，损坏的一项不影响其他笔。
+            saved_profiles = settings.get("pen_profiles", {})
+            if not isinstance(saved_profiles, dict):
+                saved_profiles = {}
+            legacy_color = QColor(str(settings.get("pen_color", "#ff4757")))
+            legacy_width = _coerce_bounded_float(settings.get("pen_width", 4), 4, 1, 40)
+            legacy_speed = settings.get("speed_width", True)
+            for style in PEN_STYLES:
+                profile = saved_profiles.get(style, {})
+                if not isinstance(profile, dict):
+                    profile = {}
+                color = QColor(str(profile.get("color", legacy_color.name() if legacy_color.isValid() else "#ff4757")))
+                speed = profile.get("speed_width", legacy_speed)
+                cv.pen_profiles[style] = {
+                    "color": color.name() if color.isValid() else "#ff4757",
+                    "width": int(_coerce_bounded_float(profile.get("width", legacy_width), legacy_width, 1, 40)),
+                    "speed_width": speed if isinstance(speed, bool) else True,
+                }
+            if settings.get("pen_style") in PEN_STYLES:
+                cv.pen_style = settings["pen_style"]
             self.pen_slider.blockSignals(True)
             self.pen_slider.setValue(cv.pen_width)
             self.pen_slider.blockSignals(False)
-            if settings.get("pen_style") in PEN_STYLES:
-                cv.pen_style = settings["pen_style"]
             saved_options = settings.get("pen_options", {})
             if not isinstance(saved_options, dict):
                 saved_options = {}
@@ -11952,10 +12142,7 @@ class ControlPanel(QWidget):
             multitouch = settings.get("smart_multitouch")
             if isinstance(multitouch, bool):
                 cv.smart_multitouch_enabled = multitouch
-            # 速度→宽度同上，5.5.0 起设置页可调；缺省保持开启
-            speed_width = settings.get("speed_width")
-            if isinstance(speed_width, bool):
-                cv.speed_width_enabled = speed_width
+            # 速度→宽度已随 pen_profiles 按笔形恢复。
             if settings.get("timer_mode") in ("UP", "DOWN"):
                 self.timer_mode = settings["timer_mode"]
             target = settings.get("timer_target")

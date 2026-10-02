@@ -47,7 +47,10 @@ class PenStyleTestCase(unittest.TestCase):
         c.redo_stack.clear()
         c.whiteboard_mode = False
         c.draw_state = "PEN"
+        c.pen_profiles = {}
         c.pen_style = "pen"
+        for style in self.main.PEN_STYLES:
+            c.pen_profile(style)["width"] = 6
         c.pen_width = 6
         c.smart_shapes_enabled = True
 
@@ -258,6 +261,7 @@ class RenderingTests(PenStyleTestCase):
         from PyQt6.QtCore import QBuffer, QIODevice, QSize, QRect
         from PyQt6.QtGui import QPainter, QColor
         from PyQt6.QtSvg import QSvgGenerator
+        self.canvas.pen_style = "pencil"
         self.canvas.pen_color = QColor("#1e3799")
         self.stroke("pencil")
         buffer = QBuffer()

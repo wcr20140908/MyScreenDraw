@@ -11,13 +11,13 @@ MyScreenDraw is a fullscreen annotation / whiteboard / math-teaching tool built 
 - **Random name picker, timer, presentation spotlight, calculator** — a whole lesson without switching apps
 - **No account; drawings, rosters and logs are not uploaded**. Automatic update checks are enabled by default and can be disabled in Settings. Downloads and installation each require separate confirmation; neither happens silently
 
-Current version **v6.0.0-beta.8** (local build; not yet published as a GitHub Release). The UI follows the system language in 8 languages: English, 中文, Français, Español, Deutsch, Русский, 한국어, 日本語.
+Current version **v6.0.0-beta.8** (preview release). The UI follows the system language in 8 languages: English, 中文, Français, Español, Deutsch, Русский, 한국어, 日本語.
 
 > Product screenshots are not included in the public release yet; the current local captures contain development-environment details and must not be committed to GitHub.
 
 ## Quick start
 
-**[Download Windows x64 portable v6.0.0-beta.7 (includes EXE, no installation)](https://github.com/wcr20140908/MyScreenDraw/releases/download/v6.0.0-beta.7/MyScreenDraw-v6.0.0-beta.7-windows-x64.zip)**
+**[Download Windows x64 portable v6.0.0-beta.8 (includes EXE, no installation)](https://github.com/wcr20140908/MyScreenDraw/releases/download/v6.0.0-beta.8/MyScreenDraw-v6.0.0-beta.8-windows-x64.zip)**
 
 > Do not download GitHub's automatic **Source code (zip)** / **Source code (tar.gz)** assets or **Code → Download ZIP**. Those contain source code, not the runnable application.
 
