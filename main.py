@@ -301,7 +301,7 @@ from PyQt6.QtCore import (Qt, QPoint, QPointF, QRectF, QTimer, QTranslator, QLib
                           QSizeF, QMarginsF, QEventLoop, QSize, QUrl, QBuffer, QIODevice, QThread)
 from PyQt6.QtGui import (QPainter, QPen, QColor, QFont, QPainterPath, QFontMetricsF, QTransform, QPolygonF,
                          QPixmap, QPdfWriter, QPageSize, QCursor, QGuiApplication, QIcon, QImage, QImageReader,
-                         QEventPoint, QInputDevice)
+                         QEventPoint, QInputDevice, QPaintEngine, QBrush, QConicalGradient)
 from pynput import keyboard
 
 APP_DIR = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
@@ -475,6 +475,92 @@ def _color_to_hex(color):
         return color.name()
     return color.name(QColor.NameFormat.HexArgb)
 
+
+# --- 批注笔形（v6.0.0-beta.8） ---
+# "pen" 是默认笔形，线段上【不写】style 键：没用到新笔形的页面产出与旧版完全一致的
+# JSON，旧版本打开新文件时未知的 style 键会被忽略，笔迹退化成普通笔而不是报错。
+PEN_STYLES = ("pen", "fountain", "brush", "calligraphy", "pencil", "crayon",
+              "chalk", "neon", "dashed", "rainbow", "arrow")
+# 这些笔形必须整笔合成一条路径一次画完：纹理、虚线、辉光逐段画会在接缝处叠色/断纹。
+GROUPED_STYLES = frozenset(("pencil", "crayon", "chalk", "neon", "dashed"))
+_TEXTURE_CACHE = {}
+# 参数名、最小/最大值、默认值；同一份表驱动 UI、文件校验与默认值。
+PEN_STYLE_OPTIONS = {
+    "fountain": (("taper", 0, 200, 100), ("pressure", 0, 100, 100)),
+    "brush": (("taper", 0, 200, 100), ("pressure", 0, 100, 100)),
+    "calligraphy": (("nib_aspect", 30, 200, 100),),
+    "pencil": (("density", 10, 100, 62), ("opacity", 10, 100, 67)),
+    "crayon": (("density", 10, 100, 78), ("opacity", 10, 100, 92)),
+    "chalk": (("density", 10, 100, 58), ("opacity", 10, 100, 94)),
+    "neon": (("glow_size", 100, 500, 300), ("glow_strength", 0, 100, 100)),
+    "dashed": (("dash_length", 10, 100, 24), ("dash_gap", 10, 100, 22)),
+    "rainbow": (("hue_speed", 5, 200, 55), ("saturation", 0, 100, 88)),
+    "arrow": (("head_size", 10, 100, 40), ("head_angle", 10, 70, 28)),
+}
+
+
+def normalize_pen_options(style, values=None):
+    values = values if isinstance(values, dict) else {}
+    result = {}
+    for name, low, high, default in PEN_STYLE_OPTIONS.get(style, ()):
+        value = values.get(name, default)
+        valid = isinstance(value, (int, float)) and not isinstance(value, bool) and low <= value <= high
+        result[name] = int(value) if valid else default
+    return result
+
+
+
+def pen_width_value(pen):
+    """笔宽写进 JSON：整数保持整数（与旧文件逐字节一致），钢笔/毛笔的渐变宽度保留两位小数。"""
+    width = pen.widthF()
+    return int(width) if width == int(width) else round(width, 2)
+
+
+def clone_segment(seg, **overrides):
+    """复制一段笔迹。只有这一处知道线段的字段表——此前七个地方各自逐字段构造 dict，
+    新增 style/nib 时漏掉任何一处，撤销/复制/换页后笔形就悄悄变回普通笔。"""
+    clone = {"line": QLine(seg["line"]), "pen": QPen(seg["pen"]), "id": seg["id"],
+             "marker": seg.get("marker", False)}
+    style = seg.get("style")
+    if style and style != "pen":
+        clone["style"] = style
+    nib = seg.get("nib")
+    if nib is not None:
+        clone["nib"] = float(nib)
+    if seg.get("options"):
+        clone["options"] = dict(seg["options"])
+    clone.update(overrides)
+    return clone
+
+
+def style_texture(style, color, options=None):
+    """纹理笔的颗粒贴图（按笔形+颜色+参数缓存），重绘时不闪烁。"""
+    options = normalize_pen_options(style, options)
+    density = options.get("density", 70) / 100.0
+    grain_alpha = options.get("opacity", 86) * 2.55
+    key = (style, color.rgba(), density, grain_alpha)
+    image = _TEXTURE_CACHE.get(key)
+    if image is not None:
+        return image
+    rng = random.Random(sum(ord(ch) for ch in style))   # hash(str) 每次启动随机，不能当种子
+    image = QImage(48, 48, QImage.Format.Format_ARGB32_Premultiplied)
+    image.fill(Qt.GlobalColor.transparent)
+    base_alpha = color.alpha() / 255.0
+    for y in range(48):
+        for x in range(48):
+            roll = rng.random()
+            if roll < density:
+                alpha = grain_alpha * (0.55 + 0.45 * rng.random())
+            else:
+                alpha = grain_alpha * 0.12 * rng.random()
+            grain = QColor(color)
+            grain.setAlpha(max(0, min(255, int(alpha * base_alpha))))
+            image.setPixelColor(x, y, grain)
+    if len(_TEXTURE_CACHE) > 64:
+        _TEXTURE_CACHE.clear()
+    _TEXTURE_CACHE[key] = image
+    return image
+
 def _parse_id(value):
     """Return a hashable runtime id; untrusted containers never reach set operations."""
     if value is None:
@@ -609,14 +695,22 @@ def serialize_page(page):
     serialized = {"segments": [], "texts": [], "shapes": [], "images": []}
     for seg in page.get("segments", []):
         line = seg["line"]
-        serialized["segments"].append({
+        entry = {
             "id": str(seg["id"]),
             "p1": [line.p1().x(), line.p1().y()],
             "p2": [line.p2().x(), line.p2().y()],
             "color": _color_to_hex(seg["pen"].color()),
-            "width": seg["pen"].width(),
+            "width": pen_width_value(seg["pen"]),
             "marker": bool(seg.get("marker", False)),
-        })
+        }
+        style = seg.get("style")
+        if style in PEN_STYLES and style != "pen":
+            entry["style"] = style
+            if seg.get("options"):
+                entry["options"] = normalize_pen_options(style, seg["options"])
+        if seg.get("nib") is not None:
+            entry["nib"] = round(float(seg["nib"]), 2)
+        serialized["segments"].append(entry)
     for item in page.get("texts", []):
         entry = {
             "id": str(item["id"]),
@@ -680,15 +774,23 @@ def deserialize_page(data):
     for seg in data.get("segments", []):
         p1, p2 = seg["p1"], seg["p2"]
         color = QColor(seg.get("color", "#000000"))
-        pen = QPen(color, _coerce_int(seg.get("width", 1), 1, minimum=1),
-                   Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
-        page["segments"].append({
+        pen = QPen(color, 1, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+        pen.setWidthF(max(0.5, min(200.0, _coerce_float(seg.get("width", 1), 1.0))))
+        entry = {
             "id": _parse_id(seg.get("id", uuid.uuid4())),
             "line": QLine(_coerce_qt_int(p1[0], 0), _coerce_qt_int(p1[1], 0),
                           _coerce_qt_int(p2[0], 0), _coerce_qt_int(p2[1], 0)),
             "pen": pen,
             "marker": bool(seg.get("marker", False)),
-        })
+        }
+        style = seg.get("style")
+        if isinstance(style, str) and style in PEN_STYLES and style != "pen":
+            entry["style"] = style
+            if seg.get("options"):
+                entry["options"] = normalize_pen_options(style, seg["options"])
+            if style == "calligraphy":
+                entry["nib"] = _coerce_float(seg.get("nib", 45.0), 45.0) % 360.0
+        page["segments"].append(entry)
     for item in data.get("texts", []):
         pos = item.get("pos", [0, 0])
         entry = {
@@ -2824,6 +2926,10 @@ class DrawingCanvas(QMainWindow):
         self._speed_at = None
         self._speed_anchor = None
         self._last_seg_width = None
+        self._stroke_style = "pen"
+        self._stroke_length = 0.0
+        self._stroke_hue = 0.0
+        self._stroke_options = {}
         # 屏幕像素/毫米缓存。取值开销不小，且【不能放在落笔路径上】——原因见
         # refresh_speed_scale()。仅在校准变更和配置读回时刷新。
         self._speed_px_per_mm = pixels_per_mm_from_dpi(96.0)
@@ -2852,6 +2958,10 @@ class DrawingCanvas(QMainWindow):
         self.dash_chain = None
         self.pen_color = QColor("#ff4757")
         self.pen_width = 4
+        # 批注笔形（见 PEN_STYLES）与书法笔的笔尖角度（度，0=水平）
+        self.pen_style = "pen"
+        self.pen_options = {style: normalize_pen_options(style) for style in PEN_STYLE_OPTIONS}
+        self.calligraphy_angle = 45
         self.current_pressure = 1.0
         # 荧光笔：颜色/透明度/粗细独立于批注笔，笔迹长期保留不淡出
         self.marker_color = QColor("#fff200")
@@ -2909,7 +3019,10 @@ class DrawingCanvas(QMainWindow):
         for seg in self.all_segments:
             if seg["id"] == object_id:
                 line = seg["line"]
-                points.extend([QPointF(line.p1()), QPointF(line.p2())])
+                margin = self.segment_ink_radius(seg) if seg.get("style") else 0.0
+                for point in (line.p1(), line.p2()):
+                    points.extend([QPointF(point.x() - margin, point.y() - margin),
+                                   QPointF(point.x() + margin, point.y() + margin)])
         for item in self.text_items:
             if item["id"] == object_id:
                 return self.text_bounds(item)
@@ -3128,7 +3241,7 @@ class DrawingCanvas(QMainWindow):
         return 1.0
 
     def clone_segments(self):
-        return [{"line": QLine(seg["line"]), "pen": QPen(seg["pen"]), "id": seg["id"], "marker": seg.get("marker", False)} for seg in self.all_segments]
+        return [clone_segment(seg) for seg in self.all_segments]
 
     @staticmethod
     def clone_text_item(item):
@@ -3265,7 +3378,7 @@ class DrawingCanvas(QMainWindow):
             self.text_drag_rect = None
             if self.panel:
                 self.panel.close_text_input()
-        self.all_segments = [{"line": QLine(seg["line"]), "pen": QPen(seg["pen"]), "id": seg["id"], "marker": seg.get("marker", False)} for seg in page.get("segments", [])]
+        self.all_segments = [clone_segment(seg) for seg in page.get("segments", [])]
         self.text_items = [
             self.clone_text_item(item)
             for item in page.get("texts", [])
@@ -3349,9 +3462,7 @@ class DrawingCanvas(QMainWindow):
 
     def _stroke_delta(self, stroke_id, segments):
         return {self.DELTA_MARK: "stroke_add", "stroke_id": stroke_id,
-                "segments": [{"line": QLine(s["line"]), "pen": QPen(s["pen"]),
-                              "id": s["id"], "marker": s.get("marker", False)}
-                             for s in segments]}
+                "segments": [clone_segment(s) for s in segments]}
 
     def _revert_delta(self, entry):
         """撤销一条增量条目。
@@ -3366,17 +3477,13 @@ class DrawingCanvas(QMainWindow):
         elif kind == "shape_swap":
             shape_id = entry["shape_id"]
             self.shape_items = [i for i in self.shape_items if i["id"] != shape_id]
-            self.all_segments.extend({"line": QLine(s["line"]), "pen": QPen(s["pen"]),
-                                      "id": s["id"], "marker": s.get("marker", False)}
-                                     for s in entry["segments"])
+            self.all_segments.extend(clone_segment(s) for s in entry["segments"])
         self._after_delta_change()
 
     def _reapply_delta(self, entry):
         kind = entry[self.DELTA_MARK]
         if kind == "stroke_add":
-            self.all_segments.extend({"line": QLine(s["line"]), "pen": QPen(s["pen"]),
-                                      "id": s["id"], "marker": s.get("marker", False)}
-                                     for s in entry["segments"])
+            self.all_segments.extend(clone_segment(s) for s in entry["segments"])
         elif kind == "shape_swap":
             stroke_id = entry["stroke_id"]
             self.all_segments = [s for s in self.all_segments if s["id"] != stroke_id]
@@ -4369,6 +4476,11 @@ class DrawingCanvas(QMainWindow):
         "_speed_at": None,        # 上一次测速的时刻
         "_speed_anchor": None,    # 测速锚点：手抖在它附近来回，慢写会持续离开它
         "_last_seg_width": None,  # 上一段的宽度，用于限制相邻段的宽度跳变
+        # 笔形：落笔那一刻定下，一笔之内不变；彩虹笔的色相和起笔渐粗都按这一笔走过的长度算
+        "_stroke_style": "pen",
+        "_stroke_length": 0.0,
+        "_stroke_hue": 0.0,
+        "_stroke_options": dict,
     }
 
     def _new_pointer_slot(self):
@@ -4443,6 +4555,8 @@ class DrawingCanvas(QMainWindow):
         """（重新）开始停笔计时：落笔时、以及每次笔尖真的移动之后。"""
         if self.draw_state != "PEN" or not self.smart_shapes_enabled:
             return
+        if self._stroke_style != "pen":
+            return      # 智能图形只属于普通笔：书法字、虚线、箭头被「识别」成标准图形只会毁掉它
         if self._hold_progress:
             # 先按【旧】锚点擦掉上一个进度环，再挪锚点：顺序反了的话，旧位置那一圈
             # 不在任何失效区域内，会作为残影留在画布上。
@@ -4565,8 +4679,22 @@ class DrawingCanvas(QMainWindow):
         self._speed_at = None
         self._speed_anchor = None
         self._last_seg_width = None
+        self._stroke_style = (self.pen_style if self.draw_state == "PEN" and self.pen_style in PEN_STYLES
+                              else "pen")
+        self._stroke_length = 0.0
+        self._stroke_hue = float(max(0, self.pen_color.hsvHue()))
+        self._stroke_options = normalize_pen_options(self._stroke_style, self.pen_options.get(self._stroke_style))
         if self._active_pointer is None:
             self._mouse_stroke_since = time.perf_counter()
+
+    def finish_active_ink(self):
+        """切工具前提交仍按着的鼠标/触笔，收笔特效与撤销都归到旧笔形。"""
+        self._cancel_all_pointers()
+        self._cancel_smart_recognition(drop_pending=True)
+        self._finish_pointer_stroke()
+        self.last_point = None
+        self.current_stroke_points = []
+        self.current_stroke_widths = []
 
     def _finish_pointer_stroke(self):
         """一笔结束（抬笔/抬指）时按完成时间入栈。
@@ -4580,7 +4708,10 @@ class DrawingCanvas(QMainWindow):
         self.pending_undo = None       # 落笔前的整页快照作废，改由增量条目描述这一笔
         if stroke_id is None:
             return True                # 已被停笔定形收束，撤销条目在那时就入栈了
-        self.commit_stroke_delta(stroke_id, [s for s in self.all_segments if s["id"] == stroke_id])
+        self._finish_stroke_style(stroke_id)
+        if self.commit_stroke_delta(stroke_id, [s for s in self.all_segments if s["id"] == stroke_id]):
+            self.mark_content_changed()
+            self.update()
         # 这一笔到此结束。留着旧 id 会让「接管时丢弃合成鼠标笔」误判到已画完的笔迹上。
         self.current_stroke_id = None
         self._mouse_stroke_since = None
@@ -4659,9 +4790,7 @@ class DrawingCanvas(QMainWindow):
             self.pending_undo = None
             self.commit_stroke_delta(stroke_id, raw_segments)       # 第二步：回到落笔之前
             self.commit_undo({self.DELTA_MARK: "shape_swap", "stroke_id": stroke_id,
-                              "segments": [{"line": QLine(s["line"]), "pen": QPen(s["pen"]),
-                                            "id": s["id"], "marker": s.get("marker", False)}
-                                           for s in raw_segments],
+                              "segments": [clone_segment(s) for s in raw_segments],
                               "shape_id": item["id"], "shape": self.clone_shape(item)})
         else:
             if self.pending_undo is not None:
@@ -4895,7 +5024,7 @@ class DrawingCanvas(QMainWindow):
                 return item["id"]
         for seg in reversed(self.all_segments):
             line = seg["line"]
-            tol = max(float(TOUCH_HIT_SLOP), seg["pen"].width() / 2.0 + 4.0)
+            tol = max(float(TOUCH_HIT_SLOP), self.segment_ink_radius(seg) + 4.0)
             if self._point_segment_dist(px, py, line.p1().x(), line.p1().y(), line.p2().x(), line.p2().y()) <= tol:
                 return seg["id"]
         return None
@@ -4960,16 +5089,19 @@ class DrawingCanvas(QMainWindow):
                 if seg["id"] not in stroke_map:
                     stroke_map[seg["id"]] = uuid.uuid4()
                 line = seg["line"]
-                self.all_segments.append({
-                    "line": QLine(round(line.p1().x() + dx), round(line.p1().y() + dy),
-                                  round(line.p2().x() + dx), round(line.p2().y() + dy)),
-                    "pen": QPen(seg["pen"]), "id": stroke_map[seg["id"]], "marker": seg.get("marker", False),
-                })
+                self.all_segments.append(clone_segment(
+                    seg,
+                    line=QLine(round(line.p1().x() + dx), round(line.p1().y() + dy),
+                               round(line.p2().x() + dx), round(line.p2().y() + dy)),
+                    id=stroke_map[seg["id"]]))
         new_ids.update(stroke_map.values())
         for item in list(self.text_items):
             if item["id"] in self.selected_ids:
-                clone = {**item, "id": uuid.uuid4(), "pos": QPointF(item["pos"].x() + dx, item["pos"].y() + dy),
-                         "color": QColor(item["color"])}
+                # 必须走 clone_text_item：{**item} 是浅拷贝，公式树会被原件和副本共用，
+                # 之后编辑副本里的公式会就地改掉原件（撤销快照里的也一起变）。
+                clone = self.clone_text_item(item)
+                clone["id"] = uuid.uuid4()
+                clone["pos"] = QPointF(item["pos"].x() + dx, item["pos"].y() + dy)
                 self.text_items.append(clone)
                 new_ids.add(clone["id"])
         for item in list(self.shape_items):
@@ -5260,6 +5392,7 @@ class DrawingCanvas(QMainWindow):
                     "index": i,
                     "line": QLine(seg["line"]),
                     "pen": QPen(seg["pen"]),
+                    "nib": seg.get("nib"),
                 }
                 for i, seg in enumerate(self.all_segments)
                 if seg["id"] in self.selected_ids
@@ -5288,6 +5421,8 @@ class DrawingCanvas(QMainWindow):
         for saved in state["segments"]:
             self.all_segments[saved["index"]]["line"] = QLine(saved["line"])
             self.all_segments[saved["index"]]["pen"] = QPen(saved["pen"])
+            if saved.get("nib") is not None:
+                self.all_segments[saved["index"]]["nib"] = saved["nib"]
         for saved in state["texts"]:
             item = self.text_items[saved["index"]]
             item["pos"] = QPointF(saved["pos"])
@@ -5338,7 +5473,11 @@ class DrawingCanvas(QMainWindow):
                 p2 = self.transformed_point(seg["line"].p2(), center, scale=factor)
                 seg["line"] = QLine(round(p1.x()), round(p1.y()), round(p2.x()), round(p2.y()))
                 pen = QPen(seg["pen"])
-                pen.setWidth(max(1, round(pen.width() * factor)))
+                if seg.get("style"):
+                    # 钢笔/毛笔的宽度本来就是小数渐变，取整会把收笔的尖锋磨平
+                    pen.setWidthF(max(0.5, pen.widthF() * factor))
+                else:
+                    pen.setWidth(max(1, round(pen.width() * factor)))
                 seg["pen"] = pen
         for item in self.text_items:
             if item["id"] in self.selected_ids:
@@ -5383,6 +5522,9 @@ class DrawingCanvas(QMainWindow):
                 p1 = self.transformed_point(seg["line"].p1(), center, rotation=degrees)
                 p2 = self.transformed_point(seg["line"].p2(), center, rotation=degrees)
                 seg["line"] = QLine(round(p1.x()), round(p1.y()), round(p2.x()), round(p2.y()))
+                if seg.get("nib") is not None:
+                    # 书法笔的笔尖角度跟着转，否则旋转后粗细分布是错的（横画变竖画的粗细）
+                    seg["nib"] = (seg["nib"] + degrees) % 360.0
         for item in self.text_items:
             if item["id"] in self.selected_ids:
                 item["pos"] = self.transformed_point(item["pos"], center, rotation=degrees)
@@ -5534,6 +5676,7 @@ class DrawingCanvas(QMainWindow):
             self.last_point = pos
             return
         is_marker = self.draw_state == "MARKER"
+        style = "pen" if is_marker else self._stroke_style
         base_width = self.marker_width if is_marker else self.pen_width
         dx = pos.x() - self.last_point.x()
         dy = pos.y() - self.last_point.y()
@@ -5552,6 +5695,12 @@ class DrawingCanvas(QMainWindow):
                     # 荧光笔宽度恒定，不受压感和起笔渐变影响
                     pen = self.marker_pen()
                     width = pen.width()
+                elif style != "pen":
+                    self._stroke_length += math.hypot(point.x() - previous.x(), point.y() - previous.y())
+                    width = self._style_width(style)
+                    pen = QPen(self._style_color(style), 1, Qt.PenStyle.SolidLine,
+                               Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+                    pen.setWidthF(width)
                 else:
                     if self.speed_width_enabled:
                         pressure = max(0.08, min(1.0, self.current_pressure))
@@ -5563,10 +5712,105 @@ class DrawingCanvas(QMainWindow):
                         width = int(round(max(1, self.pen_width)))
                     pen = QPen(self.pen_color, width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
                 line = QLine(previous.x(), previous.y(), point.x(), point.y())
-                self.all_segments.append({"line": line, "pen": pen, "id": self.current_stroke_id, "marker": is_marker})
+                seg = {"line": line, "pen": pen, "id": self.current_stroke_id, "marker": is_marker}
+                if style != "pen":
+                    seg["style"] = style
+                    seg["options"] = dict(self._stroke_options)
+                    if style == "calligraphy":
+                        seg["nib"] = float(self.calligraphy_angle)
+                self.all_segments.append(seg)
                 self.current_stroke_widths.append(width)
                 previous = point
         self.last_point = pos
+
+    # --- 笔形：宽度、颜色、收笔 ---
+    TAPER_START_FACTOR = 0.35     # 钢笔/毛笔起笔从笔宽的 35% 渐粗
+
+    def _style_width(self, style):
+        base = float(max(1, self.pen_width))
+        if style in ("fountain", "brush"):
+            pressure = 1.0 - (1.0 - max(0.08, min(1.0, self.current_pressure))) * self._stroke_options.get("pressure", 100) / 100.0
+            speed = self._speed_width_factor()
+            if style == "brush":
+                speed = speed ** 1.8          # 毛笔对速度更敏感：快写出飞白般的细锋
+                base *= 1.7
+            taper_scale = self._stroke_options.get("taper", 100) / 100.0
+            ramp_len = max(0.1, max(8.0, base * 3.0) * taper_scale)
+            ramp = 1.0 if taper_scale == 0 else min(1.0, self.TAPER_START_FACTOR + (1 - self.TAPER_START_FACTOR) * self._stroke_length / ramp_len)
+            target = base * pressure * speed * ramp
+            previous = self._last_seg_width
+            if previous is not None:
+                step = max(0.6, previous * self.SPEED_WIDTH_STEP)
+                target = max(previous - step, min(previous + step, target))
+            target = max(0.8, target)
+            self._last_seg_width = target
+            return round(target, 2)
+        if style == "pencil":
+            return max(1.0, base * 0.6)
+        if style in ("crayon", "chalk"):
+            return base * 1.7 + 2.0
+        return base
+
+    def _style_color(self, style):
+        if style == "rainbow":
+            hue = int(self._stroke_hue + self._stroke_length * self._stroke_options.get("hue_speed", 55) / 100.0) % 360
+            return QColor.fromHsv(hue, round(self._stroke_options.get("saturation", 88) * 2.55), 255)
+        return QColor(self.pen_color)
+
+    def _finish_stroke_style(self, stroke_id):
+        """抬笔时按笔形收尾：钢笔/毛笔出锋（尾部渐细），箭头笔补上箭头。"""
+        style = self._stroke_style
+        if style not in ("fountain", "brush", "arrow"):
+            return
+        segments = [s for s in self.all_segments if s["id"] == stroke_id]
+        if not segments:
+            return
+        if style in ("fountain", "brush"):
+            base = max(1.0, float(self.pen_width)) * (1.7 if style == "brush" else 1.0)
+            taper = base * (4.5 if style == "brush" else 2.5) * self._stroke_options.get("taper", 100) / 100.0
+            if taper <= 0:
+                return
+            travelled = 0.0
+            for seg in reversed(segments):
+                ratio = max(0.12, travelled / taper)
+                if ratio >= 1.0:
+                    break
+                pen = QPen(seg["pen"])
+                pen.setWidthF(round(max(0.6, pen.widthF() * ratio), 2))
+                seg["pen"] = pen
+                line = seg["line"]
+                travelled += math.hypot(line.dx(), line.dy())
+            return
+        # 箭头：方向取末端往回约 3 倍笔宽处，避免最后一两个像素的抖动把箭头拧歪
+        last = segments[-1]
+        tip = QPointF(last["line"].p2())
+        width = last["pen"].widthF()
+        back_len = max(12.0, width * 3.0)
+        tail = None
+        travelled = 0.0
+        for seg in reversed(segments):
+            line = seg["line"]
+            travelled += math.hypot(line.dx(), line.dy())
+            tail = QPointF(line.p1())
+            if travelled >= back_len:
+                break
+        if tail is None or travelled < 4.0:
+            return
+        angle = math.atan2(tip.y() - tail.y(), tip.x() - tail.x())
+        head = max(14.0, width * 4.0) * self._stroke_options.get("head_size", 40) / 40.0
+        for side in (-1, 1):
+            a = angle + math.pi - side * math.radians(self._stroke_options.get("head_angle", 28))
+            end = QPoint(round(tip.x() + head * math.cos(a)), round(tip.y() + head * math.sin(a)))
+            self.all_segments.append(clone_segment(last, line=QLine(tip.toPoint(), end)))
+
+    @staticmethod
+    def segment_ink_radius(seg):
+        style = seg.get("style")
+        width = seg["pen"].widthF()
+        options = seg.get("options", {})
+        if style == "calligraphy":
+            return width * 1.25 * options.get("nib_aspect", 100) / 100.0 + max(1.0, width * 0.22) / 2.0
+        return width * (options.get("glow_size", 300) / 200.0 if style == "neon" else 0.5)
 
     @staticmethod
     def _segment_visible(seg, clip):
@@ -5577,7 +5821,7 @@ class DrawingCanvas(QMainWindow):
         """
         line = seg["line"]
         pen = seg.get("pen")
-        margin = (pen.widthF() / 2.0 + 1.0) if pen is not None else 1.0
+        margin = DrawingCanvas.segment_ink_radius(seg) + 1.0 if pen is not None else 1.0
         x1, x2 = line.x1(), line.x2()
         y1, y2 = line.y1(), line.y2()
         if x1 > x2:
@@ -5593,33 +5837,51 @@ class DrawingCanvas(QMainWindow):
         clip 非空时跳过区域外的段。荧光笔那条整笔路径仍然要完整拼出来（一笔的透明度
         必须一次性合成），只是最后判一下要不要画。
         """
+        # 多指事件交错到达，一笔的段不一定相邻。按首次落墨顺序合成整笔，
+        # 避免每次换手指都重置虚线相位、在荧光笔接缝处重复叠色。
+        grouped = {}
+        for seg in segments:
+            if seg.get("marker") or seg.get("style") in GROUPED_STYLES:
+                key = (seg["id"], seg.get("style"), bool(seg.get("marker")))
+                grouped.setdefault(key, []).append(seg)
         index = 0
         total = len(segments)
         while index < total:
             seg = segments[index]
-            if not seg.get("marker"):
+            style = seg.get("style")
+            marker = bool(seg.get("marker"))
+            if not marker and style not in GROUPED_STYLES:
                 if clip is not None and not self._segment_visible(seg, clip):
                     index += 1
                     continue
-                painter.setPen(seg["pen"])
-                painter.drawLine(seg["line"])
+                if style == "calligraphy":
+                    self._draw_nib_segment(painter, seg)
+                else:
+                    painter.setPen(seg["pen"])
+                    painter.drawLine(seg["line"])
                 index += 1
                 continue
-            stroke_id = seg["id"]
+            key = (seg["id"], style, marker)
+            stroke_segments = grouped.pop(key, None)
+            index += 1
+            if stroke_segments is None:
+                continue
             path = QPainterPath(QPointF(seg["line"].p1()))
             end = seg["line"].p1()
-            while index < total and segments[index].get("marker") and segments[index]["id"] == stroke_id:
-                line = segments[index]["line"]
+            for part in stroke_segments:
+                line = part["line"]
                 if line.p1() != end:            # 中间被擦断，另起一段，不要连成直线
                     path.moveTo(QPointF(line.p1()))
                 path.lineTo(QPointF(line.p2()))
                 end = line.p2()
-                index += 1
             pen = QPen(seg["pen"])
             if clip is not None:
-                margin = pen.widthF() / 2.0 + 1.0
+                margin = self.segment_ink_radius(seg) + 1.0
                 if not clip.intersects(path.boundingRect().adjusted(-margin, -margin, margin, margin)):
                     continue
+            if not marker:
+                self._draw_styled_path(painter, path, pen, style, seg.get("options"))
+                continue
             color = QColor(pen.color())
             alpha = color.alpha()
             color.setAlpha(255)
@@ -5630,6 +5892,65 @@ class DrawingCanvas(QMainWindow):
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawPath(path)
             painter.restore()
+
+    @staticmethod
+    def _draw_nib_segment(painter, seg):
+        """书法笔：扁平笔尖扫过的平行四边形。笔画方向与笔尖垂直时最粗、平行时只剩一道细线。"""
+        line = seg["line"]
+        pen = seg["pen"]
+        half = pen.widthF() * 1.25 * seg.get("options", {}).get("nib_aspect", 100) / 100.0
+        angle = math.radians(float(seg.get("nib", 45.0)))
+        nx, ny = half * math.cos(angle), half * math.sin(angle)
+        p1, p2 = QPointF(line.p1()), QPointF(line.p2())
+        polygon = QPolygonF([QPointF(p1.x() + nx, p1.y() + ny), QPointF(p2.x() + nx, p2.y() + ny),
+                             QPointF(p2.x() - nx, p2.y() - ny), QPointF(p1.x() - nx, p1.y() - ny)])
+        color = pen.color()
+        # 细描边同色：盖住相邻四边形之间抗锯齿留下的发丝缝，也是笔尖平行走线时的最细笔画
+        edge = QPen(color, max(1.0, pen.widthF() * 0.22), Qt.PenStyle.SolidLine,
+                    Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(edge)
+        painter.setBrush(color)
+        painter.drawPolygon(polygon)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+
+    @staticmethod
+    def _draw_styled_path(painter, path, pen, style, options=None):
+        options = normalize_pen_options(style, options)
+        width = pen.widthF()
+        color = QColor(pen.color())
+        painter.save()
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        if style == "neon":
+            spread = options["glow_size"] / 100.0
+            strength = options["glow_strength"] / 100.0
+            for scale, alpha in ((spread, 38 * strength), ((spread + 1.0) / 2.0, 80 * strength), (1.0, 255)):
+                glow = QColor(color)
+                glow.setAlpha(round(alpha * color.alphaF()))
+                painter.setPen(QPen(glow, width * scale, Qt.PenStyle.SolidLine,
+                                    Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+                painter.drawPath(path)
+            core = QColor(color).lighter(170)
+            painter.setPen(QPen(core, max(1.0, width * 0.38), Qt.PenStyle.SolidLine,
+                                Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+            painter.drawPath(path)
+        elif style == "dashed":
+            dash = QPen(pen)
+            dash.setDashPattern([options["dash_length"] / 10.0, options["dash_gap"] / 10.0])
+            painter.setPen(dash)
+            painter.drawPath(path)
+        else:
+            engine = painter.paintEngine()
+            textured = QPen(pen)
+            # SVG 生成器不支持纹理画刷（导出成黑块或空白），矢量导出一律退回纯色
+            if engine is None or engine.type() != QPaintEngine.Type.SVG:
+                textured.setBrush(QBrush(style_texture(style, color, options)))
+            else:
+                flat = QColor(color)
+                flat.setAlpha(round(options.get("opacity", 86) * 2.55 * color.alphaF()))
+                textured.setColor(flat)
+            painter.setPen(textured)
+            painter.drawPath(path)
+        painter.restore()
 
     def draw_image_item(self, painter, item):
         """图片对象：以 pos 为中心、按 size 绘制（含旋转）。"""
@@ -8419,6 +8740,8 @@ class ControlPanel(QWidget):
             name = btn.property("icon_name")
             if name:
                 btn.setIcon(_make_toolbar_icon(name, self.theme["text"], ICON_GLYPH))
+        # 「批注」按钮带颜色点，上面按名字重画会把它抹掉，强制补回来
+        self.refresh_annotate_badge(force=True)
 
         # 同时更新工具栏窗口的样式，并重新按内容收紧（圆角/主题不改按钮尺寸，但
         # 语言切换会改文案长度，按钮宽度跟着最长文案走）
@@ -8827,21 +9150,132 @@ class ControlPanel(QWidget):
         btn_u = QPushButton("▲"); btn_u.setObjectName("ArrowBtn"); btn_u.clicked.connect(lambda: self.pen_slider.setValue(self.pen_slider.value()+1))
         s_row.addWidget(btn_d); s_row.addWidget(self.pen_slider); s_row.addWidget(btn_u); self.draw_sub_layout.addLayout(s_row)
 
+        # 书法笔专属：笔尖角度。其余笔形下整行隐藏，不占面板高度。
+        self.nib_label = QLabel(trf("nib_angle_value", value=45))
+        self.draw_sub_layout.addWidget(self.nib_label)
+        self.nib_row = QWidget()
+        nib_layout = QHBoxLayout(self.nib_row); nib_layout.setContentsMargins(0, 0, 0, 0); nib_layout.setSpacing(2)
+        nib_d = QPushButton("▼"); nib_d.setObjectName("ArrowBtn"); nib_d.clicked.connect(lambda: self.nib_slider.setValue(self.nib_slider.value() - 5))
+        self.nib_slider = QSlider(Qt.Orientation.Horizontal); self.nib_slider.setRange(0, 180); self.nib_slider.setValue(45); self.nib_slider.setFixedWidth(80)
+        self.nib_slider.valueChanged.connect(self.on_nib_angle_changed)
+        nib_u = QPushButton("▲"); nib_u.setObjectName("ArrowBtn"); nib_u.clicked.connect(lambda: self.nib_slider.setValue(self.nib_slider.value() + 5))
+        nib_layout.addWidget(nib_d); nib_layout.addWidget(self.nib_slider); nib_layout.addWidget(nib_u)
+        self.draw_sub_layout.addWidget(self.nib_row)
+        self.nib_label.setVisible(False)
+        self.nib_row.setVisible(False)
+
+        self.style_option_controls = {}
+        for specs in PEN_STYLE_OPTIONS.values():
+            for name, low, high, default in specs:
+                if name in self.style_option_controls:
+                    continue
+                row = QWidget()
+                layout = QVBoxLayout(row); layout.setContentsMargins(0, 0, 0, 0); layout.setSpacing(2)
+                label = QLabel()
+                slider = QSlider(Qt.Orientation.Horizontal)
+                slider.setRange(low, high); slider.setValue(default)
+                slider.valueChanged.connect(lambda value, key=name: self.on_pen_option_changed(key, value))
+                layout.addWidget(label); layout.addWidget(slider)
+                self.draw_sub_layout.addWidget(row)
+                self.style_option_controls[name] = (row, label, slider)
+                row.hide()
+        self.reset_pen_options_btn = QPushButton(tr("pen_options_reset"))
+        self.reset_pen_options_btn.clicked.connect(self.reset_pen_options)
+        self.draw_sub_layout.addWidget(self.reset_pen_options_btn)
+        self.reset_pen_options_btn.hide()
+
         # 智能识别功能保留，但开关移至设置页面，此处不再显示
 
+    # 笔形 → (文案 key, 图标名)。顺序就是批注菜单里的排列顺序。
+    PEN_STYLE_META = {
+        "pen": ("pen", "pen"), "fountain": ("pen_fountain", "fountain"), "brush": ("pen_brush", "brush"),
+        "calligraphy": ("pen_calligraphy", "calligraphy"), "pencil": ("pen_pencil", "pencil"),
+        "crayon": ("pen_crayon", "crayon"), "chalk": ("pen_chalk", "chalk"), "neon": ("pen_neon", "neon"),
+        "dashed": ("pen_dashed", "dashed"), "rainbow": ("pen_rainbow", "rainbow"), "arrow": ("pen_arrow", "arrow"),
+    }
+    ANNOTATE_ICON = 18
+
     def setup_annotate_sub(self):
-        """批注入口：普通笔 / 荧光笔 / 激光笔（始终三选一，不再藏设置里）。"""
+        """批注入口：十一种笔形 + 荧光笔 + 激光笔，一屏排开，不藏进设置里。"""
         self.annotate_sub_layout.addWidget(QLabel(tr("choose_annotate_tool")))
-        self.btn_ann_pen = QPushButton(tr("pen"))
-        self.btn_ann_pen.clicked.connect(self.choose_pen_tool)
-        self.annotate_sub_layout.addWidget(self.btn_ann_pen)
-        self.btn_ann_marker = QPushButton(tr("marker"))
-        self.btn_ann_marker.clicked.connect(self.choose_marker_tool)
-        self.annotate_sub_layout.addWidget(self.btn_ann_marker)
-        self.btn_ann_laser = QPushButton(tr("laser"))
-        self.btn_ann_laser.clicked.connect(self.choose_laser_tool)
-        self.annotate_sub_layout.addWidget(self.btn_ann_laser)
+        grid = QGridLayout(); grid.setSpacing(3)
+        self.pen_style_buttons = {}
+        entries = [(style, key) for style, (key, _icon) in self.PEN_STYLE_META.items()]
+        entries += [("__marker__", "marker"), ("__laser__", "laser")]
+        for index, (style, key) in enumerate(entries):
+            btn = QPushButton(tr(key))
+            btn.setIconSize(QSize(self.ANNOTATE_ICON, self.ANNOTATE_ICON))
+            btn.setToolTip(tr(key))
+            btn.setStyleSheet("text-align: left;")
+            if style == "__marker__":
+                btn.clicked.connect(self.choose_marker_tool)
+                self.btn_ann_marker = btn
+            elif style == "__laser__":
+                btn.clicked.connect(self.choose_laser_tool)
+                self.btn_ann_laser = btn
+            else:
+                btn.clicked.connect(lambda _checked=False, s=style: self.choose_pen_style(s))
+                self.pen_style_buttons[style] = btn
+            grid.addWidget(btn, index // 3, index % 3)
+        self.btn_ann_pen = self.pen_style_buttons["pen"]
+        self.annotate_sub_layout.addLayout(grid)
         self.annotate_sub_layout.addWidget(QLabel(tr("annotate_hint")))
+
+    def _badged_icon(self, icon_name, color, size, rainbow=False):
+        """图标右下角加一颗当前颜色的小圆点（外圈用面板底色描边，任何主题下都分得清）。
+
+        画在图标里而不是另加控件：主栏按钮的尺寸写死在样式表里，多一个控件就得改宽高。
+        """
+        from ui_icons import make_ui_pixmap
+        pixmap = make_ui_pixmap(icon_name, self.theme["text"], size, 2.0)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        radius = size * 0.2
+        center = QPointF(size - radius - 0.6, size - radius - 0.6)
+        painter.setPen(QPen(QColor(self.theme["frame"]), max(1.2, size * 0.08)))
+        if rainbow:
+            gradient = QConicalGradient(center, 0)
+            for stop, hue in ((0.0, 0), (0.17, 60), (0.33, 120), (0.5, 180), (0.67, 240), (0.83, 300), (1.0, 359)):
+                gradient.setColorAt(stop, QColor.fromHsv(hue, 230, 255))
+            painter.setBrush(QBrush(gradient))
+        else:
+            solid = QColor(color)
+            solid.setAlpha(255)        # 荧光笔的透明色在小圆点上看不清，圆点只表示色相
+            painter.setBrush(solid)
+        painter.drawEllipse(center, radius, radius)
+        painter.end()
+        return QIcon(pixmap)
+
+    def refresh_annotate_badge(self, force=False):
+        """主栏「批注」按钮与批注菜单里的颜色点。按内容缓存，心跳频繁调用也不重绘。"""
+        cv = self.canvas
+        if not cv:
+            return
+        state = cv.draw_state if cv.draw_state in ("PEN", "MARKER", "LASER") else self.last_annotate_tool
+        if state == "MARKER":
+            name, color, rainbow = "highlighter", cv.marker_color, False
+        elif state == "LASER":
+            name, color, rainbow = "laser", cv.laser_color, False
+        else:
+            name = self.PEN_STYLE_META.get(cv.pen_style, ("pen", "pen"))[1]
+            color, rainbow = cv.pen_color, cv.pen_style == "rainbow"
+        theme_key = (self.theme["text"], self.theme["frame"])
+        key = (name, QColor(color).rgb(), rainbow, theme_key)
+        btn = (getattr(self, "icon_buttons", None) or {}).get("pen")
+        if btn is not None and (force or getattr(self, "_annotate_badge_key", None) != key):
+            btn.setProperty("icon_name", name)
+            btn.setIcon(self._badged_icon(name, color, ICON_GLYPH, rainbow))
+            self._annotate_badge_key = key
+        buttons = getattr(self, "pen_style_buttons", None)
+        grid_key = (cv.pen_color.rgb(), cv.marker_color.rgb(), cv.laser_color.rgb(), theme_key)
+        if buttons and (force or getattr(self, "_annotate_grid_key", None) != grid_key):
+            size = self.ANNOTATE_ICON
+            for style, style_btn in buttons.items():
+                style_btn.setIcon(self._badged_icon(self.PEN_STYLE_META[style][1], cv.pen_color, size,
+                                                    style == "rainbow"))
+            self.btn_ann_marker.setIcon(self._badged_icon("highlighter", cv.marker_color, size))
+            self.btn_ann_laser.setIcon(self._badged_icon("laser", cv.laser_color, size))
+            self._annotate_grid_key = grid_key
 
     def setup_laser_sub(self):
         self.laser_sub_layout.addWidget(QLabel(tr("laser_color")))
@@ -9228,6 +9662,7 @@ class ControlPanel(QWidget):
         self.canvas.marker_color = QColor(btn.property("color_val"))
         self.highlight_marker_color(btn)
         self.canvas.update()
+        self.refresh_annotate_badge()
         track_event("marker_color_changed", color=self.canvas.marker_color.name())
 
     def open_marker_color(self):
@@ -9241,6 +9676,7 @@ class ControlPanel(QWidget):
                 self.canvas.marker_color = d.selectedColor()
                 self.highlight_marker_color(self.marker_color_buttons[-1])
                 self.canvas.update()
+                self.refresh_annotate_badge()
                 track_event("marker_custom_color", color=self.canvas.marker_color.name())
         finally:
             self.timer.start(self.HEARTBEAT_MS)
@@ -9517,6 +9953,7 @@ class ControlPanel(QWidget):
             # （否则 PEN→PEN 再次点击打开设置时会误取消刚画那一笔的延迟识别）
             self.set_active_tool(button)
             return
+        self.canvas.finish_active_ink()
         self.canvas._cancel_smart_recognition(drop_pending=True)  # 切工具：取消上一笔的延迟识别
         if self.canvas.editing_text_id is not None:
             self.canvas.end_text_edit()
@@ -9570,14 +10007,19 @@ class ControlPanel(QWidget):
         if not hasattr(self, "btn_ann_pen") or not self.canvas:
             return
         state = self.canvas.draw_state
-        mapping = {
-            "PEN": self.btn_ann_pen,
-            "MARKER": self.btn_ann_marker,
-            "LASER": self.btn_ann_laser,
-        }
-        for btn in (self.btn_ann_pen, self.btn_ann_marker, self.btn_ann_laser):
-            btn.setObjectName("ActiveTool" if mapping.get(state) is btn else "")
-            btn.setStyle(btn.style())
+        active = None
+        if state == "PEN":
+            active = self.pen_style_buttons.get(self.canvas.pen_style, self.btn_ann_pen)
+        elif state == "MARKER":
+            active = self.btn_ann_marker
+        elif state == "LASER":
+            active = self.btn_ann_laser
+        for btn in list(self.pen_style_buttons.values()) + [self.btn_ann_marker, self.btn_ann_laser]:
+            want = "ActiveTool" if btn is active else ""
+            if btn.objectName() != want:
+                btn.setObjectName(want)
+                btn.setStyle(btn.style())
+        self.refresh_annotate_badge()
 
     def handle_annotate_click(self):
         """主栏「批注」：始终先出 普通笔/荧光笔/激光笔 三选一。
@@ -9609,44 +10051,78 @@ class ControlPanel(QWidget):
         track_event("annotate_menu")
 
     def choose_pen_tool(self):
-        was_pen = self.canvas.draw_state == "PEN"
+        self.choose_pen_style(self.canvas.pen_style if self.canvas.pen_style in PEN_STYLES else "pen")
+
+    def choose_pen_style(self, style):
+        """选中笔形并打开它的设置；不因是否已选中而改变点击结果。"""
+        if style not in PEN_STYLES:
+            style = "pen"
+        was_same = self.canvas.draw_state == "PEN" and self.canvas.pen_style == style
+        if self.canvas.draw_state == "PEN" and not was_same:
+            self.canvas.finish_active_ink()
+            self.canvas.dash_chain = None
+        self.canvas.pen_style = style
         self.last_annotate_tool = "PEN"
         self.set_tool("PEN", self.btn_pen)
         self.canvas.selected_ids.clear()
         self.update_annotate_buttons()
-        # 首次切换：直接可用；已是普通笔再点：打开颜色/粗细设置
-        if was_pen:
-            self.show_only_sub(None if self.draw_sub.isVisible() else self.draw_sub)
-        else:
-            self.show_only_sub(None)
+        self.update_pen_style_controls()
+        self.show_only_sub(self.draw_sub)
         self.refresh_ui()
-        track_event("tool_changed", tool="PEN")
+        track_event("tool_changed", tool="PEN", pen_style=style)
+
+    def update_pen_style_controls(self):
+        """笔形专属设置只在对应笔形下出现，别的笔形不占面板高度。"""
+        if hasattr(self, "nib_row"):
+            visible = self.canvas is not None and self.canvas.pen_style == "calligraphy"
+            self.nib_label.setVisible(visible)
+            self.nib_row.setVisible(visible)
+        if self.canvas is None or not hasattr(self, "style_option_controls"):
+            return
+        style = self.canvas.pen_style
+        options = normalize_pen_options(style, self.canvas.pen_options.get(style))
+        for name, (row, label, slider) in self.style_option_controls.items():
+            row.setVisible(name in options)
+            if name in options:
+                slider.blockSignals(True)
+                slider.setValue(options[name])
+                slider.blockSignals(False)
+                label.setText(trf("pen_option_" + name, value=options[name]))
+        self.reset_pen_options_btn.setVisible(bool(options))
+
+    def on_pen_option_changed(self, name, value):
+        style = self.canvas.pen_style
+        options = self.canvas.pen_options.setdefault(style, normalize_pen_options(style))
+        if name not in options:
+            return
+        options[name] = int(value)
+        self.style_option_controls[name][1].setText(trf("pen_option_" + name, value=value))
+        self._schedule_split_save()
+
+    def reset_pen_options(self):
+        style = self.canvas.pen_style
+        self.canvas.pen_options[style] = normalize_pen_options(style)
+        if style == "calligraphy":
+            self.nib_slider.setValue(45)
+        self.update_pen_style_controls()
+        self._schedule_split_save()
 
     def choose_marker_tool(self):
-        was_marker = self.canvas.draw_state == "MARKER"
         self.last_annotate_tool = "MARKER"
         self.set_tool("MARKER", self.btn_pen)
         self.canvas.selected_ids.clear()
         self.update_annotate_buttons()
-        # 首次切换：直接可用并关菜单；已是荧光笔再点：打开颜色设置
-        if was_marker:
-            self.show_only_sub(None if self.marker_sub.isVisible() else self.marker_sub)
-        else:
-            self.show_only_sub(None)
+        self.show_only_sub(self.marker_sub)
         self.refresh_ui()
         track_event("tool_changed", tool="MARKER")
 
     def choose_laser_tool(self):
-        was_laser = self.canvas.draw_state == "LASER"
         self.last_annotate_tool = "LASER"
         self.set_tool("LASER", self.btn_pen)
         self.canvas.selected_ids.clear()
         self.canvas.laser_trail = []
         self.update_annotate_buttons()
-        if was_laser:
-            self.show_only_sub(None if self.laser_sub.isVisible() else self.laser_sub)
-        else:
-            self.show_only_sub(None)
+        self.show_only_sub(self.laser_sub)
         self.refresh_ui()
         track_event("tool_changed", tool="LASER")
 
@@ -9741,6 +10217,7 @@ class ControlPanel(QWidget):
         self.canvas.laser_color = QColor(btn.property("color_val"))
         self.highlight_laser_color(btn)
         self.canvas.update()
+        self.refresh_annotate_badge()
         track_event("laser_color_changed", color=self.canvas.laser_color.name())
 
     def open_laser_color(self):
@@ -9754,6 +10231,7 @@ class ControlPanel(QWidget):
                 self.canvas.laser_color = d.selectedColor()
                 self.highlight_laser_color(self.laser_color_buttons[-1])
                 self.canvas.update()
+                self.refresh_annotate_badge()
                 track_event("laser_custom_color", color=self.canvas.laser_color.name())
         finally:
             self.timer.start(self.HEARTBEAT_MS)
@@ -10243,7 +10721,13 @@ class ControlPanel(QWidget):
         btn = self.sender(); self.canvas.pen_color = QColor(btn.property("color_val"))
         self.canvas.apply_selection_color(self.canvas.pen_color)
         self.update_button_highlight(btn); self.color_preview.setStyleSheet(f"background-color: {self.canvas.pen_color.name()}; border: 1px solid white;")
+        self.refresh_annotate_badge()
         track_event("color_changed", color=self.canvas.pen_color.name())
+
+    def on_nib_angle_changed(self, v):
+        self.canvas.calligraphy_angle = int(v)
+        self.nib_label.setText(trf("nib_angle_value", value=int(v)))
+        track_event("nib_angle_changed", angle=int(v))
 
     def on_pen_slider_changed(self, v): self.canvas.pen_width = v; self.canvas.apply_selection_width(v); self.label_w.setText(trf("width_value", value=v)); track_event("pen_width_changed", width=v)
     def on_eraser_slider_changed(self, v): self.canvas.eraser_size = v; self.e_label.setText(trf("sensitivity_value", value=v)); track_event("eraser_size_changed", size=v)
@@ -10270,6 +10754,7 @@ class ControlPanel(QWidget):
                 self.canvas.apply_selection_color(self.canvas.pen_color)
                 self.update_button_highlight(self.color_buttons[-1])
                 self.color_preview.setStyleSheet(f"background-color: {self.canvas.pen_color.name()}; border: 1px solid white;")
+                self.refresh_annotate_badge()
                 track_event("custom_color_changed", color=self.canvas.pen_color.name())
         finally:
             self.timer.start(self.HEARTBEAT_MS)
@@ -11200,6 +11685,9 @@ class ControlPanel(QWidget):
             "theme": self.theme_name,
             "pen_color": cv.pen_color.name(),
             "pen_width": int(cv.pen_width),
+            "pen_style": cv.pen_style if cv.pen_style in PEN_STYLES else "pen",
+            "calligraphy_angle": int(cv.calligraphy_angle),
+            "pen_options": {style: normalize_pen_options(style, cv.pen_options.get(style)) for style in PEN_STYLE_OPTIONS},
             "eraser_type": cv.eraser_type,
             "eraser_size": int(cv.eraser_size),
             "marker_color": cv.marker_color.name(),
@@ -11399,7 +11887,20 @@ class ControlPanel(QWidget):
             self.pen_slider.blockSignals(True)
             self.pen_slider.setValue(cv.pen_width)
             self.pen_slider.blockSignals(False)
-
+            if settings.get("pen_style") in PEN_STYLES:
+                cv.pen_style = settings["pen_style"]
+            saved_options = settings.get("pen_options", {})
+            if not isinstance(saved_options, dict):
+                saved_options = {}
+            cv.pen_options = {style: normalize_pen_options(style, saved_options.get(style)) for style in PEN_STYLE_OPTIONS}
+            nib = settings.get("calligraphy_angle")
+            if isinstance(nib, int) and not isinstance(nib, bool) and 0 <= nib <= 180:
+                cv.calligraphy_angle = nib
+            self.nib_slider.blockSignals(True)
+            self.nib_slider.setValue(cv.calligraphy_angle)
+            self.nib_slider.blockSignals(False)
+            self.nib_label.setText(trf("nib_angle_value", value=cv.calligraphy_angle))
+            self.update_pen_style_controls()
             if settings.get("eraser_type") in ("CIRCLE", "STROKE"):
                 self.set_eraser_type(settings["eraser_type"])
             cv.eraser_size = max(1, min(200, int(settings.get("eraser_size", cv.eraser_size))))
@@ -13165,6 +13666,18 @@ class ControlPanel(QWidget):
 if __name__ == "__main__":
     ensure_directories()
     setup_logging()
+
+    def _log_unhandled(exc_type, exc, tb):
+        # PyQt6 在槽函数/虚函数里遇到未捕获异常时，默认直接终止整个进程——一个边角 bug
+        # 就让整堂课的板书全部消失。装了自定义钩子之后 PyQt 只调用它，程序继续运行。
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc, tb)
+            return
+        LOGGER.error("未捕获异常", exc_info=(exc_type, exc, tb))
+        with contextlib.suppress(Exception):
+            track_event("unhandled_exception", error=f"{exc_type.__name__}: {exc}")
+
+    sys.excepthook = _log_unhandled
     set_windows_app_user_model_id()
     LOGGER.info("MyScreenDraw %s starting (lang=%s)", APP_VERSION, CURRENT)
 

@@ -4,8 +4,8 @@ $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $root
 
 $version = (& python -c "from version import VERSION; print(VERSION)").Trim()
-if ($version -ne "6.0.0-beta.7") {
-    throw "Release build requires version 6.0.0-beta.7, found '$version'"
+if ($version -ne "6.0.0-beta.8") {
+    throw "Release build requires version 6.0.0-beta.8, found '$version'"
 }
 
 # Never package checked-out runtime data or stale PyInstaller output.
@@ -125,5 +125,24 @@ try {
     python -c "import sys; from main import validate_update_zip; print(validate_update_zip(sys.argv[1]))" $zipPath
     if ($LASTEXITCODE -ne 0) { throw 'Built ZIP rejected by the application updater' }
 } finally { $env:QT_QPA_PLATFORM = $previousPlatform }
+# Verify the archive users actually extract, not just the staging directory.
+$verifyDir = Join-Path ([IO.Path]::GetTempPath()) ("MyScreenDraw-zip-check-" + [guid]::NewGuid().ToString('N'))
+try {
+    Expand-Archive -LiteralPath $zipPath -DestinationPath $verifyDir
+    $extractedExe = Join-Path $verifyDir 'MyScreenDraw.exe'
+    if (-not (Test-Path -LiteralPath $extractedExe -PathType Leaf)) { throw 'ZIP has no root executable' }
+    $extracted = Start-Process -FilePath $extractedExe -ArgumentList '--smoke-ui' -WorkingDirectory $verifyDir -PassThru
+    if (-not $extracted.WaitForExit(60000)) {
+        Stop-Process -Id $extracted.Id -Force
+        throw 'Extracted portable EXE smoke timed out'
+    }
+    if ($extracted.ExitCode -ne 0) { throw "Extracted portable EXE smoke failed: $($extracted.ExitCode)" }
+    if ((Get-FileHash -Algorithm SHA256 $extractedExe).Hash.ToLowerInvariant() -ne $hash) {
+        throw 'Extracted EXE differs from verified staging executable'
+    }
+} finally {
+    if (Test-Path -LiteralPath $verifyDir) { Remove-Item -LiteralPath $verifyDir -Recurse -Force }
+}
 $zipHash = (Get-FileHash -Algorithm SHA256 $zipPath).Hash.ToLowerInvariant()
+"$zipHash  $(Split-Path -Leaf $zipPath)" | Set-Content -LiteralPath "$zipPath.sha256" -Encoding ascii
 Write-Host "Portable build verified: $package (v$version, EXE SHA-256 $hash, ZIP SHA-256 $zipHash)"

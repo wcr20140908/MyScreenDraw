@@ -123,15 +123,37 @@ def _emit_path(L, pts, height: int, *, closed: bool, color, width: float, dashed
     L.append("stroke")
 
 
-def _emit_segment(L, seg, height: int, board_style: str):
+def _emit_segment(L, seg, height: int, board_style: str, dash_offset: float = 0.0):
     p1, p2 = seg["p1"], seg["p2"]
     color = _blend_color(seg.get("color", "#000000"), board_style)
-    width = max(1.0, float(seg.get("width", 1)))
+    width = max(0.5, float(seg.get("width", 1)))
+    style = seg.get("style")
+    if style == "calligraphy":
+        angle = math.radians(float(seg.get("nib", 45.0)))
+        aspect = seg.get("options", {}).get("nib_aspect", 100) / 100.0
+        nx, ny = width * 1.25 * aspect * math.cos(angle), width * 1.25 * aspect * math.sin(angle)
+        corners = [(p1[0] + nx, p1[1] + ny), (p2[0] + nx, p2[1] + ny),
+                   (p2[0] - nx, p2[1] - ny), (p1[0] - nx, p1[1] - ny)]
+        L.append(f"{_fmt(color[0])} {_fmt(color[1])} {_fmt(color[2])} setrgbcolor")
+        L.append("newpath")
+        for i, (x, y) in enumerate(corners):
+            L.append(f"{_fmt(x)} {_fmt(height - y)} {'moveto' if i == 0 else 'lineto'}")
+        L.append("closepath gsave fill grestore")
+        L.append(f"{_fmt(max(1.0, width * 0.22))} setlinewidth")
+        L.extend(["1 setlinejoin", "[] 0 setdash", "stroke"])
+        return
+    # EPS 无透明合成/纹理画刷：纹理笔保留颜色和笔宽，霓虹保留实色中心线。
     L.append(f"{_fmt(color[0])} {_fmt(color[1])} {_fmt(color[2])} setrgbcolor")
     L.append(f"{_fmt(width)} setlinewidth")
     L.append("1 setlinecap")
     L.append("1 setlinejoin")
-    L.append("[] 0 setdash")
+    if style == "dashed":
+        options = seg.get("options", {})
+        dash = width * options.get("dash_length", 24) / 10.0
+        gap = width * options.get("dash_gap", 22) / 10.0
+        L.append(f"[{_fmt(dash)} {_fmt(gap)}] {_fmt(dash_offset % (dash + gap))} setdash")
+    else:
+        L.append("[] 0 setdash")
     L.append(f"{_fmt(p1[0])} {_fmt(height - p1[1])} moveto")
     L.append(f"{_fmt(p2[0])} {_fmt(height - p2[1])} lineto")
     L.append("stroke")
@@ -303,8 +325,16 @@ def _eps_lines(page, width: int, height: int, board_style: str, decoded_images: 
     L.append(f"{width} {height} lineto")
     L.append(f"0 {height} lineto")
     L.append("closepath fill")
+    dash_positions = {}
     for seg in page.get("segments", []):
-        _emit_segment(L, seg, height, board_style)
+        key = seg.get("id")
+        offset, end = dash_positions.get(key, (0.0, None))
+        if end != seg["p1"]:
+            offset = 0.0
+        _emit_segment(L, seg, height, board_style, offset)
+        if seg.get("style") == "dashed":
+            p1, p2 = seg["p1"], seg["p2"]
+            dash_positions[key] = (offset + math.hypot(p2[0] - p1[0], p2[1] - p1[1]), p2)
     for item in page.get("shapes", []):
         _emit_shape(L, item, height, board_style)
     for img in page.get("images", []):

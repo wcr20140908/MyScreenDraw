@@ -8,7 +8,7 @@ $token = $env:GITHUB_TOKEN
 if (-not $token) { throw 'GITHUB_TOKEN environment variable not set' }
 $repo = 'wcr20140908/MyScreenDraw'
 $version = (& python -c "from version import VERSION; print(VERSION)").Trim()
-if ($LASTEXITCODE -ne 0 -or $version -ne '6.0.0-beta.7') { throw 'Unexpected release version' }
+if ($LASTEXITCODE -ne 0 -or $version -ne '6.0.0-beta.8') { throw 'Unexpected release version' }
 $tag = "v$version"
 $asset = "MyScreenDraw-$tag-windows-x64.zip"
 $assetPath = Join-Path $root $asset

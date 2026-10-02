@@ -11,7 +11,7 @@ MyScreenDraw is a fullscreen annotation / whiteboard / math-teaching tool built 
 - **Random name picker, timer, presentation spotlight, calculator** — a whole lesson without switching apps
 - **No account; drawings, rosters and logs are not uploaded**. Automatic update checks are enabled by default and can be disabled in Settings. Downloads and installation each require separate confirmation; neither happens silently
 
-Current version **v6.0.0-beta.7**. The UI follows the system language in 8 languages: English, 中文, Français, Español, Deutsch, Русский, 한국어, 日本語.
+Current version **v6.0.0-beta.8** (local build; not yet published as a GitHub Release). The UI follows the system language in 8 languages: English, 中文, Français, Español, Deutsch, Русский, 한국어, 日本語.
 
 > Product screenshots are not included in the public release yet; the current local captures contain development-environment details and must not be committed to GitHub.
 
@@ -30,7 +30,11 @@ Current version **v6.0.0-beta.7**. The UI follows the system language in 8 langu
 ## Features
 
 ### Annotation & drawing
-- Pen / highlighter / laser pointer (adjustable color, width, opacity; laser only indicates, leaves no ink)
+- Eleven permanent pen styles: pen, fountain pen, brush, calligraphy, pencil, crayon, chalk, neon, dashed, rainbow and arrow, plus highlighter and laser pointer.
+- Selecting a pen opens its settings immediately. Per-style options include taper/pressure response, nib angle/width, grain coverage/opacity, glow width/strength, dash length/gap, hue speed/saturation, and arrowhead size/angle. Options are saved independently and can be reset; changes affect new strokes, not existing ink.
+- Colour dots inside the annotation and pen icons show the current colour without enlarging the main toolbar. Rainbow uses a multicolour dot.
+- Hold-to-recognize shapes applies only to the plain pen. Highlighter offers colour/width/opacity; laser is a pointer and leaves no ink.
+- Export limits: PNG/PDF preserve texture. SVG renders pencil/crayon/chalk as same-colour translucent solid strokes. EPS has no alpha compositing: textures become solid and neon retains its centre line; calligraphy keeps its flat-nib outline and dashes retain their length/gap.
 - Eraser (area / stroke)
 - Shapes: line, dashed line, triangle, rectangle, parallelogram, trapezoid, rhombus, circle, ellipse, angle
 - 3-D shapes: cube, cuboid, cylinder, cone

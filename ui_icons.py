@@ -122,6 +122,120 @@ def _draw_laser(p, color, s):
     p.drawEllipse(QRectF(s * 0.40, s * 0.72, s * 0.20, s * 0.20))
 
 
+def _wave(s, y=0.80):
+    """笔形图标底部那道示范笔迹。"""
+    path = QPainterPath()
+    path.moveTo(s * 0.14, s * y)
+    path.cubicTo(QPointF(s * 0.34, s * (y - 0.14)), QPointF(s * 0.58, s * (y + 0.10)),
+                 QPointF(s * 0.86, s * (y - 0.06)))
+    return path
+
+
+def _draw_fountain(p, color, s):
+    """钢笔：尖头笔舌 + 中缝和气孔。"""
+    _solid(p, color)
+    _poly(p, (s * 0.50, s * 0.10), (s * 0.74, s * 0.40), (s * 0.60, s * 0.62),
+          (s * 0.50, s * 0.86), (s * 0.40, s * 0.62), (s * 0.26, s * 0.40))
+    slit = QPen(QColor(0, 0, 0, 0))
+    p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+    slit.setWidthF(max(1.0, s * 0.05))
+    p.setPen(slit)
+    p.drawLine(QPointF(s * 0.50, s * 0.46), QPointF(s * 0.50, s * 0.84))
+    p.setBrush(QBrush(QColor(0, 0, 0)))
+    p.setPen(Qt.PenStyle.NoPen)
+    p.drawEllipse(QPointF(s * 0.50, s * 0.42), s * 0.06, s * 0.06)
+    p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+
+
+def _draw_brush(p, color, s):
+    """毛笔：笔杆 + 水滴形笔头。"""
+    _pen(p, color, s, 0.9)
+    p.drawLine(QPointF(s * 0.78, s * 0.12), QPointF(s * 0.52, s * 0.46))
+    _solid(p, color)
+    path = QPainterPath()
+    path.moveTo(s * 0.56, s * 0.40)
+    path.cubicTo(QPointF(s * 0.66, s * 0.54), QPointF(s * 0.44, s * 0.76), QPointF(s * 0.16, s * 0.88))
+    path.cubicTo(QPointF(s * 0.26, s * 0.66), QPointF(s * 0.36, s * 0.44), QPointF(s * 0.56, s * 0.40))
+    p.drawPath(path)
+
+
+def _draw_calligraphy(p, color, s):
+    """书法笔：扁尖斜写出的一笔粗细对比。"""
+    _solid(p, color)
+    _poly(p, (s * 0.14, s * 0.70), (s * 0.30, s * 0.54), (s * 0.66, s * 0.26),
+          (s * 0.86, s * 0.14), (s * 0.80, s * 0.28), (s * 0.42, s * 0.62), (s * 0.24, s * 0.84))
+    _pen(p, color, s, 0.5)
+    p.drawLine(QPointF(s * 0.30, s * 0.86), QPointF(s * 0.86, s * 0.86))
+
+
+def _draw_pencil(p, color, s):
+    """铅笔：六棱杆 + 削出的木头锥 + 铅芯。"""
+    _pen(p, color, s, 0.85)
+    _poly(p, (s * 0.675, s * 0.155), (s * 0.845, s * 0.325), (s * 0.485, s * 0.685),
+          (s * 0.315, s * 0.515))
+    _poly(p, (s * 0.315, s * 0.515), (s * 0.485, s * 0.685), (s * 0.16, s * 0.84))
+    _solid(p, color)
+    _poly(p, (s * 0.24, s * 0.68), (s * 0.32, s * 0.76), (s * 0.16, s * 0.84))
+
+
+def _draw_crayon(p, color, s):
+    """蜡笔：粗短笔身 + 纸套条纹 + 钝头。"""
+    _pen(p, color, s, 0.85)
+    p.drawRoundedRect(QRectF(s * 0.34, s * 0.30, s * 0.32, s * 0.58), s * 0.05, s * 0.05)
+    p.drawLine(QPointF(s * 0.34, s * 0.48), QPointF(s * 0.66, s * 0.48))
+    p.drawLine(QPointF(s * 0.34, s * 0.70), QPointF(s * 0.66, s * 0.70))
+    _solid(p, color)
+    _poly(p, (s * 0.36, s * 0.30), (s * 0.44, s * 0.12), (s * 0.56, s * 0.12), (s * 0.64, s * 0.30))
+
+
+def _draw_chalk(p, color, s):
+    """粉笔：一截短棒 + 断断续续的粉迹。"""
+    _pen(p, color, s, 0.85)
+    _poly(p, (s * 0.56, s * 0.12), (s * 0.84, s * 0.26), (s * 0.66, s * 0.54), (s * 0.40, s * 0.40))
+    _solid(p, color)
+    for x, y, r in ((0.16, 0.80, 0.05), (0.30, 0.74, 0.04), (0.42, 0.78, 0.05),
+                    (0.56, 0.72, 0.035), (0.70, 0.76, 0.05), (0.84, 0.70, 0.04)):
+        p.drawEllipse(QPointF(s * x, s * y), s * r, s * r)
+
+
+def _draw_neon(p, color, s):
+    """霓虹笔：一道笔迹带一圈淡光晕。"""
+    glow = QColor(color)
+    glow.setAlpha(80)
+    _pen(p, glow, s, 3.2)
+    p.drawPath(_wave(s, 0.52))
+    _pen(p, color, s, 1.1)
+    p.drawPath(_wave(s, 0.52))
+
+
+def _draw_dashed(p, color, s):
+    """虚线笔：三段短划。"""
+    _pen(p, color, s, 1.2)
+    for x0, x1, y0, y1 in ((0.12, 0.30, 0.74, 0.62), (0.42, 0.58, 0.54, 0.46), (0.70, 0.88, 0.38, 0.26)):
+        p.drawLine(QPointF(s * x0, s * y0), QPointF(s * x1, s * y1))
+
+
+def _draw_rainbow(p, color, s):
+    """彩虹笔：三道同心拱（单色图标里用层次表示色带）。"""
+    for radius, alpha in ((0.38, 255), (0.27, 170), (0.16, 110)):
+        band = QColor(color)
+        band.setAlpha(alpha)
+        _pen(p, band, s, 1.1)
+        p.drawArc(QRectF(s * (0.5 - radius), s * (0.78 - radius), s * radius * 2, s * radius * 2),
+                  0, 180 * 16)
+
+
+def _draw_arrow_pen(p, color, s):
+    """箭头笔：一道弯笔迹，末端带箭头。"""
+    _pen(p, color, s, 1.0)
+    path = QPainterPath()
+    path.moveTo(s * 0.14, s * 0.80)
+    path.cubicTo(QPointF(s * 0.30, s * 0.40), QPointF(s * 0.54, s * 0.64), QPointF(s * 0.80, s * 0.24))
+    p.drawPath(path)
+    _solid(p, color)
+    _poly(p, (s * 0.86, s * 0.14), (s * 0.84, s * 0.40), (s * 0.62, s * 0.26))
+
+
 def _draw_eraser(p, color, s):
     """橡皮：斜放的橡皮块 + 擦过的碎屑。"""
     _pen(p, color, s, 0.9)
@@ -341,6 +455,16 @@ _DRAWERS = {
     "pen": _draw_pen,
     "highlighter": _draw_highlighter,
     "laser": _draw_laser,
+    "fountain": _draw_fountain,
+    "brush": _draw_brush,
+    "calligraphy": _draw_calligraphy,
+    "pencil": _draw_pencil,
+    "crayon": _draw_crayon,
+    "chalk": _draw_chalk,
+    "neon": _draw_neon,
+    "dashed": _draw_dashed,
+    "rainbow": _draw_rainbow,
+    "arrow": _draw_arrow_pen,
     "eraser": _draw_eraser,
     "select": _draw_select,
     "text": _draw_text,
