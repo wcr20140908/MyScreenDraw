@@ -15,17 +15,20 @@
 ### 搭建
 
 ```powershell
-git clone https://github.com/<owner>/MyScreenDraw.git
+git clone https://github.com/wcr20140908/MyScreenDraw.git
 cd MyScreenDraw
 
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 
 # 可复现安装（推荐）
-pip install -r requirements.lock
+python -m pip install -r requirements.lock
+
+# 测试依赖不在运行时/构建锁文件中；pytest-subtests 用于 subTest 结果报告
+python -m pip install pytest pytest-subtests
 
 # 需要打包时再装构建依赖
-pip install -r requirements-build.lock
+python -m pip install -r requirements-build.lock
 ```
 
 ### 运行
@@ -34,15 +37,16 @@ pip install -r requirements-build.lock
 python main.py
 ```
 
-按 **F12** 退出程序（全局热键，全屏画布下也有效）。
+按 **F12** 隐藏到系统托盘，单击托盘图标恢复。完全退出使用托盘菜单并处理保存确认。
 
 ### 跑测试
 
 ```powershell
+$env:QT_QPA_PLATFORM = "offscreen"
 python -m pytest -q --ignore=tests/test_touch_injection.py --ignore=tests/test_multitouch_injection.py --ignore=tests/test_multitouch.py
 ```
 
-本地安全回归测试在离屏模式下运行，不会弹窗、不会抢屏；真实触控注入层必须单独运行，不属于默认构建门禁。
+上面的命令显式设置离屏模式，并排除真实触控层。测试完成后，在同一终端启动实际程序前执行 `Remove-Item Env:QT_QPA_PLATFORM -ErrorAction SilentlyContinue`。真实触控注入层必须另行授权、单独运行，不属于默认构建门禁。覆盖范围与跳过项说明见 [测试指南](docs/testing.md)。
 
 ### 打包便携版（Windows）
 
@@ -50,19 +54,25 @@ python -m pytest -q --ignore=tests/test_touch_injection.py --ignore=tests/test_m
 .\build.ps1
 ```
 
-构建结果位于 `dist/MyScreenDraw/`（PyInstaller onedir），整目录压缩为 ZIP 即得便携版。
-构建脚本会随包分发 `LICENSE` 与 `THIRD_PARTY_LICENSES.txt`（GPL 合规），
-`MyScreenDraw.spec` 已关闭 UPX 压缩以降低杀软误报率。
+脚本会清理并重建 `build/` 和 `dist/`，请勿在其中存放用户数据。构建结果位于 `dist/MyScreenDraw/`（PyInstaller onedir）；脚本还会在仓库根目录生成便携 ZIP 和 `.sha256`，不是让用户下载源码归档。
+构建脚本会随包分发 `LICENSE` 与 `THIRD_PARTY_LICENSES.txt`（分发材料的一部分，不替代完整许可复核），
+`MyScreenDraw.spec` 已关闭 UPX 压缩。当前构建门禁锁定 `6.0.0-beta.8`；下一版本须同步版本资源与门禁。完整步骤见 [发布指南](docs/releasing.md)。
 
 ---
 
 ## 2. 项目结构
 
 ```text
-main.py                 主程序：画布、控制面板、识别器（体积大，正在渐进拆分）
+main.py                 主程序：画布、控制面板、识别器、更新与编排
+app_lifecycle.py        托盘、后台、退出与重启生命周期
+toolbar_windows.py      分体工具栏与 LOGO 窗口
+formula.py              结构化公式布局与绘制
+touch_keyboard.py       Windows 触摸键盘管理
+ui_icons.py             绘制工具与笔形图标
 display_utils.py        屏幕/DPI/直尺/量角器的纯函数（无 Qt 依赖，易测试）
 persistence.py          项目文件 schema、校验、原子写入
 calculator.py           基于 AST 白名单的安全表达式求值
+eps_export.py           EPS 导出序列化
 i18n.py                 界面文案与语言选择
 version.py              唯一版本号来源
 tests/                  单元与回归测试
@@ -88,7 +98,7 @@ docs/                   架构、发布、签名、代码来源审计等文档
 1. 先开 Issue 讨论（Bug 除外，小 Bug 可直接 PR）
 2. 从 `main` 切分支：`fix/xxx`、`feat/xxx`、`docs/xxx`
 3. 编码 + **补测试**
-4. 本地跑通 `python -m unittest discover -s tests`
+4. 本地跑通上面的离屏 pytest 命令；UI/输入相关修改另附实屏验收证据
 5. 提交 PR，填写模板
 
 ### 提交信息
@@ -186,8 +196,7 @@ self.timer.stop()
 - 你的贡献以 GPL-3.0-or-later 授权；
 - 你有权提交这些代码（不是从不兼容许可证的项目复制而来）。
 
-**特别提醒**：请勿从许可证不兼容的项目（例如 MIT 之外的专有代码、
-或任何未经授权的商业软件）复制代码。若你参考了其他开源项目的实现，
+**特别提醒**：不要复制未经授权或许可证不兼容的代码。兼容性不能简单按“是不是 MIT”判断；保留原作者署名与许可证，结合具体组件和分发方式复核。若你参考了其他开源项目的实现，
 请在 PR 描述中注明来源与其许可证，我们会记入 `docs/provenance-audit.md`。
 
 ---

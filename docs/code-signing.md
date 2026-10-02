@@ -1,15 +1,34 @@
-# Code signing notes
+# Code signing and release integrity
 
-The published portable build is currently unsigned. Windows SmartScreen may therefore
-show an unfamiliar-publisher warning even when the artifact was built from this source.
-That warning is a distribution-trust issue, not evidence that the application uploads data
-or contains an updater.
+The **v6.0.0-beta.8** portable build is unsigned. Windows SmartScreen or security
+software may warn about an unfamiliar publisher. This alone proves neither
+malware nor safety; check the source and investigate warnings rather than
+instructing users to disable protection.
 
-For a signed release, the maintainer should sign `MyScreenDraw.exe` and any required
-native binaries with a certificate held by the release owner, verify the signature on a
-clean Windows machine, and publish the certificate identity and SHA-256 hash with the
-release manifest. The signing key must never be committed to the repository or placed in
-`data/`, `build/`, or `dist/`.
+## What the current checks prove
 
-Until signing is available, users can build from source with the pinned lock files and
-verify the generated package using `build.ps1` and `RELEASE-MANIFEST.json`.
+- The release `.zip.sha256` checks the ZIP against the published checksum.
+- `RELEASE-MANIFEST.json` records the EXE hash and currently says `signature: none`.
+- The updater validates archive structure, paths, and size limits. Those checks
+  are not Authenticode verification or an independent proof of publisher identity.
+- An attacker controlling both an asset and its checksum could replace both.
+  HTTPS and checksums do not remove the trust placed in the release account.
+
+See the [release guide](releasing.md) for packaging and verification steps. Pinned
+application dependencies help rebuild the project, but do not promise byte-for-byte
+identical binaries across machines or toolchains.
+
+## If signed builds are introduced
+
+Use a certificate controlled by the release owner. Keep signing keys outside the
+repository, runtime data, and build output. Sign the executable before generating
+its manifest and ZIP hashes; otherwise the recorded hashes will be stale.
+
+The current build script does not perform signing and writes `signature: none`.
+Add and verify a signing step before describing a release as signed. Validate the
+signature and publisher identity on a clean Windows machine, then publish the
+signing identity and final artifact checksums. Review any native-binary signing
+requirements without overwriting third-party signatures indiscriminately.
+
+Signing improves publisher identification; it does not guarantee that reputation
+warnings disappear or that the software is free from vulnerabilities.

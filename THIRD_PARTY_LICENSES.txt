@@ -1,7 +1,9 @@
 # 第三方组件与许可证 / Third-Party Licenses
 
-本文件列出 MyScreenDraw 直接依赖的第三方组件及其许可证。
-This file lists third-party components that MyScreenDraw depends on, and their licenses.
+当前基线：v6.0.0-beta.8（2026-10-02 文档复核）。
+本文件列出主要运行时、传递依赖和构建组件及其许可证；不是所有捆绑文件的完整许可审计。
+This file lists major runtime, transitive, and build dependencies for v6.0.0-beta.8.
+It is not a complete license audit of every bundled file.
 
 MyScreenDraw 本体采用 **GPL-3.0-or-later**，详见根目录 `LICENSE`。
 MyScreenDraw itself is licensed under **GPL-3.0-or-later**; see `LICENSE` in the repository root.
@@ -23,8 +25,7 @@ MyScreenDraw 的图形界面构建在 **PyQt6** 之上。PyQt6 由 Riverbank Com
 - 若希望以闭源或与 GPL 不兼容的许可证分发，则需要向 Riverbank Computing 购买
   **商业 PyQt 许可证**，并可能同时需要商业 Qt 许可证。
 
-本项目选择前者：以 **GPL-3.0-or-later** 开源。这也与同类教育软件
-（OpenBoard 为 GPL-3.0、Xournal++ 为 GPL-2.0）保持一致。
+本项目选择前者：以 **GPL-3.0-or-later** 开源。具体分发仍须满足各组件的许可义务。
 
 参考：
 
@@ -57,21 +58,14 @@ MyScreenDraw 的图形界面构建在 **PyQt6** 之上。PyQt6 由 Riverbank Com
 | 主页 | https://www.qt.io/ |
 | 许可证说明 | https://www.qt.io/licensing/open-source-lgpl-obligations |
 
-由于本程序整体以 GPL-3.0-or-later 分发，Qt 的 LGPL 与 GPL 条款均可满足。
-
-**LGPL 义务提示**：随二进制分发时，应保证使用者能够获取相应 LGPL 组件的源码，
-并能够替换该组件后重新链接。本项目通过以下方式满足：
-
-1. 完整源码在 GitHub 公开；
-2. 发行包中的 Qt 动态库可由使用者自行替换；
-3. 本文件提供各组件上游地址。
+GPL-3.0-or-later 的项目许可不能单独证明已满足全部 Qt 分发义务。应按实际捆绑的 Qt 模块及第三方组件保留许可和声明，并按适用条款提供对应源码及修改/替换组件所需条件。仅提供本项目源码或上游主页链接，不应被描述为已自动满足所有义务。
 
 ### 2.3 PyQt6-sip
 
 | 项目 | 内容 |
 | --- | --- |
 | 用途 | PyQt6 的 C++/Python 绑定运行时 |
-| 许可证 | 参见 Riverbank Computing SIP 许可条款（GPL v3 或商业） |
+| 许可证 | BSD-2-Clause（当前 PyQt6_sip 13.11.1 发行包元数据与 LICENSE） |
 | 主页 | https://www.riverbankcomputing.com/software/sip/ |
 
 ### 2.4 pynput
@@ -95,7 +89,7 @@ pynput 为 LGPL-3.0，与本项目的 GPL-3.0-or-later 兼容。
 
 ---
 
-## 3. 构建期依赖（不随发行版分发其自身代码）
+## 3. 构建工具与打包运行组件
 
 ### 3.1 PyInstaller
 
@@ -109,6 +103,8 @@ pynput 为 LGPL-3.0，与本项目的 GPL-3.0-or-later 兼容。
 PyInstaller 的例外条款允许使用它打包并分发应用，且**不要求**被打包的应用采用
 PyInstaller 的许可证，也不要求在应用中致谢 PyInstaller。本项目采用 GPL-3.0-or-later
 是出于 PyQt6 的要求，而非 PyInstaller 的要求。
+
+PyInstaller 本身是构建工具，但生成的 EXE 包含 bootloader；应复核其许可和例外条款，不能把它简单标为“没有代码随包分发”。
 
 ### 3.2 其他构建期组件
 
@@ -124,9 +120,7 @@ PyInstaller 的许可证，也不要求在应用中致谢 PyInstaller。本项�
 
 ## 4. 本项目自身代码
 
-`main.py`、`display_utils.py`、`persistence.py`、`calculator.py`、`i18n.py`、
-`version.py`、`tests/` 及构建脚本均为本项目原创代码，未从其他项目复制受限代码。
-代码来源审计结果见 `docs/provenance-audit.md`。
+项目模块和复核边界见 `docs/architecture.md` 与 `docs/provenance-audit.md`。当前文档不声称已逐行确认全部代码原创或完成 Git 全历史审计。引入外部实现时必须记录来源并保留许可声明。
 
 字体、图标说明：
 
@@ -142,9 +136,17 @@ PyInstaller 的许可证，也不要求在应用中致谢 PyInstaller。本项�
 | --- | --- | --- | --- |
 | PyQt6 | 是 | GPL v3 / 商业 | 是（按 GPL v3 使用） |
 | Qt 6 运行库 | 是 | LGPL v3 / GPL | 是 |
-| PyQt6-sip | 是 | GPL v3 / 商业 | 是 |
+| PyQt6-sip | 是 | BSD-2-Clause | 是（保留声明） |
 | pynput | 是 | LGPL-3.0 | 是 |
 | pywin32 系列 | 是 | BSD 类 | 是 |
 | six | 是 | MIT | 是 |
-| PyInstaller | 否（仅构建期） | GPL-2.0 + 例外 | 不适用 |
-| 其余构建期组件 | 否 | MIT / Apache-2.0 等 | 不适用 |
+| PyInstaller | bootloader 随 EXE 分发 | GPL-2.0-or-later + 例外；部分文件 Apache-2.0 | 按具体文件及例外条款复核 |
+| 其余构建期组件 | 按最终包确认 | MIT / Apache-2.0 等 | 按实际文件复核 |
+
+## 6. 复核范围与未覆盖项
+
+版本以 `requirements.lock`、`requirements-build.lock` 和最终包内容为准。本次核对了本机匹配锁文件版本的 PyQt6_sip 13.11.1 许可元数据与 LICENSE，修正了此前误写的 GPL/商业许可；不应将其与 PyQt6 的许可混为一谈。
+
+PyInstaller 包还携带 Python 运行时。其许可、Qt 内含第三方组件的声明以及其他实际捆绑文件，需要在最终分发审查中一并核对。本表不是可替代上游许可证全文的 SPDX/SBOM 清单。
+
+pytest、pytest-subtests 是开发测试工具，当前不在运行时/构建锁文件中；不要仅根据开发环境安装列表判断哪些组件随发行包分发。文档更新不会修改已经发布的 ZIP 内的旧声明，下一次构建才会带入更新文本。

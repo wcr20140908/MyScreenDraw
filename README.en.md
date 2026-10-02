@@ -4,7 +4,7 @@
 
 MyScreenDraw is a fullscreen annotation / whiteboard / math-teaching tool built for **classroom touch screens**:
 
-- **Annotate anything on screen** — pen, highlighter, laser pointer
+- **Annotate anything on screen** — 11 permanent pen styles, plus a highlighter and laser pointer
 - **Freehand shapes snap to standard shapes**: draw, then hold the pen still at the end — a progress ring fills and the stroke converts; lift to keep it freehand (lifting never converts)
 - **Multi-page whiteboard** with white/black board switching; export page by page to PNG / PDF / SVG / EPS
 - **Real millimetre-scaled ruler, protractor and set squares** (per-screen calibration) with live readings
@@ -23,7 +23,7 @@ Current version **v6.0.0-beta.8** (preview release). The UI follows the system l
 
 1. **Get the app**: download the portable ZIP above and extract **all its contents** into a new folder on your Desktop, another drive, or a USB stick. Do not run inside the ZIP or extract only the EXE: keep `MyScreenDraw.exe` beside the `_internal` folder. No installation or Python required; the only registry write happens if you turn on "Start with Windows" in Settings — see below.
 2. **Launch**: double-click `MyScreenDraw.exe`. It creates `data/` (settings & autosave) and `exports/` (exports) beside itself on first run.
-3. **Exit**: press **F12** (global hotkey, works even on the fullscreen canvas).
+3. **Hide or exit**: press **F12** or the toolbar close button to hide to the system tray; the process keeps running. Click the tray icon to restore the interface. To quit, use the tray exit command and respond to the save confirmation.
 
 > ⚠️ Put the app somewhere **you can write to** (Desktop, another drive, USB). Inside `C:\Program Files` it cannot save settings or data due to permissions.
 
@@ -31,7 +31,7 @@ Current version **v6.0.0-beta.8** (preview release). The UI follows the system l
 
 ### Annotation & drawing
 - Eleven permanent pen styles: pen, fountain pen, brush, calligraphy, pencil, crayon, chalk, neon, dashed, rainbow and arrow, plus highlighter and laser pointer.
-- Selecting a pen opens its settings immediately. Per-style options include taper/pressure response, nib angle/width, grain coverage/opacity, glow width/strength, dash length/gap, hue speed/saturation, and arrowhead size/angle. Options are saved independently and can be reset; changes affect new strokes, not existing ink.
+- Selecting a pen opens its settings immediately. Per-style options include taper/pressure response, nib angle/width, grain coverage/opacity, glow width/strength, dash length/gap, hue speed/saturation, and arrowhead size/angle. Each permanent style saves its own colour, width, speed-to-width setting, and advanced options; these can be reset. Changes affect new strokes, not existing ink.
 - Colour dots inside the annotation and pen icons show the current colour without enlarging the main toolbar. Rainbow uses a multicolour dot.
 - Hold-to-recognize shapes applies only to the plain pen. Highlighter offers colour/width/opacity; laser is a pointer and leaves no ink.
 - Export limits: PNG/PDF preserve texture. SVG renders pencil/crayon/chalk as same-colour translucent solid strokes. EPS has no alpha compositing: textures become solid and neon retains its centre line; calligraphy keeps its flat-nib outline and dashes retain their length/gap.
@@ -47,6 +47,9 @@ Current version **v6.0.0-beta.8** (preview release). The UI follows the system l
 - Geometry construction: circumcircle, incircle, medians, altitudes, diagonals, angle bisector, etc.
 
 ### Whiteboard
+- The compact page list is anchored to the page navigation bar.
+- First/last-page arrows appear grey but show a boundary hint when clicked.
+- Select a page and use the red **Delete** button below the list. Confirmation defaults to cancel; deleting the only page leaves one blank page.
 - Multi-page management with thumbnail navigation
 - White / black board switching
 - Page-by-page export to PNG / PDF / SVG / EPS (page numbers on multi-page exports; SVG/EPS are vector and stay editable)
@@ -64,7 +67,7 @@ Current version **v6.0.0-beta.8** (preview release). The UI follows the system l
 - Export PNG / PDF / SVG / EPS
 - Drag a `.msd` / `.json` project file onto the main panel to open it
 
-### Settings & appearance (beta.6)
+### Settings & appearance
 The Settings button opens five sections — appearance, interface, drawing, system, and about:
 
 - The toolbar uses one icon-based layout; the mode button is labeled **Mouse**
@@ -94,12 +97,23 @@ Click **Mouse** to let mouse/touch input pass through the canvas to the applicat
 - Autosave runs every 30 s; after an abnormal exit the next launch asks whether to restore
 - Rely on explicit saves; autosave is only for recovery
 
+### Verify a portable ZIP and upgrade manually
+Download the ZIP and `.zip.sha256` from the same Release, then run in PowerShell:
+
+```powershell
+Get-FileHash -Algorithm SHA256 .\MyScreenDraw-v6.0.0-beta.8-windows-x64.zip
+```
+
+Compare the hash with the value in the `.sha256` file. Quit the old application through the tray, back up `data/`, `exports/`, and projects saved elsewhere, and extract the entire new ZIP into a new directory. Copy the backed-up data as needed. Do not run two versions against the same data. Autosave is not a version backup.
+
+beta.8 migrates the old shared pen colour, width, and speed-to-width settings into independent per-style profiles. Changing one style no longer changes the others. Older versions may not preserve new pen effects; keep the original projects and data before downgrading.
+
 ## FAQ
 
 **Q: Windows says "Windows protected your PC" / antivirus flags the app?**
 A: The release is not code-signed and may trigger Windows reputation warnings. A warning is not proof of malware, but being open-source is not proof of safety either. Verify the download source and SHA-256 checksum and check with security software rather than ignoring the warning. Automatic update checks are enabled by default; drawings, rosters and logs are not uploaded. For offline use, disable update checks and do not download updates. Strictly isolated environments should block network access before the first launch.
 
-Why does it appear? The distributed exe is not yet code-signed. Fully removing the prompt requires the **publisher (developer)** to purchase a code-signing certificate and sign the release — that is a distribution-trust matter, not a program-security one, and virtually every free/open-source desktop app shows the same prompt on first run. If you are unsure, you can also build it yourself from source (see [CONTRIBUTING.md](CONTRIBUTING.md)).
+Signing helps identify the publisher, but does not guarantee that SmartScreen or antivirus warnings disappear. SHA-256 checks integrity; it is not a digital signature. You can also [build from source](CONTRIBUTING.md). See the [code-signing notes](docs/code-signing.md) for the trust boundaries.
 
 **Q: Where is my data?**
 A: In the app folder: `data/` (settings, autosave, name list, local log) and `exports/`. Back up `data/` together with your projects.
@@ -116,13 +130,13 @@ A: Yes, since v5.2.0. The pen and highlighter accept several contacts at once �
 ## Privacy & data safety
 
 - **Drawings, rosters and logs are not uploaded**. Update checks retrieve public release metadata.
-- **Update checks**: beta.7 enables them for new installations and respects an existing disabled setting. Choose stable or preview releases. A 24-hour timer starts when settings load; the first automatic check is about 24 hours later, not immediately at startup. You can also click **Check now**. Checks contact GitHub's release API (`api.github.com/repos/wcr20140908/MyScreenDraw/releases?per_page=30`). Automatic results only notify you; they never start a download or installation.
+- **Update checks**: The current version enables them for new installations (since beta.7) and respects an existing disabled setting. Choose stable or preview releases. A 24-hour timer starts when settings load; the first automatic check is about 24 hours later, not immediately at startup. You can also click **Check now**. Checks contact GitHub's release API (`api.github.com/repos/wcr20140908/MyScreenDraw/releases?per_page=30`). Automatic results only notify you; they never start a download or installation.
   - Downloads stay inside the application and run in a background thread
   - The app asks before downloading and asks again before installing
   - ZIP validation rejects path traversal, symlinks, duplicate entries, oversized archives, excessive member counts, and archives missing `MyScreenDraw.exe`
   - Installation skips `data/`, `exports/`, settings, roster data, logs, and autosaves
   - For offline use, disable update checks and do not download updates; strictly isolated environments should block network access before the first launch
-- **Start with Windows** (new in v5.5.0, off by default): when enabled, the app writes one value named `MyScreenDraw` under `HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run`, holding the path used to launch it. Turning the switch off deletes that value. Current user only — it never touches `HKEY_LOCAL_MACHINE`, needs no administrator rights, and changes nothing else in the system.
+- **Start with Windows** (new in v5.5.0, off by default): when enabled, the app writes one value named `MyScreenDraw` under `HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run`, holding the path used to launch it. Turning the switch off deletes that value. Current user only — it never touches `HKEY_LOCAL_MACHINE`, needs no administrator rights, and this switch does not modify other registry entries.
 - The local log (`data/events.jsonl`) may include file names — check it before sharing
 - The name list (`data/roster.json`) contains student names; treat it as personal data and never ship it with the program
 
@@ -130,7 +144,10 @@ A: Yes, since v5.2.0. The pen and highlighter accept several contacts at once �
 
 - Build, test, coding rules and contribution flow: see [CONTRIBUTING.md](CONTRIBUTING.md)
 - Full changelog: see [CHANGELOG.md](CHANGELOG.md)
-- Code-origin audit: see [docs/provenance-audit.md](docs/provenance-audit.md)
+- Architecture and maintenance boundaries: [architecture](docs/architecture.md)
+- Offscreen regression and desktop acceptance: [testing guide](docs/testing.md)
+- Packaging, verification, and stable-release gates: [release guide](docs/releasing.md)
+- Code-origin and license review scope: [provenance notes](docs/provenance-audit.md)
 - Security reporting: see [SECURITY.md](SECURITY.md)
 
 ## License
