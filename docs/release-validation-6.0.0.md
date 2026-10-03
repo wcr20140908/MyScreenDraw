@@ -2,7 +2,19 @@
 
 Record updated: 2026-10-03. **The release owner reported their checks complete and authorized publication. The test-runtime isolation repair passed a new full offscreen regression with current configuration bytes preserved. Binary/source verification is current; the earlier configuration mismatch remains documented as historical evidence, not rewritten as a pass.**
 
-This closeout used source, text logs, in-memory automated assertions and offscreen Qt only. No images or videos were opened, no screenshots were taken, and no real desktop/input/upgrade scripts were run. The build remains unsigned. All pre-existing working-tree changes were retained; no commit, push, tag or GitHub release was created.
+This closeout used source, text logs, in-memory automated assertions and offscreen Qt only. No images or videos were opened, no screenshots were taken, and no real desktop/input/upgrade scripts were run. The build remains unsigned. All pre-existing working-tree changes were retained and included in the reviewed release commit. Publication details follow; earlier no-publication statements below describe historical runs only.
+
+## Published artifact verification — 2026-10-03
+
+- Release: [MyScreenDraw v6.0.0](https://github.com/wcr20140908/MyScreenDraw/releases/tag/v6.0.0), public, not a draft or prerelease.
+- Release/tag commit: `d08db57ae6951ee69dcc2bc4d071c77bade7cd41`.
+- ZIP: `MyScreenDraw-v6.0.0-windows-x64.zip`, 42261368 bytes.
+- Public ZIP SHA-256: `6ec2008cc89e7213f31d206e939191f71016872f339c8cde13b777f8e013210b`.
+- Public EXE SHA-256: `35422b32bb00923ca4142a3aeadd6155638f626ede5c09d7c6967a817371302b`.
+- Both draft assets were uploaded and downloaded again before publication; hashes matched the accepted local files. The two public assets were then downloaded without authentication and verified again.
+- All extracted files matched the public ZIP. Its EXE completed `--smoke-ui` with `QT_QPA_PLATFORM=offscreen` and keyboard launch disabled; exit 0, unchanged EXE hash. This was not a real-desktop test.
+- The first ZIP upload encountered a TLS EOF and left a partial asset in the draft. Only that incomplete, newly created asset was removed; retry succeeded before publication. The later public download was resumed after a timeout and accepted only after full SHA-256 verification.
+- Source changes after the tag are documentation-only download/status updates; the published EXE was not rebuilt or replaced.
 
 ## Publication authorization and test-runtime repair — 2026-10-03
 

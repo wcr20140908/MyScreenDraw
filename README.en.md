@@ -11,13 +11,13 @@ MyScreenDraw is a fullscreen annotation / whiteboard / math-teaching tool built 
 - **Random name picker, timer, presentation spotlight, calculator** — a whole lesson without switching apps
 - **No account; drawings, rosters and logs are not uploaded**. Automatic update checks are enabled by default and can be disabled in Settings. Downloads and installation each require separate confirmation; neither happens silently
 
-Current version **v6.0.0** (local candidate built and headless-verified; not publicly released). The UI follows the system language in 8 languages: English, 中文, Français, Español, Deutsch, Русский, 한국어, 日本語.
+Current version **v6.0.0** (Windows x64 portable release available). The UI follows the system language in 8 languages: English, 中文, Français, Español, Deutsch, Русский, 한국어, 日本語.
 
 > Product screenshots are not included in the public release yet; the current local captures contain development-environment details and must not be committed to GitHub.
 
 ## New features and fixes in 6.0.0
 
-These changes are included in the local 6.0.0 candidate, which is not publicly released. The beta.8 download does not include these new features or fixes.
+These changes are included in the stable 6.0.0 portable release. The older beta.8 assets do not include these new features or fixes.
 
 - Added a free/open-source notice at the top of Settings, default-on pen restoration after whiteboard page turns, and default-off custom pen defaults. See “New classroom preferences in 6.0.0” below for controls, saving steps, and limits.
 
@@ -30,9 +30,9 @@ These changes are included in the local 6.0.0 candidate, which is not publicly r
 
 ## Quick start
 
-**[Download the published Windows x64 portable v6.0.0-beta.8 (preview; includes EXE, no installation)](https://github.com/wcr20140908/MyScreenDraw/releases/download/v6.0.0-beta.8/MyScreenDraw-v6.0.0-beta.8-windows-x64.zip)**
+**[Download Windows x64 portable v6.0.0 (stable; includes EXE, no installation)](https://github.com/wcr20140908/MyScreenDraw/releases/download/v6.0.0/MyScreenDraw-v6.0.0-windows-x64.zip)**
 
-The 6.0.0 candidate is currently local only, with no public download yet. Download and checksum examples below still refer to the published beta.8; update them to verified 6.0.0 assets after publication.
+[Release page and notes](https://github.com/wcr20140908/MyScreenDraw/releases/tag/v6.0.0) · [SHA-256 checksum](https://github.com/wcr20140908/MyScreenDraw/releases/download/v6.0.0/MyScreenDraw-v6.0.0-windows-x64.zip.sha256). The public assets were downloaded again and hash-verified; the extracted EXE passed an offscreen startup check.
 
 > Do not download GitHub's automatic **Source code (zip)** / **Source code (tar.gz)** assets or **Code → Download ZIP**. Those contain source code, not the runnable application.
 
@@ -94,9 +94,9 @@ The Settings button opens five sections — appearance, interface, drawing, syst
 - **Update channel** lets you choose stable or preview releases
 - **In-app updates** ask before downloading and before installing, and preserve `data/`, `exports/`, settings, autosaves, roster data, and logs
 
-### New classroom preferences in 6.0.0 (local candidate, unreleased)
+### New classroom preferences in 6.0.0
 
-All three features are in **Settings** on the main toolbar. They are not in the beta.8 download above.
+All three features are in **Settings** on the main toolbar and are included in the 6.0.0 download above.
 
 #### Top of Settings: free/open-source and third-party service notice
 
@@ -120,7 +120,7 @@ All three features are in **Settings** on the main toolbar. They are not in the 
 - When enabled, presets load during startup settings restoration and when returning from a different tool or pen style. Turning the global switch on also applies the preset immediately if the current tool is an annotation pen. An automatic page-turn return to a different annotation tool follows the same rule. Clicking the already-selected pen again only opens its settings; it does not reload the preset. Presets are not reset on every stroke.
 - **Save preset** and **Capture current** do not themselves apply a preset. To try the saved values, leave the switch on, select another tool/style, and switch back. Temporary edits in regular pen settings never overwrite presets; those live values are replaced only when a preset is applied again. These operations affect future drawing, **not existing ink**.
 
-If an older configuration lacks the new fields, page-turn restoration defaults to on, custom defaults to off, and notice counting starts with the first normal launch. Existing independent pen settings remain. The local package has passed the automated headless gates documented above; visual, real-input, physical-touch and full packaged-upgrade acceptance are still pending.
+If an older configuration lacks the new fields, page-turn restoration defaults to on, custom defaults to off, and notice counting starts with the first normal launch. Existing independent pen settings remain. The release passed the automated headless gates documented above, and the release owner reported their checks complete. No additional per-device or packaged-upgrade matrix is claimed; see the validation record.
 
 ## Usage
 
@@ -144,7 +144,7 @@ Click **Mouse** to let mouse/touch input pass through the canvas to the applicat
 Download the ZIP and `.zip.sha256` from the same Release, then run in PowerShell:
 
 ```powershell
-Get-FileHash -Algorithm SHA256 .\MyScreenDraw-v6.0.0-beta.8-windows-x64.zip
+Get-FileHash -Algorithm SHA256 .\MyScreenDraw-v6.0.0-windows-x64.zip
 ```
 
 Compare the hash with the value in the `.sha256` file. Quit the old application through the tray, back up `data/`, `exports/`, and projects saved elsewhere, and extract the entire new ZIP into a new directory. Copy the backed-up data as needed. Do not run two versions against the same data. Autosave is not a version backup.
