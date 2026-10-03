@@ -11,13 +11,28 @@ MyScreenDraw is a fullscreen annotation / whiteboard / math-teaching tool built 
 - **Random name picker, timer, presentation spotlight, calculator** — a whole lesson without switching apps
 - **No account; drawings, rosters and logs are not uploaded**. Automatic update checks are enabled by default and can be disabled in Settings. Downloads and installation each require separate confirmation; neither happens silently
 
-Current version **v6.0.0-beta.8** (preview release). The UI follows the system language in 8 languages: English, 中文, Français, Español, Deutsch, Русский, 한국어, 日本語.
+Current version **v6.0.0** (local candidate built and headless-verified; not publicly released). The UI follows the system language in 8 languages: English, 中文, Français, Español, Deutsch, Русский, 한국어, 日本語.
 
 > Product screenshots are not included in the public release yet; the current local captures contain development-environment details and must not be committed to GitHub.
 
+## New features and fixes in 6.0.0
+
+These changes are included in the local 6.0.0 candidate, which is not publicly released. The beta.8 download does not include these new features or fixes.
+
+- Added a free/open-source notice at the top of Settings, default-on pen restoration after whiteboard page turns, and default-off custom pen defaults. See “New classroom preferences in 6.0.0” below for controls, saving steps, and limits.
+
+- Dragging the LOGO bounds it together with the attached, expanded toolbar in the available screen area, with the LOGO above in portrait mode or to the left in landscape mode. If the group is larger than that area, relative placement takes priority; full visibility is not guaranteed.
+- Entering and releasing a drag clears the LOGO pressed highlight. Ordinary clicks still collapse/expand the toolbar, and normal hover feedback remains.
+- Invalid theme/current-tool types and certain numeric fields no longer interrupt loading later valid settings, including disabled update checks. This field-level recovery cannot recover an unparseable configuration file; back up before upgrading.
+- Hiding the main UI also hides persistent tools such as Calculator; restore keeps their content and positions. Opening Settings from the tray while hidden does not wake the other windows.
+- Settings dropdowns follow the light/dark theme. Click a preset color swatch for an alpha-aware color picker; the color code is read-only/copyable, and Cancel leaves the draft unchanged. Chalk uses a longer-period deterministic grain texture; visual acceptance remains with the user.
+- Pre-release offscreen regression: 1296 passed, 7 skipped, and 1184 subtests passed; the actual configuration stayed byte-identical. The release owner reported their checks complete. Automated EXE smoke remains offscreen and the build is unsigned; see the [validation record](docs/release-validation-6.0.0.md) for coverage and limits.
+
 ## Quick start
 
-**[Download Windows x64 portable v6.0.0-beta.8 (includes EXE, no installation)](https://github.com/wcr20140908/MyScreenDraw/releases/download/v6.0.0-beta.8/MyScreenDraw-v6.0.0-beta.8-windows-x64.zip)**
+**[Download the published Windows x64 portable v6.0.0-beta.8 (preview; includes EXE, no installation)](https://github.com/wcr20140908/MyScreenDraw/releases/download/v6.0.0-beta.8/MyScreenDraw-v6.0.0-beta.8-windows-x64.zip)**
+
+The 6.0.0 candidate is currently local only, with no public download yet. Download and checksum examples below still refer to the published beta.8; update them to verified 6.0.0 assets after publication.
 
 > Do not download GitHub's automatic **Source code (zip)** / **Source code (tar.gz)** assets or **Code → Download ZIP**. Those contain source code, not the runnable application.
 
@@ -79,6 +94,34 @@ The Settings button opens five sections — appearance, interface, drawing, syst
 - **Update channel** lets you choose stable or preview releases
 - **In-app updates** ask before downloading and before installing, and preserve `data/`, `exports/`, settings, autosaves, roster data, and logs
 
+### New classroom preferences in 6.0.0 (local candidate, unreleased)
+
+All three features are in **Settings** on the main toolbar. They are not in the beta.8 download above.
+
+#### Top of Settings: free/open-source and third-party service notice
+
+- A dismissible yellow card explains that MyScreenDraw is free and open source. Paid third-party installation or assistance is not an official project fee; contact that provider about its services. This is not a modal prompt and does not open Settings automatically.
+- No switch is needed: using the record in local `data/config.json`, the card is eligible on the first **three normal launches**, then on a launch whose version differs from the previous launch. This includes upgrades, downgrades, and returning to a previously used version. Launches count even if you never open Settings; reopening Settings does not increment the count.
+- Click **×** at the card's top right to dismiss it for this run only. Reopening Settings keeps it hidden; a later eligible launch can show it again. Hiding to the tray with F12 and restoring is not a new launch. Resetting the local configuration restarts the count.
+
+#### Settings → Drawing: Restore pen after page turn
+
+- **Restore pen after page turn** is **on by default**. After an actual whiteboard page change, if you are using a non-annotation tool such as eraser, selection, or shapes (or are in mouse mode), the next left-button press or touch start restores your last annotation tool and continues handling that same contact. **No second tap is needed; the automatic switch does not discard the first stroke.**
+- The restored tool includes the exact permanent pen style, highlighter, or laser. A restored laser still only points and leaves no permanent ink. An already-active annotation pen is not forcibly switched.
+- Previous/next page, thumbnail navigation, a new page, and deleting the current page to show a surviving page all use this logic; deleting the only page leaves a blank page. Boundary-arrow clicks, choosing the current thumbnail, and deleting another page do not arm a new return.
+- Deliberately selecting a tool after paging (including reselecting the current tool), switching mouse/drawing mode, leaving the whiteboard, or turning this option off cancels the pending return. Opening Settings alone does not cancel it. Mouse passthrough outside the whiteboard is unchanged.
+
+#### Settings → Drawing: Use custom pen defaults
+
+- **Use custom pen defaults** is one global switch, **off by default**, not a switch per pen. When off, the app keeps last-used settings. Turning it off neither deletes presets nor rolls back values already applied to live settings.
+- Use **Pen type** below the switch to select a target. Each of the 11 permanent styles has independent colour, width, speed-to-width, and applicable advanced options, plus nib angle for calligraphy. Highlighter has colour, width, and opacity; laser has colour and width. You can edit and save even while the switch is off.
+- **Edit a preset:** select a pen type, click its colour swatch to open the alpha-aware picker, confirm the colour, then click **Save preset**. The colour code is read-only/copyable; cancelling the picker leaves the draft unchanged. Editing fields or changing the dropdown alone neither saves to configuration nor switches the canvas tool. Missing presets use built-in defaults; they do not automatically capture last-used settings.
+- **Save live settings:** adjust the target pen through its regular settings, select that same type in this editor, and click **Capture current**. This immediately saves the selected type's live settings as its preset and replaces that type's editor draft. It does not capture whichever unrelated tool is active, and no extra Save click is needed.
+- When enabled, presets load during startup settings restoration and when returning from a different tool or pen style. Turning the global switch on also applies the preset immediately if the current tool is an annotation pen. An automatic page-turn return to a different annotation tool follows the same rule. Clicking the already-selected pen again only opens its settings; it does not reload the preset. Presets are not reset on every stroke.
+- **Save preset** and **Capture current** do not themselves apply a preset. To try the saved values, leave the switch on, select another tool/style, and switch back. Temporary edits in regular pen settings never overwrite presets; those live values are replaced only when a preset is applied again. These operations affect future drawing, **not existing ink**.
+
+If an older configuration lacks the new fields, page-turn restoration defaults to on, custom defaults to off, and notice counting starts with the first normal launch. Existing independent pen settings remain. The local package has passed the automated headless gates documented above; visual, real-input, physical-touch and full packaged-upgrade acceptance are still pending.
+
 ## Usage
 
 ### Calibrating the ruler (important)
@@ -106,7 +149,7 @@ Get-FileHash -Algorithm SHA256 .\MyScreenDraw-v6.0.0-beta.8-windows-x64.zip
 
 Compare the hash with the value in the `.sha256` file. Quit the old application through the tray, back up `data/`, `exports/`, and projects saved elsewhere, and extract the entire new ZIP into a new directory. Copy the backed-up data as needed. Do not run two versions against the same data. Autosave is not a version backup.
 
-beta.8 migrates the old shared pen colour, width, and speed-to-width settings into independent per-style profiles. Changing one style no longer changes the others. Older versions may not preserve new pen effects; keep the original projects and data before downgrading.
+Since beta.8, old shared pen colour, width, and speed-to-width settings migrate into independent per-style profiles. 6.0.0 retains this migration. Changing one style no longer changes the others. Older versions may not preserve new pen effects; keep the original projects and data before downgrading.
 
 ## FAQ
 

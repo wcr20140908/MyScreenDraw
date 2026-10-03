@@ -122,15 +122,18 @@ class Beta5SplitUiTests(unittest.TestCase):
         self.assertEqual(tb.y(), logo.y())
         self.assertEqual(tb.x(), logo.x() + logo.width() + toolbar_windows.LOGO_GAP)
 
-    def test_toolbar_flips_above_logo_near_bottom(self):
+    def test_attached_toolbar_keeps_logo_above_near_bottom(self):
         tb, logo = self.panel.toolbar_window, self.panel.logo_window
+        tb.show()
+        logo.show()
+        self.app.processEvents()
         avail = self._avail()
         logo.move(logo.x(), avail.bottom() - logo.height() - 5)
         self.panel._on_logo_dragged(logo.pos())
         self.app.processEvents()
         try:
             self.assertTrue(avail.contains(tb.frameGeometry()), (tb.frameGeometry(), avail))
-            self.assertLess(tb.frameGeometry().bottom(), logo.y())
+            self.assertEqual(tb.y(), logo.y() + logo.height() + toolbar_windows.LOGO_GAP)
         finally:
             logo.move(20, 20)
             self.panel._on_logo_dragged(logo.pos())

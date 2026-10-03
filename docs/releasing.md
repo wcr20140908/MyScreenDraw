@@ -1,6 +1,6 @@
 # 构建与发布 / Building and releasing
 
-当前已发布基线是 **v6.0.0-beta.8 预览版**，不是正式的 6.0.0。本页描述现有构建流程与下一次发布的验收要求；未勾选项不是已完成声明。
+当前发布目标为 **v6.0.0**，本地候选包已重新构建并通过无屏自动化校验，尚未公开发布；现有公开下载仍指向 beta.8。本页描述现有构建流程与本次正式发布的验收要求；未勾选项不是已完成声明。
 
 ## 准备构建
 
@@ -16,33 +16,34 @@ python -m pip install pytest pytest-subtests
 
 ## 脚本实际做什么
 
-1. 校验 `version.py` 与脚本中的版本门禁一致（当前锁定 `6.0.0-beta.8`）。
+1. 校验 `version.py` 与脚本中的版本门禁一致（当前锁定 `6.0.0`）。
 2. 执行离屏 pytest 门禁，排除真实触控层。
-3. 使用 `MyScreenDraw.spec` 生成无控制台、禁用 UPX 的 onedir 包。
+3. 使用 `MyScreenDraw.spec` 生成无控制台、禁用 UPX 的 onedir 包。spec 在依赖分析期间将 System32 放在 PATH 前，避免外部工具的同名系统 DLL（例如不兼容的 ICU）污染产物；分析结束后恢复环境。
 4. 检查许可证、Qt 平台/图片/PDF/SVG 依赖，并拒绝用户数据、截图、源码和运行日志混入。
-5. 执行构建目录中的 `--smoke-ui`，清理验证产生的运行数据。
+5. 执行构建目录中的 `--smoke-ui`，在函数内强制 Qt offscreen 并禁用软键盘启动，异常时也恢复调用方环境；清理验证产生的运行数据。
 6. 写入 `RELEASE-MANIFEST.json`，包含应用版本、EXE SHA-256 和当前 `signature: none` 状态。
-7. 打包 ZIP（排除 `data/`、`exports/`），调用应用更新器的归档校验，再解压并验证 EXE 启动与哈希。
-8. 在仓库根目录写入 ZIP 的 `.sha256` 文件。
+7. 打包 ZIP（排除 `data/`、`exports/`），执行 `release_artifact.py` 归档校验，再比对全部解压文件，并以同样的 offscreen 保护验证 EXE 启动与哈希。
+8. 全部检查通过后，候选 ZIP 才提升为正式文件名，同时保存 `.sha256` 和 `build/release-receipts/` 下的验收收据。收据绑定包、EXE 及打包源码；不是数字签名。
 
-输出为 `dist/MyScreenDraw/`、`MyScreenDraw-v6.0.0-beta.8-windows-x64.zip` 和同名 `.zip.sha256`。ZIP 根目录必须直接包含 `MyScreenDraw.exe`、`_internal/`、许可证和清单；不能额外套一层目录，也不能上传源码 ZIP 冒充便携版。
+成功构建后预期输出为 `dist/MyScreenDraw/`、`MyScreenDraw-v6.0.0-windows-x64.zip` 和同名 `.zip.sha256`。ZIP 根目录必须直接包含 `MyScreenDraw.exe`、`_internal/`、许可证和清单；不能额外套一层目录，也不能上传源码 ZIP 冒充便携版。
 
-构建成功不等于实屏验收通过，也不会自动发布 GitHub Release。
+构建成功不等于实屏验收通过，也不会自动发布 GitHub Release。发布脚本要求干净工作树、指定提交等于 HEAD、远端提交存在，以及源码、清单、校验文件和验收收据一致；不会重写校验文件来认可未经验收的包。源码或构建脚本改变后需要重新打包，验证报告等文档可以在构建后补齐再提交。
 
 ## 下一版本必须同步的文件
 
 - `version.py`：应用版本来源。
 - `version_info.txt`：Windows 数值版本和完整 ProductVersion 字符串。
 - `build.ps1`：硬编码版本门禁。
-- 中英文 README：当前版本、便携下载链接及校验示例。
+- `create_release.ps1`：版本门禁、标签、release notes 路径与 prerelease 标记。
+- 中英文 README：源码版本与发布状态；便携下载链接及校验示例只指向已发布附件。
 - `CHANGELOG.md`、对应版本的 release notes、`SECURITY.md`。
 - 本页及其他描述“当前基线”的维护文档。
 
 不要批量替换历史 release notes 的版本号。预览标签和 GitHub prerelease 标记应一致；正式版不能仍被标为预览。打包产物通过 Release 附件分发，不提交二进制包或用户数据到 Git。
 
-## 正式 6.0.0 发布验收清单
+## 每次正式版发布验收清单
 
-以下为每个最终候选包重新核对的门槛，不代表当前已全部完成：
+以下为每个最终候选包重新核对的验收清单，不代表所有环境均已覆盖。6.0.0 历史证据、待复跑项及未覆盖环境见 [验证记录](release-validation-6.0.0.md)：
 
 - [ ] 冻结功能；不存在已知的数据丢失、核心输入失效、崩溃或严重性能阻塞问题。
 - [ ] [离屏回归](testing.md)通过，逐项解释跳过及未运行的测试。
@@ -56,6 +57,8 @@ python -m pip install pytest pytest-subtests
 - [ ] 确认已知导出限制及未签名状态在用户文档中可见。
 
 ## 发布后验证
+
+发布前先复核 `release-notes-v6.0.0.md` 草稿及验证记录，不能把历史日志或空白待填项写成最终通过。附件发布并核验后，才将 README 的 beta.8 下载/校验示例切换到 6.0.0，更新支持版本表及“未发布”状态。
 
 从 GitHub Release 下载实际附件，不要只检查本地构建目录。比对 ZIP SHA-256，在新目录解压验证启动，确认版本显示、EXE 和 `_internal` 完整。Release 首屏和 README 提供便携 ZIP 直链，并明确 GitHub 自动生成的 Source code 附件不能直接运行。
 

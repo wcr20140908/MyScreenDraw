@@ -690,6 +690,8 @@ class SettingsAppearanceTests(_PanelCase):
         self.panel.settings_panel.repaint()
         self.app.processEvents()
         button = self.panel.btn_check_update  # 设置页内部的按钮
+        self.panel.settings_scroll.ensureWidgetVisible(button)
+        self.app.processEvents()
         host = self.panel.settings_panel
         # 贴着左内边取点：按钮正中是字形，量到的会是文字色而不是底色
         point = button.mapTo(host, QPoint(4, button.height() // 2))

@@ -1,9 +1,27 @@
 # -*- mode: python ; coding: utf-8 -*-
+import os
 from PyInstaller.utils.hooks import collect_submodules
+
+
+def analyze_with_system_dlls(*args, **kwargs):
+    # Qt uses Windows' ICU exports. A foreign tool's same-named icuuc.dll on
+    # PATH can have a different ABI and make an otherwise valid EXE fail early.
+    previous_path = os.environ.get("PATH")
+    try:
+        if os.name == "nt":
+            system_dir = os.path.join(os.environ["SystemRoot"], "System32")
+            os.environ["PATH"] = system_dir + os.pathsep + (previous_path or "")
+        return Analysis(*args, **kwargs)
+    finally:
+        if previous_path is None:
+            os.environ.pop("PATH", None)
+        else:
+            os.environ["PATH"] = previous_path
+
 
 hiddenimports = collect_submodules("pynput")
 
-analysis = Analysis(
+analysis = analyze_with_system_dlls(
     ["main.py"],
     pathex=["."],
     binaries=[],

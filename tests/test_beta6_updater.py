@@ -146,14 +146,16 @@ class Beta6UpdaterTests(unittest.TestCase):
             for name in ('data', 'exports'):
                 (package / name).mkdir()
             build = (ROOT / 'build.ps1').read_text(encoding='utf-8-sig')
-            block = build[build.index('$updateEntries ='):build.index('$previousPlatform =', build.index('$updateEntries ='))]
+            start = build.index('$updateEntries =')
+            end = build.index('\n', build.index('Compress-Archive ', start))
+            block = build[start:end]
             for mutant in (False, True):
                 archive = Path(root) / ('bad.zip' if mutant else 'good.zip')
                 if mutant:
                     # PowerShell 5.1 omits empty directories on this host. Seed a
                     # harmless runtime marker so removing the exclusion is observable.
                     (package / 'data' / 'marker.txt').write_text('runtime')
-                command = "$package = '" + str(package) + "'; $zipPath = '" + str(archive) + "'; "
+                command = "$package = '" + str(package) + "'; $candidateZip = '" + str(archive) + "'; "
                 command += block.replace(" | Where-Object { $_.Name -notin @('data', 'exports') }", '') if mutant else block
                 subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', command], check=True, capture_output=True, timeout=30)
                 if mutant:

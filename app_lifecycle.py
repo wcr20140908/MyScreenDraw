@@ -15,11 +15,13 @@ import os
 import sys
 import json
 import tempfile
+import weakref
 from pathlib import Path
 
-from PyQt6.QtWidgets import QSystemTrayIcon, QMenu, QMessageBox, QWidgetAction, QLabel, QDialog
+from PyQt6.QtWidgets import QSystemTrayIcon, QMenu, QMessageBox, QWidgetAction, QLabel, QDialog, QWidget, QToolTip
 from PyQt6.QtGui import QAction, QIcon, QPainter, QColor, QFont
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, QObject, QEvent
+from PyQt6 import sip
 
 
 class LifecycleState:
@@ -28,6 +30,29 @@ class LifecycleState:
     COLLAPSED = "collapsed"
     HIDDEN = "hidden"
     QUITTING = "quitting"
+
+
+class _BackgroundWindowGuard(QObject):
+    """Catch delayed/new tool windows without intercepting the tray menu."""
+
+    def __init__(self, manager):
+        super().__init__(manager.panel)
+        self._manager_ref = weakref.ref(manager)
+
+    def eventFilter(self, watched, event):
+        # Qt may dispatch events while cyclic Python wrappers are being cleared.
+        # Do not keep the panel/manager alive through a global application filter.
+        manager_ref = getattr(self, "_manager_ref", None)
+        manager = manager_ref() if manager_ref is not None else None
+        if manager is None or manager.state != LifecycleState.HIDDEN or not isinstance(watched, QWidget):
+            return False
+        if (event.type() == QEvent.Type.Close
+                or (event.type() == QEvent.Type.Hide and watched in manager._background_allowed_windows)):
+            manager._forget_closed_window(watched)
+        elif (event.type() == QEvent.Type.Show and watched.isWindow()
+              and manager._owns_window(watched) and not manager._allowed_in_background(watched)):
+            watched.hide()
+        return False
 
 
 class AppLifecycleManager:
@@ -59,6 +84,11 @@ class AppLifecycleManager:
         from PyQt6.QtWidgets import QApplication
         self.app = QApplication.instance()
 
+        self._restore_windows = []
+        self._background_allowed_windows = weakref.WeakSet()
+        self._tool_windows = weakref.WeakSet()
+        self._window_guard = _BackgroundWindowGuard(self)
+        self.app.installEventFilter(self._window_guard)
         self._setup_tray()
 
     def _setup_tray(self):
@@ -227,6 +257,7 @@ class AppLifecycleManager:
             # 后台状态：设置页懒创建后再显示，不恢复主面板。
             if self.panel.settings_panel is None:
                 self.panel.build_settings_panel()
+            self._background_allowed_windows.add(self.panel.settings_panel)
             self.panel.open_settings_panel()
         else:
             # 前台状态：正常打开
@@ -399,12 +430,70 @@ class AppLifecycleManager:
         # 退出应用
         self.app.quit()
 
+    def register_tool_window(self, window):
+        """Track ownership without Qt parenting (native stacking owns the tools)."""
+        self._tool_windows.add(window)
+
+    def _owns_window(self, window):
+        # Tool windows historically have no Qt parent; discover those through
+        # their owning panel as well as normal parent chains (dialogs/popups).
+        if not isinstance(self.panel, QWidget) or sip.isdeleted(self.panel):
+            return False
+        roots = [self.panel] + [value for value in vars(self.panel).values()
+                               if isinstance(value, QWidget) and not sip.isdeleted(value)]
+        roots.extend(tool for tool in self._tool_windows if not sip.isdeleted(tool))
+        current = window
+        while current is not None:
+            if current is self.tray_menu:
+                return False
+            if current in roots:
+                return True
+            current = current.parentWidget()
+        return False
+
+    def _forget_closed_window(self, closed):
+        def belongs(window):
+            return (window is not None and not sip.isdeleted(window)
+                    and (window is closed or closed.isAncestorOf(window)))
+        self._restore_windows = [ref for ref in self._restore_windows if not belongs(ref())]
+        for window in list(self._background_allowed_windows):
+            if belongs(window):
+                self._background_allowed_windows.discard(window)
+
+    def _allowed_in_background(self, window):
+        # Only explicit tray actions may open UI while hidden. In particular,
+        # quit/save confirmation dialogs must not become invisible modal loops.
+        current = window
+        while current is not None:
+            if current in self._background_allowed_windows:
+                return True
+            if self._quit_dialog_showing and isinstance(current, QDialog):
+                return True
+            current = current.parentWidget()
+        return False
+
+    def _owned_windows(self):
+        return [window for window in self.app.topLevelWidgets()
+                if not sip.isdeleted(window) and self._owns_window(window)]
+
+    def _remember_tool_windows(self):
+        # Selection, text editing, menus and thumbnail previews are transient:
+        # switching to safe mouse mode intentionally ends those interactions.
+        managed = [self.panel] + [getattr(self.panel, name, None) for name in (
+            "canvas", "logo_window", "toolbar_window", "page_rail", "menu_panel",
+            "select_panel", "text_panel", "thumbnail_panel", "_name_projection")]
+        self._restore_windows = [weakref.ref(window) for window in self._owned_windows()
+                                 if window.isVisible() and window not in managed
+                                 and window.windowType() not in (Qt.WindowType.Popup, Qt.WindowType.ToolTip)]
+
     def hide_to_background(self):
         """转入后台：隐藏所有窗口，保持托盘图标"""
         if self._quit_dialog_showing or self.state in (LifecycleState.HIDDEN, LifecycleState.QUITTING):
             return
 
         self._state_before_hidden = self.state
+        self._background_allowed_windows.clear()
+        self._remember_tool_windows()
         if hasattr(self.panel, 'canvas') and self.panel.canvas and self.panel.canvas.editing_text_item():
             self.panel.canvas.end_text_edit(discard_empty=True)
 
@@ -416,6 +505,7 @@ class AppLifecycleManager:
 
         # 隐藏所有窗口（包括分体窗口）
         self.panel.close_thumbnail_panel()
+        self.panel._close_name_projection()
         if self.panel.canvas:
             self.panel.canvas.hide()
         self.panel.hide()
@@ -429,6 +519,12 @@ class AppLifecycleManager:
             self.panel.settings_panel.hide()
         # 隐藏所有子菜单
         self.panel.show_only_sub(None)
+
+        # Cover every owned top-level window, including dialogs and tools added
+        # later. The event filter prevents timer callbacks from showing them again.
+        for window in self._owned_windows():
+            window.hide()
+        QToolTip.hideText()
 
         # 隐藏软键盘
         if hasattr(self.panel, '_keyboard_process') and self.panel._keyboard_process:
@@ -450,6 +546,12 @@ class AppLifecycleManager:
         if self._quit_dialog_showing or self.state in (LifecycleState.SHOWING, LifecycleState.QUITTING):
             return
 
+        was_collapsed = (self.state == LifecycleState.HIDDEN
+                         and self._state_before_hidden == LifecycleState.COLLAPSED)
+        self._background_allowed_windows.clear()
+        # Lift the background guard before showing any window or syncing geometry.
+        self.state = LifecycleState.COLLAPSED if was_collapsed else LifecycleState.SHOWING
+
         # 画布也要回来：进后台时把它藏了，不重新显示的话已有批注全部不见，用户要再
         # 点一次绘图模式才「找回」墨迹。此时仍是穿透模式，显示出来不拦点击。
         if hasattr(self.panel, 'canvas') and self.panel.canvas:
@@ -458,7 +560,6 @@ class AppLifecycleManager:
         # 恢复 LOGO；只有进入后台前是完整显示时才恢复工具栏。
         if hasattr(self.panel, 'logo_window') and self.panel.logo_window:
             self.panel.logo_window.show()
-        was_collapsed = self._state_before_hidden == LifecycleState.COLLAPSED
         if hasattr(self.panel, 'toolbar_window') and self.panel.toolbar_window:
             if was_collapsed:
                 self.panel.toolbar_window.hide()
@@ -476,7 +577,18 @@ class AppLifecycleManager:
         # 保持穿透模式，直到用户主动选择绘图工具
         # （防止恢复时误画）
 
-        self.state = LifecycleState.COLLAPSED if was_collapsed else LifecycleState.SHOWING
+        saved_windows, self._restore_windows = self._restore_windows, []
+        # Parents first, then modal/child tool windows, without reopening closed tools.
+        windows = [ref() for ref in saved_windows]
+        windows = [window for window in windows if window is not None and not sip.isdeleted(window)]
+        def depth(window):
+            count = 0
+            while window.parentWidget() is not None:
+                count += 1
+                window = window.parentWidget()
+            return count
+        for window in sorted(windows, key=depth):
+            window.show()
         # hide()/show() 后 Qt 可能把 GWLP_HWNDPARENT 重置，整组窗口重新挂回画布之上
         self.panel._bound_key = None
         if hasattr(self.panel, 'bind_topmost_stack'):

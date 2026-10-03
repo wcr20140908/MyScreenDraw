@@ -7,10 +7,10 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ReleaseMetadataTests(unittest.TestCase):
-    def test_version_is_current_preview(self):
+    def test_version_is_current_stable(self):
         from version import VERSION, APP_VERSION
-        self.assertEqual(VERSION, "6.0.0-beta.8")
-        self.assertEqual(APP_VERSION, "v6.0.0-beta.8")
+        self.assertEqual(VERSION, "6.0.0")
+        self.assertEqual(APP_VERSION, "v6.0.0")
 
     def test_version_info_resource_matches_version_py(self):
         """version_info.txt 里的四处版本必须和 version.py 一致。

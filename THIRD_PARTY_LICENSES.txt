@@ -1,8 +1,9 @@
 # 第三方组件与许可证 / Third-Party Licenses
 
-当前基线：v6.0.0-beta.8（2026-10-02 文档复核）。
+当前基线：v6.0.0 发布准备（2026-10-02 文档复核）；尚未生成正式包，最终分发清单待核对。
 本文件列出主要运行时、传递依赖和构建组件及其许可证；不是所有捆绑文件的完整许可审计。
-This file lists major runtime, transitive, and build dependencies for v6.0.0-beta.8.
+This file lists major runtime, transitive, and build dependencies for the planned v6.0.0 release.
+The final package has not been built; its contents still need verification.
 It is not a complete license audit of every bundled file.
 
 MyScreenDraw 本体采用 **GPL-3.0-or-later**，详见根目录 `LICENSE`。

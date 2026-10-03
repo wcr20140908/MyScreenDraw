@@ -56,7 +56,7 @@ python -m pytest -q --ignore=tests/test_touch_injection.py --ignore=tests/test_m
 
 脚本会清理并重建 `build/` 和 `dist/`，请勿在其中存放用户数据。构建结果位于 `dist/MyScreenDraw/`（PyInstaller onedir）；脚本还会在仓库根目录生成便携 ZIP 和 `.sha256`，不是让用户下载源码归档。
 构建脚本会随包分发 `LICENSE` 与 `THIRD_PARTY_LICENSES.txt`（分发材料的一部分，不替代完整许可复核），
-`MyScreenDraw.spec` 已关闭 UPX 压缩。当前构建门禁锁定 `6.0.0-beta.8`；下一版本须同步版本资源与门禁。完整步骤见 [发布指南](docs/releasing.md)。
+`MyScreenDraw.spec` 已关闭 UPX 压缩。当前构建门禁锁定 `6.0.0`（正式版准备中，尚未打包发布）；版本号同步不等于验证通过。下一版本须同步版本资源与门禁。完整步骤见 [发布指南](docs/releasing.md)。
 
 ---
 

@@ -735,7 +735,7 @@ class ExitWiringTests(unittest.TestCase):
         closeEvent。aboutToQuit 是所有退出路径唯一的共同出口。"""
         import ast
 
-        source = (ROOT / "main.py").read_text(encoding="utf-8")
+        source = (ROOT / "main.py").read_text(encoding="utf-8-sig")
         tree = ast.parse(source)
         wired = False
         for node in ast.walk(tree):

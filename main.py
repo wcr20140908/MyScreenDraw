@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: MyScreenDraw contributors
+﻿# SPDX-FileCopyrightText: MyScreenDraw contributors
 # SPDX-License-Identifier: GPL-3.0-or-later
 # 版本号：见 version.py（唯一来源，代码里统一用 APP_VERSION）
 # 更新日志：
@@ -291,8 +291,12 @@ from i18n import tr, trf, CURRENT
 import eps_export
 from app_lifecycle import AppLifecycleManager, LifecycleState
 import toolbar_windows
+from release_notice import ReleaseNoticeCard, begin_notice_session, normalize_notice_state
+from chalk_texture import make_chalk_texture
+from themed_controls import apply_combo_theme, controls_stylesheet
+from pen_defaults import PenDefaultsEditor, normalize_presets, capture_current, apply_preset
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QLabel, QPushButton,
-                             QToolButton,
+                             QToolButton, QCheckBox,
                              QVBoxLayout, QHBoxLayout, QWidget, QFrame, QGridLayout, QColorDialog, QSlider,
                              QInputDialog, QMessageBox, QMenu, QFileDialog, QLineEdit, QTextEdit, QListWidget,
                              QAbstractItemView, QSizePolicy, QListWidgetItem, QDialog, QDoubleSpinBox,
@@ -541,6 +545,12 @@ def style_texture(style, color, options=None):
     key = (style, color.rgba(), density, grain_alpha)
     image = _TEXTURE_CACHE.get(key)
     if image is not None:
+        return image
+    if style == "chalk":
+        image = make_chalk_texture(color, options["density"], options["opacity"])
+        if len(_TEXTURE_CACHE) > 64:
+            _TEXTURE_CACHE.clear()
+        _TEXTURE_CACHE[key] = image
         return image
     rng = random.Random(sum(ord(ch) for ch in style))   # hash(str) 每次启动随机，不能当种子
     image = QImage(48, 48, QImage.Format.Format_ARGB32_Premultiplied)
@@ -1300,6 +1310,8 @@ def mark_tool_window(window_id):
     工具窗样式，Windows 仍按「无 owner 的可见顶层窗口」给它一个任务栏按钮。
     这里两步都做——补上工具窗样式、去掉应用窗口样式，再调任务栏的删除接口。
     """
+    if QApplication.platformName() == "offscreen":
+        return
     try:
         hwnd = int(window_id)
         if not hwnd:
@@ -1317,35 +1329,74 @@ def mark_tool_window(window_id):
             set_long(ctypes.c_void_p(hwnd), GWL_EXSTYLE, wanted)
         _delete_from_taskbar(hwnd)
     except Exception:
-        pass
+        LOGGER.warning("Taskbar style update failed for HWND=%s", window_id, exc_info=True)
 
 
 def _delete_from_taskbar(hwnd):
-    """通知任务栏把这个窗口的按钮删掉。
+    """Remove a taskbar button through ITaskbarList without changing the window.
 
-    用 ole32/oleaut32 直接调 ITaskbarList::DeleteTab，不依赖第三方 COM 库。
-    失败就放弃，不影响窗口本身。
+    COM belongs to the calling thread: balance our own initialization, but leave
+    an existing different apartment intact. Native failures must not break UI.
     """
+    if not hwnd or QApplication.platformName() == "offscreen":
+        return False
+    initialized = False
+    release = None
+    obj = ctypes.c_void_p()
     try:
         ole32 = ctypes.windll.ole32
-        clsid = (ctypes.c_byte * 16).from_buffer_copy(
-            bytes.fromhex("44fdfd56d06f11d0958a006097c9a090"))
-        iid = (ctypes.c_byte * 16).from_buffer_copy(
-            bytes.fromhex("42fdfd56d06f11d0958a006097c9a090"))
-        obj = ctypes.c_void_p()
+        ole32.CoInitializeEx.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+        ole32.CoInitializeEx.restype = ctypes.c_long
+        ole32.CoUninitialize.argtypes = []
+        ole32.CoUninitialize.restype = None
+        ole32.CoCreateInstance.argtypes = [
+            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_ulong,
+            ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p),
+        ]
+        ole32.CoCreateInstance.restype = ctypes.c_long
+        hr = ole32.CoInitializeEx(None, 2)  # COINIT_APARTMENTTHREADED
+        initialized = hr in (0, 1)  # Both S_OK and S_FALSE require balancing.
+        if hr < 0 and hr != -2147417850:  # RPC_E_CHANGED_MODE can use existing COM.
+            LOGGER.warning("Taskbar CoInitializeEx failed: HRESULT=0x%08X", hr & 0xFFFFFFFF)
+            return False
+        # GUID memory uses little-endian fields and four-byte alignment.
+        clsid = (ctypes.c_uint32 * 4).from_buffer_copy(
+            uuid.UUID("56FDF344-FD6D-11D0-958A-006097C9A090").bytes_le)
+        iid = (ctypes.c_uint32 * 4).from_buffer_copy(
+            uuid.UUID("56FDF342-FD6D-11D0-958A-006097C9A090").bytes_le)
         hr = ole32.CoCreateInstance(ctypes.byref(clsid), None, 1,
-                                     ctypes.byref(iid), ctypes.byref(obj))
+                                    ctypes.byref(iid), ctypes.byref(obj))
         if hr < 0 or not obj:
-            return
+            LOGGER.warning("Taskbar CoCreateInstance failed: HRESULT=0x%08X", hr & 0xFFFFFFFF)
+            return False
         vtable = ctypes.cast(obj, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p)))[0]
+        release = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(vtable[2])
         init = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p)(vtable[3])
         delete = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p)(vtable[5])
-        release = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(vtable[2])
-        if init(obj) >= 0:
-            delete(obj, ctypes.c_void_p(int(hwnd)))
-        release(obj)
+        hr = init(obj)
+        if hr < 0:
+            LOGGER.warning("Taskbar HrInit failed: HRESULT=0x%08X", hr & 0xFFFFFFFF)
+            return False
+        hr = delete(obj, ctypes.c_void_p(int(hwnd)))
+        if hr < 0:
+            LOGGER.warning("Taskbar DeleteTab failed for HWND=%s: HRESULT=0x%08X", hwnd, hr & 0xFFFFFFFF)
+            return False
+        return True
     except Exception:
-        pass
+        LOGGER.warning("Taskbar removal failed for HWND=%s", hwnd, exc_info=True)
+        return False
+    finally:
+        try:
+            if release is not None:
+                release(obj)
+        except Exception:
+            LOGGER.warning("Taskbar interface release failed", exc_info=True)
+        finally:
+            if initialized:
+                try:
+                    ole32.CoUninitialize()
+                except Exception:
+                    LOGGER.warning("Taskbar COM cleanup failed", exc_info=True)
 
 # --- 开机自启：写当前用户的 Run 键 ---
 # 只碰 HKEY_CURRENT_USER，不碰 HKEY_LOCAL_MACHINE：后者需要管理员权限，且会给这台机器
@@ -1648,77 +1699,160 @@ def make_update_batch(zip_path, install_dir):
     text = r'''$ErrorActionPreference = 'Stop'
 $zip = ZIP_LITERAL
 $install = INSTALL_LITERAL
+$scriptRoot = SCRIPT_ROOT_LITERAL
 $work = Join-Path $install ('.msd-update-' + [guid]::NewGuid().ToString('N'))
 $stage = Join-Path $work 'stage'
 $backup = Join-Path $work 'backup'
 $result = Join-Path $install 'data\update-result.json'
-$swapped = $false
+$plan = [Collections.Generic.List[object]]::new()
+$saved = [Collections.Generic.List[object]]::new()
+$landed = [Collections.Generic.List[object]]::new()
 $committed = $false
+function Assert-Path($path, $owner) {
+    $full = [IO.Path]::GetFullPath($path)
+    $prefix = [IO.Path]::GetFullPath($owner).TrimEnd('\') + '\'
+    if (-not $full.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { throw 'path_outside_owner' }
+    for ($cursor = $full; $cursor; $cursor = Split-Path -Parent $cursor) {
+        $item = Get-Item -LiteralPath $cursor -Force -ErrorAction SilentlyContinue
+        if ($item -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'reparse_point' }
+    }
+    return $full
+}
+function Assert-Tree($path) {
+    $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'reparse_point' }
+    if ($item.PSIsContainer) {
+        foreach ($child in @(Get-ChildItem -LiteralPath $path -Force)) { Assert-Tree $child.FullName }
+    }
+}
+function Move-Checked($from, $to, $fromOwner, $toOwner) {
+    $from = Assert-Path $from $fromOwner
+    $to = Assert-Path $to $toOwner
+    Assert-Tree $from
+    if (Test-Path -LiteralPath $to) { throw ('destination_exists: ' + $to) }
+    Move-Item -LiteralPath $from -Destination $to -ErrorAction Stop
+}
+function Remove-Checked($path, $owner) {
+    $path = Assert-Path $path $owner
+    if (Test-Path -LiteralPath $path) {
+        Assert-Tree $path
+        Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop
+    }
+}
+function Plan-Entry($item, $target) {
+    $target = Assert-Path $target $install
+    $existing = Get-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue
+    if ($item.PSIsContainer -and $existing -and $existing.PSIsContainer) {
+        # Merge matching directories; unrelated files inside them are not ours.
+        foreach ($child in @(Get-ChildItem -LiteralPath $item.FullName -Force)) {
+            Plan-Entry $child (Join-Path $target $child.Name)
+        }
+    } else {
+        $relative = $target.Substring($install.TrimEnd('\').Length + 1)
+        $copy = Assert-Path (Join-Path $backup $relative) $backup
+        $plan.Add(@{ source = $item.FullName; target = $target; copy = $copy })
+    }
+}
+function Write-Result($value) {
+    $path = Assert-Path $result $install
+    [IO.Directory]::CreateDirectory((Split-Path -Parent $path)) | Out-Null
+    $value | ConvertTo-Json | Set-Content -LiteralPath $path -Encoding UTF8
+}
 try {
+    $install = Assert-Path $install (Split-Path -Parent $install)
+    Assert-Tree $install
+    $zip = Assert-Path $zip (Split-Path -Parent $zip)
+    $work = Assert-Path $work $install
     for ($i = 0; $i -lt 60; $i++) {
         try { $stream = [IO.File]::Open((Join-Path $install 'MyScreenDraw.exe'), 'Open', 'ReadWrite', 'None'); $stream.Close(); break }
         catch { if ($i -eq 59) { throw 'application_still_running' }; Start-Sleep -Seconds 1 }
     }
-    New-Item -ItemType Directory -Path $stage, $backup -Force | Out-Null
-    Expand-Archive -LiteralPath $zip -DestinationPath $stage -Force
+    $stage = Assert-Path $stage $work
+    $backup = Assert-Path $backup $work
+    [IO.Directory]::CreateDirectory($stage) | Out-Null
+    [IO.Directory]::CreateDirectory($backup) | Out-Null
+    # Expand-Archive resolves DestinationPath as a wildcard path internally.
+    Expand-Archive -LiteralPath $zip -DestinationPath ([Management.Automation.WildcardPattern]::Escape($stage)) -Force
+    Assert-Tree $stage
     $source = $stage
-    if (-not (Test-Path -LiteralPath (Join-Path $source 'MyScreenDraw.exe'))) {
+    if (-not (Test-Path -LiteralPath (Join-Path $source 'MyScreenDraw.exe') -PathType Leaf)) {
         $children = @(Get-ChildItem -LiteralPath $stage -Force)
         if ($children.Count -ne 1 -or -not $children[0].PSIsContainer) { throw 'invalid_archive_layout' }
         $source = $children[0].FullName
     }
-    if (-not (Test-Path -LiteralPath (Join-Path $source 'MyScreenDraw.exe'))) { throw 'missing_application' }
+    if (-not (Test-Path -LiteralPath (Join-Path $source 'MyScreenDraw.exe') -PathType Leaf)) { throw 'missing_application' }
     $incoming = @(Get-ChildItem -LiteralPath $source -Force | Where-Object { $_.Name -notin @('data', 'exports') })
-    if ($incoming.Count -eq 0) { throw 'empty_update' }
-    $old = @(Get-ChildItem -LiteralPath $install -Force | Where-Object {
-        $_.Name -notin @('data', 'exports') -and $_.FullName -ne $work -and $_.Name -notlike '.msd-update-*'
-    })
-    foreach ($item in $old) { Move-Item -LiteralPath $item.FullName -Destination $backup -ErrorAction Stop }
-    $swapped = $true
-    foreach ($item in $incoming) { Move-Item -LiteralPath $item.FullName -Destination $install -ErrorAction Stop }
-    if (-not (Test-Path -LiteralPath (Join-Path $install 'MyScreenDraw.exe'))) { throw 'missing_application' }
-    New-Item -ItemType Directory -Path (Split-Path -Parent $result) -Force | Out-Null
+    foreach ($item in $incoming) {
+        if ($item.Name -like '.msd-update-*') { throw 'reserved_update_path' }
+        Plan-Entry $item (Join-Path $install $item.Name)
+    }
+    foreach ($entry in $plan) {
+        if (Test-Path -LiteralPath $entry.target) {
+            [IO.Directory]::CreateDirectory((Split-Path -Parent $entry.copy)) | Out-Null
+            # Record intent first, including errors reported after a successful move.
+            $saved.Add($entry)
+            Move-Checked $entry.target $entry.copy $install $backup
+        }
+    }
+    foreach ($entry in $plan) {
+        if (Test-Path -LiteralPath $entry.target) { throw ('destination_exists: ' + $entry.target) }
+        $landed.Add($entry)
+        Move-Checked $entry.source $entry.target $stage $install
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $install 'MyScreenDraw.exe') -PathType Leaf)) { throw 'missing_application' }
     Start-Process -FilePath (Join-Path $install 'MyScreenDraw.exe') -WorkingDirectory $install -ErrorAction Stop
-    # Launch is the commit boundary. Never delete the only rollback copy before it.
+    # The user's interactive app may be visible. Launch is the commit boundary.
     $committed = $true
-    @{ status = 'success' } | ConvertTo-Json | Set-Content -LiteralPath $result -Encoding UTF8
-    Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction SilentlyContinue
+    Write-Result @{ status = 'success' }
 } catch {
     $failure = $_.Exception.Message
-    if ($swapped -and -not $committed) {
-        try {
-            Get-ChildItem -LiteralPath $install -Force | Where-Object {
-                $_.Name -notin @('data', 'exports') -and $_.FullName -ne $work -and $_.Name -notlike '.msd-update-*'
-            } | Remove-Item -Recurse -Force -ErrorAction Stop
-            Get-ChildItem -LiteralPath $backup -Force | ForEach-Object {
-                Move-Item -LiteralPath $_.FullName -Destination $install -ErrorAction Stop
+    if (-not $committed) {
+        for ($i = $landed.Count - 1; $i -ge 0; $i--) {
+            try { Remove-Checked $landed[$i].target $install }
+            catch { $failure += '; rollback_failed: ' + $_.Exception.Message }
+        }
+        foreach ($entry in $saved) {
+            # A failed backup move may leave the original untouched; never delete it.
+            if (Test-Path -LiteralPath $entry.copy) {
+                try { Move-Checked $entry.copy $entry.target $backup $install }
+                catch { $failure += '; rollback_failed: ' + $_.Exception.Message }
             }
-        } catch { $failure += '; rollback_failed: ' + $_.Exception.Message }
-    } elseif (-not $committed -and (Test-Path -LiteralPath $backup)) {
-        Get-ChildItem -LiteralPath $backup -Force | ForEach-Object { Move-Item -LiteralPath $_.FullName -Destination $install }
+        }
     }
-    New-Item -ItemType Directory -Path (Split-Path -Parent $result) -Force | Out-Null
-    @{ status = 'failed'; detail = $failure; backup = $backup } | ConvertTo-Json | Set-Content -LiteralPath $result -Encoding UTF8
+    Write-Result @{ status = 'failed'; detail = $failure; backup = $backup }
     exit 1
 } finally {
-    Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue
-    $downloadRoot = Split-Path -Parent $zip
-    if ((Split-Path -Leaf $downloadRoot) -like 'myscreendraw_update_*') {
-        Remove-Item -LiteralPath $downloadRoot -Recurse -Force -ErrorAction SilentlyContinue
+    # Cleanup never discards an uncommitted backup or follows a reparse point.
+    if ($committed) {
+        try { Remove-Checked $backup $work } catch { Write-Warning $_.Exception.Message }
     }
-    Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath (Split-Path -Parent $PSCommandPath) -Force -ErrorAction SilentlyContinue
-    if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue }
-    if ($swapped -and -not (Test-Path -LiteralPath $backup)) {
-        Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+    try { Remove-Checked $stage $work } catch { Write-Warning $_.Exception.Message }
+    try {
+        if ((Test-Path -LiteralPath $work) -and @(Get-ChildItem -LiteralPath $work -Force).Count -eq 0) {
+            Remove-Checked $work $install
+        }
+    } catch { Write-Warning $_.Exception.Message }
+    try { Remove-Checked $zip (Split-Path -Parent $zip) } catch { Write-Warning $_.Exception.Message }
+    try { Remove-Checked $PSCommandPath $scriptRoot } catch { Write-Warning $_.Exception.Message }
+    # Only empty helper/download directories under TEMP, never arbitrary siblings.
+    foreach ($directory in @($scriptRoot, (Split-Path -Parent $zip))) {
+        try {
+            $directory = Assert-Path $directory ([IO.Path]::GetTempPath())
+            if ((Split-Path -Leaf $directory) -match '^myscreendraw_(apply|update)_' -and
+                (Test-Path -LiteralPath $directory) -and @(Get-ChildItem -LiteralPath $directory -Force).Count -eq 0) {
+                Remove-Checked $directory ([IO.Path]::GetTempPath())
+            }
+        } catch { Write-Warning $_.Exception.Message }
     }
 }
-'''.replace('ZIP_LITERAL', literal(zip_path)).replace('INSTALL_LITERAL', literal(install_dir))
+'''.replace('ZIP_LITERAL', literal(zip_path)).replace('INSTALL_LITERAL', literal(install_dir)).replace('SCRIPT_ROOT_LITERAL', literal(root))
     try:
         with open(script, "w", encoding="utf-8-sig") as handle:
             handle.write(text)
     except Exception:
-        shutil.rmtree(root, ignore_errors=True)
+        if os.path.isfile(script):
+            os.remove(script)
+        os.rmdir(root)
         raise
     return script
 
@@ -2931,6 +3065,7 @@ class DrawingCanvas(QMainWindow):
         self.setWindowIcon(QIcon())
         self.is_drawing_mode = True
         self._mouse_passthrough = False
+        self._page_return_pending = False
         self.draw_state = "PEN"
         self.eraser_type = "CIRCLE"
         self.all_segments = []
@@ -3638,12 +3773,41 @@ class DrawingCanvas(QMainWindow):
         self._cancel_smart_recognition(drop_pending=True)  # 退白板：放弃未触发的延迟识别
         self.save_current_page()
         self.whiteboard_mode = False
+        self.cancel_page_pen_return()
         self.setUpdatesEnabled(False)
         self.selected_ids.clear()
         self.reset_history()
         self.setUpdatesEnabled(True)
         track_event("whiteboard_exited", pages=len(self.pages))
         self.update()
+
+    def cancel_page_pen_return(self):
+        if self._page_return_pending:
+            self._page_return_pending = False
+            if self.panel:
+                self.panel.sync_canvas_input_mode()
+
+    def arm_page_pen_return(self):
+        self._page_return_pending = bool(
+            self.whiteboard_mode and self.panel
+            and self.panel.whiteboard_auto_pen
+            and (not self.is_drawing_mode or self.draw_state not in ("PEN", "MARKER", "LASER"))
+        )
+        if self.panel:
+            self.panel.sync_canvas_input_mode()
+
+    def consume_page_pen_return(self):
+        if not self._page_return_pending:
+            return
+        self._page_return_pending = False
+        panel = self.panel
+        if not self.whiteboard_mode or not panel or not panel.whiteboard_auto_pen:
+            if panel:
+                panel.sync_canvas_input_mode()
+            return
+        panel.set_tool(panel.last_annotate_tool, panel.btn_pen)
+        panel.update_annotate_buttons()
+        panel.sync_settings_ui()
 
     def new_page(self):
         self.enter_whiteboard()
@@ -3653,6 +3817,7 @@ class DrawingCanvas(QMainWindow):
         self.current_page = len(self.pages) - 1
         self.load_page(self.pages[self.current_page])
         self.reset_history()
+        self.arm_page_pen_return()
         track_event("whiteboard_page_new", page=self.current_page + 1)
 
     def delete_page(self, index=None):
@@ -3669,6 +3834,7 @@ class DrawingCanvas(QMainWindow):
         self.current_stroke_widths = []
         self.last_point = None
         self.save_current_page()  # Also stops a delayed snapshot before indices change.
+        changed_page = index == self.current_page
         del self.pages[index]
         if not self.pages:
             self.pages = [{"segments": [], "texts": [], "shapes": [], "images": []}]
@@ -3679,6 +3845,8 @@ class DrawingCanvas(QMainWindow):
         self.reset_history()
         if self.panel:
             self.panel.project_dirty = True
+        if changed_page:
+            self.arm_page_pen_return()
         return True
 
     def switch_page(self, offset):
@@ -3692,6 +3860,7 @@ class DrawingCanvas(QMainWindow):
         self.current_page = target
         self.load_page(self.pages[self.current_page])
         self.reset_history()
+        self.arm_page_pen_return()
         track_event("whiteboard_page_changed", page=self.current_page + 1)
 
     def toggle_board_style(self):
@@ -7272,6 +7441,8 @@ class DrawingCanvas(QMainWindow):
         # 正常绘图/选择路径，不要求用户再点一次才能落墨。
         if self.panel and event.button() == Qt.MouseButton.LeftButton:
             self.panel.show_only_sub(None)
+        if event.button() == Qt.MouseButton.LeftButton and not self._touch_synthesized(event):
+            self.consume_page_pen_return()
         if not self.is_drawing_mode: return
         if self._touch_synthesized(event):
             return          # 多指已接管，这是 Windows 为主接触点补发的鼠标消息
@@ -7648,6 +7819,8 @@ class DrawingCanvas(QMainWindow):
         return handled
 
     def _dispatch_touch(self, ev):
+        if ev.type() == QEvent.Type.TouchBegin and ev.points():
+            self.consume_page_pen_return()
         if not self.is_drawing_mode or self.draw_state not in self.TOUCH_TOOLS:
             return False
         if not self.smart_multitouch_enabled:
@@ -8129,6 +8302,7 @@ class ControlPanel(QWidget):
             "button_hover": "#555555",
             "text": "#ffffff",
             "label": "#00cec9",
+            "hint": "#b2bec3",
             "accent": "#00cec9",
             "active_text": "#111111",
             "danger": "#c0392b",
@@ -8143,6 +8317,7 @@ class ControlPanel(QWidget):
             "button_hover": "#cfd8dc",
             "text": "#1f2933",
             "label": "#006d75",
+            "hint": "#52616b",
             # 5.5.0 加深了一档（原 #00a8a8）。accent 在亮色主题里同时充当两种角色：
             # 作背景时上面压白字（ActiveTool/IconBtnActive/按下态/菜单选中），
             # 作文字时打在浅面板上（设置页分区标题、计时器大字、迷你计时器）。
@@ -8175,6 +8350,12 @@ class ControlPanel(QWidget):
         self.ui_opacity = 100           # 百分比；作用于浮窗，不作用于画布（否则墨迹跟着淡）
         self.update_check_enabled = True    # 默认自动检查；下载和安装始终需用户确认
         self.update_channel = "stable"
+        self.whiteboard_auto_pen = True
+        self.pen_defaults_enabled = False
+        self.pen_defaults = normalize_presets(None, PEN_STYLES, PEN_STYLE_OPTIONS)
+        self.notice_state = {"launches": 0, "last_version": ""}
+        self._notice_session_started = False
+        self._notice_visible = False
         self.update_check_timer = QTimer(self)
         self.update_check_timer.setInterval(UPDATE_CHECK_INTERVAL_MS)
         self.update_check_timer.timeout.connect(self.check_for_updates)
@@ -8510,11 +8691,12 @@ class ControlPanel(QWidget):
             QPushButton#RotateBtn:pressed {{ background-color: {t["accent"]}; border-radius: {rad["button"]}px; }}
             QPushButton#IconBtn {{ min-width: {TOUCH_MIN_BUTTON}px; max-width: {TOUCH_MIN_BUTTON}px; min-height: {TOUCH_MIN_BUTTON}px; max-height: {TOUCH_MIN_BUTTON}px; padding: 0px; margin: 1px; }}
             QPushButton#IconBtnActive {{ min-width: {TOUCH_MIN_BUTTON}px; max-width: {TOUCH_MIN_BUTTON}px; min-height: {TOUCH_MIN_BUTTON}px; max-height: {TOUCH_MIN_BUTTON}px; padding: 0px; margin: 1px; background-color: {t["accent"]}; }}
+            QCheckBox {{ color: {t["text"]}; background: transparent; spacing: 6px; padding: 4px 0px; }}
             QLabel {{ color: {t["label"]}; font-size: 11px; padding: 2px; }}
             QLabel#TimerDisplay {{ font-size: 26px; font-weight: bold; color: {t["accent"]}; font-family: Consolas, "Microsoft YaHei"; padding: 2px 6px; }}
             QLabel#MiniTimer {{ background-color: {t["frame"]}; border: 2px solid {t["accent"]}; border-radius: {rad["mini"]}px; font-size: 20px; font-weight: bold; color: {t["accent"]}; font-family: Consolas, "Microsoft YaHei"; padding: 5px 16px; }}
             QLabel#SettingsSection {{ color: {t["accent"]}; font-size: 12px; font-weight: bold; padding: 6px 2px 2px 2px; }}
-            QLabel#SettingsHint {{ color: {t["mode_off"]}; font-size: 10px; padding: 0px 2px 4px 2px; }}
+            QLabel#SettingsHint {{ color: {t["hint"]}; font-size: 10px; padding: 0px 2px 4px 2px; }}
             QMenu {{ background-color: {t["panel"]}; color: {t["text"]}; border: 1.5px solid {t["accent"]}; border-radius: {rad["button"]}px; padding: 4px; }}
             QMenu::item {{ padding: 10px 24px; border-radius: {rad["item"]}px; }}
             QMenu::item:selected {{ background-color: {t["accent"]}; color: {t["active_text"]}; }}
@@ -8540,7 +8722,7 @@ class ControlPanel(QWidget):
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0px; }}
             QListWidget {{ background-color: {t["panel"]}; color: {t["text"]}; border: none; }}
             QColorDialog QPushButton, QColorDialog QLabel {{ font-size: 12px; }}
-        """)
+        """ + controls_stylesheet(t))
         # 子菜单浮窗/选中面板/迷你计时器是独立顶层窗口，主面板的样式表覆盖不到，需各自下发
         for floating in (getattr(self, "menu_panel", None), getattr(self, "select_panel", None),
                          getattr(self, "mini_timer", None), getattr(self, "calc_panel", None),
@@ -8548,6 +8730,10 @@ class ControlPanel(QWidget):
                          getattr(self, "text_panel", None), getattr(self, "settings_panel", None)):
             if floating is not None:
                 floating.setStyleSheet(self.styleSheet())
+        if getattr(self, "pen_defaults_editor", None) is not None:
+            self.pen_defaults_editor.apply_theme(t)
+        if getattr(self, "update_channel_combo", None) is not None:
+            apply_combo_theme(self.update_channel_combo, t)
         # 分体窗口应用主题
         if hasattr(self, 'logo_window') and self.logo_window:
             self.logo_window.apply_theme(t, rad["frame"], int(self.ui_opacity), self._make_logo_icon(32))
@@ -8651,59 +8837,53 @@ class ControlPanel(QWidget):
         self._schedule_split_save()
 
     def _toolbar_slot_next_to_logo(self):
-        """工具栏贴着 LOGO 的落点：竖版在 LOGO 下方、横版在右侧；放不下就翻到另一侧。
+        """Clamp the attached pair as one rectangle, with LOGO above/left.
 
-        竖版贴屏幕底部时工具栏会伸到任务栏下面，横版贴右边时会伸出屏幕——这两种
-        情况都翻面（下→上、右→左）。翻面也放不下时贴在屏幕边缘，由调用方保证
-        LOGO 仍在工具栏上方，这里不再挪动 LOGO。
+        Oversized groups anchor at the available area's origin; do not clamp the
+        toolbar again, which would overlap the LOGO or make the pair oscillate.
         """
         logo = self.logo_window
         toolbar = self.toolbar_window
         area = toolbar_windows._available_rect(logo)
         gap = toolbar_windows.LOGO_GAP
         if self.orientation == "portrait":
-            x = logo.x()
-            below = logo.y() + logo.height() + gap
-            above = logo.y() - gap - toolbar.height()
-            if below + toolbar.height() - 1 <= area.bottom():
-                y = below
-            elif above >= area.top():
-                y = above
-            else:
-                y = below
+            width = max(logo.width(), toolbar.width())
+            height = logo.height() + gap + toolbar.height()
+            dx, dy = 0, logo.height() + gap
         else:
-            y = logo.y()
-            right = logo.x() + logo.width() + gap
-            left = logo.x() - gap - toolbar.width()
-            if right + toolbar.width() - 1 <= area.right():
-                x = right
-            elif left >= area.left():
-                x = left
-            else:
-                x = area.left()
-        x, y = toolbar_windows.clamp_point_into(x, y, toolbar.width(), toolbar.height(), area)
-        return x, y
+            width = logo.width() + gap + toolbar.width()
+            height = max(logo.height(), toolbar.height())
+            dx, dy = logo.width() + gap, 0
+        lx, ly = toolbar_windows.clamp_point_into(logo.x(), logo.y(), width, height, area)
+        return lx + dx, ly + dy
 
     def _reposition_toolbar_next_to_logo(self):
-        """将工具栏定位到LOGO旁边，并保证两个窗口矩形不相交。"""
+        """Position the attached windows together, without independent clamps."""
         if not hasattr(self, 'logo_window') or not self.logo_window:
             return
         if not hasattr(self, 'toolbar_window') or not self.toolbar_window:
             return
 
-        if getattr(self, "_toolbar_detached", False) and self._toolbar_saved_pos:
-            self.toolbar_window.move(*self._toolbar_saved_pos)
-            self.toolbar_window.clamp_into_screen()
+        toolbar = self.toolbar_window
+        logo = self.logo_window
+        if not toolbar.isVisible():
+            return
+        if getattr(self, "_toolbar_detached", False):
+            if self._toolbar_saved_pos:
+                toolbar.move(*self._toolbar_saved_pos)
+            toolbar.clamp_into_screen()
             return
 
         x, y = self._toolbar_slot_next_to_logo()
-        toolbar = self.toolbar_window
-        logo = self.logo_window
+        gap = toolbar_windows.LOGO_GAP
+        if self.orientation == "portrait":
+            lx, ly = x, y - logo.height() - gap
+        else:
+            lx, ly = x - logo.width() - gap, y
+        if (lx, ly) != (logo.x(), logo.y()):
+            logo.move(lx, ly)
         if (x, y) != (toolbar.x(), toolbar.y()):
             toolbar.move(x, y)
-        # 到这里就停。以前发现重叠还会再试两个位置，试完仍重叠就排一个 0ms 定时器
-        # 重来一遍；工具栏比屏幕高时每一次试探的落点都不同，心跳再每拍调用一次，
-        # 两个窗口就以很高的频率上下对调。位置只算一次，重叠留给按钮压矮去解决。
 
     def toggle_toolbar_collapsed(self):
         """LOGO点击：折叠/展开工具栏窗口"""
@@ -9733,7 +9913,9 @@ class ControlPanel(QWidget):
             self._flash_on = False
             self._apply_timer_alert_style()
         # 迷你计时器：计时中或响铃提醒中、且计时子菜单没开着时，顶端居中显示
-        want_mini = ((self.timer_running or self.timer_alerting) and hasattr(self, "mini_timer")
+        lifecycle = getattr(self, "lifecycle", None)
+        foreground = lifecycle is None or lifecycle.state not in (LifecycleState.HIDDEN, LifecycleState.QUITTING)
+        want_mini = (foreground and (self.timer_running or self.timer_alerting) and hasattr(self, "mini_timer")
                      and not self.timer_sub.isVisible() and not getattr(self, "_grabbing", False))
         if want_mini and not self.mini_timer.isVisible():
             self.mini_timer.adjustSize()
@@ -10105,6 +10287,9 @@ class ControlPanel(QWidget):
         return x, y, int(panel_height)
 
     def set_tool(self, state, button):
+        self.canvas.cancel_page_pen_return()
+        if state in ("PEN", "MARKER", "LASER"):
+            self.last_annotate_tool = state
         if not self.canvas.is_drawing_mode:
             self.set_drawing_mode(True)              # 穿透状态下点工具自动回到绘图模式
         if self.canvas.draw_state == state:
@@ -10146,6 +10331,7 @@ class ControlPanel(QWidget):
             self._laser_fade.stop()
         # 立刻改 draw_state，再 update：确保排队的重绘已经按新工具绘制，不再出现上一工具的光标圈。
         self.canvas.draw_state = state
+        self.apply_current_pen_default()
         self.canvas.update()
         self.set_active_tool(button)
         if state == "LASER":
@@ -10221,6 +10407,8 @@ class ControlPanel(QWidget):
             self.canvas.finish_active_ink()
             self.canvas.dash_chain = None
         self.canvas.pen_style = style
+        if not was_same and self.canvas.draw_state == "PEN":
+            self.apply_current_pen_default()
         self.pen_slider.blockSignals(True)
         self.pen_slider.setValue(self.canvas.pen_width)
         self.pen_slider.blockSignals(False)
@@ -10413,6 +10601,7 @@ class ControlPanel(QWidget):
         self.canvas.update()
 
     def handle_eraser_click(self):
+        self.canvas.cancel_page_pen_return()
         self.set_drawing_mode(True)
         if self.canvas.draw_state != "ERASER":
             self.set_tool("ERASER", self.btn_eraser)
@@ -10423,6 +10612,7 @@ class ControlPanel(QWidget):
         self.refresh_ui()
 
     def handle_magnifier_click(self):
+        self.canvas.cancel_page_pen_return()
         self.set_drawing_mode(True)
         if self.canvas.draw_state != "MAGNIFIER":
             self.set_tool("MAGNIFIER", self.btn_tools)
@@ -10436,6 +10626,7 @@ class ControlPanel(QWidget):
         track_event("tool_changed", tool="MAGNIFIER")
 
     def handle_spotlight_click(self):
+        self.canvas.cancel_page_pen_return()
         """演示聚光灯：暗化全屏，只留跟随鼠标的圆形亮区。再次点击即退出。
 
         退出原来只有「画布上右键」和「改点别的工具」两条路。触屏没有右键（系统的
@@ -10454,6 +10645,7 @@ class ControlPanel(QWidget):
         self.refresh_ui()
 
     def handle_select_click(self):
+        self.canvas.cancel_page_pen_return()
         self.set_drawing_mode(True)
         if self.canvas.draw_state != "SELECT":
             self.set_tool("SELECT", self.btn_select)
@@ -10686,12 +10878,22 @@ class ControlPanel(QWidget):
         self.label_w.setText(trf("width_value", value=v))
         track_event("selection_width_changed", width=v, count=len(self.canvas.selected_ids))
 
+    def sync_canvas_input_mode(self):
+        cv = self.canvas
+        if cv is None:
+            return
+        passthrough = not cv.is_drawing_mode and not (cv.whiteboard_mode and cv._page_return_pending)
+        cv.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, passthrough)
+        cv._mouse_passthrough = passthrough
+        set_canvas_passthrough(cv.winId(), passthrough)
+
     def set_drawing_mode(self, enabled):
         cv = self.canvas
         if not cv:
             return
+        cv.cancel_page_pen_return()
         if cv.is_drawing_mode == enabled:
-            set_canvas_passthrough(cv.winId(), not enabled)
+            self.sync_canvas_input_mode()
             self.sync_icon_buttons()
             return
         if not enabled:
@@ -10700,6 +10902,9 @@ class ControlPanel(QWidget):
                 cv.end_text_edit()
             self.close_text_input()
         cv.is_drawing_mode = enabled
+        if enabled:
+            # Mouse mode retains draw_state; resuming it is still pen re-entry.
+            self.apply_current_pen_default()
         if not enabled:
             # 进入穿透模式：彻底隔离交互状态——清空选择、取消未完成图形与延迟识别，
             # 收起选择面板，避免画布在穿透态残留 HUD / 拦截输入。
@@ -10720,10 +10925,8 @@ class ControlPanel(QWidget):
             self.show_only_sub(None)
         # Qt 属性切换不重建顶层 HWND，比 setWindowFlag 稳定；画布句柄保持不变，
         # 白板/批注切换不会触发 Windows 分层窗口重新合成。
-        cv.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, not enabled)
-        cv._mouse_passthrough = not enabled
         cv.show()
-        set_canvas_passthrough(cv.winId(), not enabled)
+        self.sync_canvas_input_mode()
         self.btn_mode.setText(tr("mouse"))
         self.btn_mode.setStyleSheet(f"background-color: {self.theme['mode'] if enabled else self.theme['mode_off']}; color: white;")
         track_event("mode_changed", drawing_mode=enabled)
@@ -10989,13 +11192,14 @@ class ControlPanel(QWidget):
                 getattr(self, "calc_panel", None),
                 getattr(self, "roster_panel", None),
                 getattr(self, "text_panel", None),
+                getattr(self, "settings_panel", None),
                 getattr(self, "toolbar_window", None),
                 getattr(self, "logo_window", None),
             ) if w is not None
         ]
         try:
             owner = int(self.canvas.winId())
-            set_canvas_passthrough(owner, not self.canvas.is_drawing_mode)
+            self.sync_canvas_input_mode()
             panel_hwnd = int(self.winId())
             floating_hwnds = tuple(int(w.winId()) for w in floatings)
             key = (owner, panel_hwnd) + floating_hwnds
@@ -11031,6 +11235,56 @@ class ControlPanel(QWidget):
                 LOGGER.exception("窗口层级更新失败")
 
     # --- 设置页 ---
+    def begin_usage_session(self):
+        """Called exactly once by normal startup; smoke and construction do not count."""
+        if self._notice_session_started:
+            return
+        self._notice_session_started = True
+        self.notice_state, self._notice_visible = begin_notice_session(self.notice_state, APP_VERSION)
+        self.save_settings()
+
+    def dismiss_release_notice(self):
+        self._notice_visible = False
+        if getattr(self, "release_notice", None) is not None:
+            self.release_notice.hide()
+
+    def set_pen_defaults_enabled(self, enabled):
+        self.pen_defaults_enabled = bool(enabled)
+        if enabled and self.canvas.draw_state in ("PEN", "MARKER", "LASER"):
+            self.canvas.finish_active_ink()
+            self.apply_current_pen_default()
+        self.save_settings()
+
+    def save_pen_default(self, key, preset):
+        updated = dict(self.pen_defaults)
+        updated[key] = preset
+        self.pen_defaults = normalize_presets(updated, PEN_STYLES, PEN_STYLE_OPTIONS)
+        self.save_settings()
+
+    def apply_current_pen_default(self):
+        cv = self.canvas
+        if not self.pen_defaults_enabled or cv.draw_state not in ("PEN", "MARKER", "LASER"):
+            return
+        key = cv.pen_style if cv.draw_state == "PEN" else cv.draw_state.lower()
+        apply_preset(cv, key, self.pen_defaults[key], pen_styles=PEN_STYLES, style_options=PEN_STYLE_OPTIONS)
+        for slider, value in ((self.pen_slider, cv.pen_width), (self.nib_slider, cv.calligraphy_angle),
+                              (self.marker_width_slider, cv.marker_width),
+                              (self.marker_alpha_slider, round(cv.marker_alpha * 100 / 255)),
+                              (self.laser_width_slider, cv.laser_width)):
+            slider.blockSignals(True)
+            slider.setValue(int(value))
+            slider.blockSignals(False)
+        self.marker_alpha_label.setText(trf("opacity_value", value=self.marker_alpha_slider.value()))
+        self.marker_width_label.setText(trf("width_value", value=cv.marker_width))
+        self.update_pen_style_controls()
+        self.sync_settings_ui()
+
+    def set_whiteboard_auto_pen(self, enabled):
+        self.whiteboard_auto_pen = bool(enabled)
+        if not enabled and self.canvas:
+            self.canvas.cancel_page_pen_return()
+        self.save_settings()
+
     def open_settings_panel(self):
         """打开设置面板（懒建）。"""
         self.show_only_sub(None)
@@ -11145,6 +11399,13 @@ class ControlPanel(QWidget):
             label.setWordWrap(True)
             form.addWidget(label)
 
+        self.release_notice = ReleaseNoticeCard(
+            tr("release_notice_title"), tr("release_notice_message"),
+            theme_name=self.theme_name, close_text=tr("close"))
+        self.release_notice.dismissed.connect(self.dismiss_release_notice)
+        self.release_notice.setVisible(self._notice_visible)
+        form.addWidget(self.release_notice)
+
         # ---------- 外观 ----------
         section("settings_appearance")
         form.addWidget(self.btn_theme)          # 主题按钮从主栏搬到这里
@@ -11181,6 +11442,11 @@ class ControlPanel(QWidget):
 
         # ---------- 绘制 ----------
         section("settings_drawing")
+        self.auto_pen_checkbox = QCheckBox(tr("page_pen_return"))
+        self.auto_pen_checkbox.setChecked(self.whiteboard_auto_pen)
+        self.auto_pen_checkbox.toggled.connect(self.set_whiteboard_auto_pen)
+        form.addWidget(self.auto_pen_checkbox)
+        hint(tr("page_pen_return_hint"))
         self.btn_settings_smart = QPushButton(tr("smart_shapes_on"))
         self.btn_settings_smart.clicked.connect(self.toggle_smart_shapes)
         form.addWidget(self.btn_settings_smart)
@@ -11190,6 +11456,16 @@ class ControlPanel(QWidget):
         self.btn_settings_speed_width = QPushButton(tr("speed_width_on"))
         self.btn_settings_speed_width.clicked.connect(self.toggle_speed_width)
         form.addWidget(self.btn_settings_speed_width)
+        self.pen_defaults_checkbox = QCheckBox(tr("pen_defaults_enabled"))
+        self.pen_defaults_checkbox.setChecked(self.pen_defaults_enabled)
+        self.pen_defaults_checkbox.toggled.connect(self.set_pen_defaults_enabled)
+        form.addWidget(self.pen_defaults_checkbox)
+        hint(tr("pen_defaults_hint"))
+        self.pen_defaults_editor = PenDefaultsEditor(
+            PEN_STYLES, PEN_STYLE_OPTIONS, self.pen_defaults, self.canvas, translate=tr)
+        self.pen_defaults_editor.preset_saved.connect(self.save_pen_default)
+        self.pen_defaults_editor.current_captured.connect(self.save_pen_default)
+        form.addWidget(self.pen_defaults_editor)
 
         # ---------- 系统 ----------
         section("settings_system")
@@ -11260,6 +11536,14 @@ class ControlPanel(QWidget):
                 button.setObjectName(want)
                 button.setStyle(button.style())
 
+        self.release_notice.set_theme(self.theme_name)
+        self.release_notice.setVisible(self._notice_visible)
+        self.auto_pen_checkbox.blockSignals(True)
+        self.auto_pen_checkbox.setChecked(self.whiteboard_auto_pen)
+        self.auto_pen_checkbox.blockSignals(False)
+        self.pen_defaults_checkbox.blockSignals(True)
+        self.pen_defaults_checkbox.setChecked(self.pen_defaults_enabled)
+        self.pen_defaults_checkbox.blockSignals(False)
         # UI模式已统一为图标式，不再需要同步UI模式按钮状态
         mark(self.btn_orient_portrait, self.orientation == "portrait")
         mark(self.btn_orient_landscape, self.orientation == "landscape")
@@ -11601,6 +11885,7 @@ class ControlPanel(QWidget):
         """
         order = [
             getattr(self, "text_panel", None),
+            getattr(self, "settings_panel", None),
             getattr(self, "select_panel", None),
             getattr(self, "menu_panel", None),
             getattr(self, "calc_panel", None),
@@ -11738,6 +12023,8 @@ class ControlPanel(QWidget):
             return
         if bind_owner:
             set_window_owner(hwnd, owner)
+            # show() can recreate a taskbar button even when the HWND is reused.
+            mark_tool_window(hwnd)
         # 先把整条链审一遍（画布该在天花板之下、链序该对），再把这扇窗放到链顶之上。
         # 不能像以前那样 force_topmost(画布)：那会把画布推到置顶层最顶端、压住
         # ClassIsland，要等下一拍心跳才拉回来——课表条就闪一下。
@@ -11856,6 +12143,11 @@ class ControlPanel(QWidget):
             return {}
         tool = cv.draw_state if cv.draw_state in self.TOOL_STATES else "PEN"
         return {
+            "notice_state": normalize_notice_state(self.notice_state),
+            "whiteboard_auto_pen": bool(self.whiteboard_auto_pen),
+            "pen_defaults_enabled": bool(self.pen_defaults_enabled),
+            "pen_defaults": normalize_presets(self.pen_defaults, PEN_STYLES, PEN_STYLE_OPTIONS),
+            "last_annotate_tool": self.last_annotate_tool,
             "theme": self.theme_name,
             "pen_color": cv.pen_color.name(),
             "pen_width": int(cv.pen_width),
@@ -11968,7 +12260,7 @@ class ControlPanel(QWidget):
             "TEXT": self.btn_text,
             "SHAPE": self.btn_shape,
         }
-        if state not in mapping:
+        if not isinstance(state, str) or state not in mapping:
             state = "PEN"
         self.canvas.draw_state = state
         self.set_active_tool(mapping[state])
@@ -12050,8 +12342,14 @@ class ControlPanel(QWidget):
         except Exception as e:
             track_event("config_load_error", error=str(e))
 
+        self.notice_state = normalize_notice_state(settings.get("notice_state"))
+        self.whiteboard_auto_pen = settings.get("whiteboard_auto_pen") if isinstance(settings.get("whiteboard_auto_pen"), bool) else True
+        self.pen_defaults_enabled = settings.get("pen_defaults_enabled") if isinstance(settings.get("pen_defaults_enabled"), bool) else False
+        self.pen_defaults = normalize_presets(settings.get("pen_defaults"), PEN_STYLES, PEN_STYLE_OPTIONS)
+        remembered = settings.get("last_annotate_tool")
+        self.last_annotate_tool = remembered if remembered in ("PEN", "MARKER", "LASER") else "PEN"
         try:
-            if settings.get("theme") in self.THEMES and settings["theme"] != self.theme_name:
+            if isinstance(settings.get("theme"), str) and settings["theme"] in self.THEMES and settings["theme"] != self.theme_name:
                 self.theme_name = settings["theme"]
                 self.theme = self.THEMES[self.theme_name]
                 self.apply_theme()
@@ -12093,7 +12391,7 @@ class ControlPanel(QWidget):
             self.update_pen_style_controls()
             if settings.get("eraser_type") in ("CIRCLE", "STROKE"):
                 self.set_eraser_type(settings["eraser_type"])
-            cv.eraser_size = max(1, min(200, int(settings.get("eraser_size", cv.eraser_size))))
+            cv.eraser_size = int(_coerce_bounded_float(settings.get("eraser_size"), cv.eraser_size, 1, 200))
             self.e_slider.blockSignals(True)
             self.e_slider.setValue(cv.eraser_size)
             self.e_slider.blockSignals(False)
@@ -12101,14 +12399,14 @@ class ControlPanel(QWidget):
             marker_color = QColor(str(settings.get("marker_color", cv.marker_color.name())))
             if marker_color.isValid():
                 cv.marker_color = marker_color
-            alpha_pct = max(10, min(90, int(settings.get("marker_alpha_pct", 35))))
+            alpha_pct = int(_coerce_bounded_float(settings.get("marker_alpha_pct"), 35, 10, 90))
             self.marker_alpha_slider.blockSignals(True)
             self.marker_alpha_slider.setValue(alpha_pct)
             self.marker_alpha_slider.blockSignals(False)
             cv.marker_alpha = max(10, min(255, round(alpha_pct * 255 / 100)))
             if hasattr(self, "marker_alpha_label"):
                 self.marker_alpha_label.setText(trf("opacity_value", value=alpha_pct))
-            cv.marker_width = max(1, min(80, int(settings.get("marker_width", cv.marker_width))))
+            cv.marker_width = int(_coerce_bounded_float(settings.get("marker_width"), cv.marker_width, 1, 80))
             self.marker_width_slider.blockSignals(True)
             self.marker_width_slider.setValue(cv.marker_width)
             self.marker_width_slider.blockSignals(False)
@@ -12120,15 +12418,15 @@ class ControlPanel(QWidget):
             laser_color = QColor(str(settings.get("laser_color", cv.laser_color.name())))
             if laser_color.isValid():
                 cv.laser_color = laser_color
-            cv.laser_width = max(6, min(40, int(settings.get("laser_width", cv.laser_width))))
+            cv.laser_width = int(_coerce_bounded_float(settings.get("laser_width"), cv.laser_width, 6, 40))
             if hasattr(self, "laser_width_slider"):
                 self.laser_width_slider.blockSignals(True)
                 self.laser_width_slider.setValue(cv.laser_width)
                 self.laser_width_slider.blockSignals(False)
 
-            zoom = float(settings.get("magnifier_zoom", cv.magnifier_zoom))
+            zoom = _coerce_bounded_float(settings.get("magnifier_zoom"), cv.magnifier_zoom, cv.MAGNIFIER_ZOOM_MIN, cv.MAGNIFIER_ZOOM_MAX)
             cv.magnifier_zoom = max(cv.MAGNIFIER_ZOOM_MIN, min(cv.MAGNIFIER_ZOOM_MAX, zoom))
-            cv.magnifier_size = max(80, min(600, int(settings.get("magnifier_size", cv.magnifier_size))))
+            cv.magnifier_size = int(_coerce_bounded_float(settings.get("magnifier_size"), cv.magnifier_size, 80, 600))
             self.mag_size_slider.blockSignals(True)
             self.mag_size_slider.setValue(cv.magnifier_size)
             self.mag_size_slider.blockSignals(False)
@@ -12224,6 +12522,9 @@ class ControlPanel(QWidget):
             else:
                 self.update_check_timer.stop()
 
+            self.apply_current_pen_default()
+            if getattr(self, "pen_defaults_editor", None) is not None:
+                self.pen_defaults_editor.set_presets(self.pen_defaults)
             self.sync_settings_ui()
             track_event("settings_loaded", tool=cv.draw_state, theme=self.theme_name)
         except Exception as e:
@@ -12853,7 +13154,10 @@ class ControlPanel(QWidget):
 
     # --- 计算器 ---
     def _make_tool_window(self, title_text):
+        # Native owner/stacking is managed separately; Qt parenting changes text
+        # focus/activation. Register before any delayed callback can show a tool.
         win = QWidget()
+        self.lifecycle.register_tool_window(win)
         win.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
         win.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         win.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
@@ -13489,8 +13793,11 @@ class ControlPanel(QWidget):
 
     def _show_name_projection(self, name):
         """把抽中的名字以大字全屏投影展示片刻（自动消失；点击/按键可立即关闭）。"""
+        if self.lifecycle.state in (LifecycleState.HIDDEN, LifecycleState.QUITTING):
+            return
         if self._name_projection is None:
             win = QWidget()
+            self.lifecycle.register_tool_window(win)
             win.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
             win.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
             win.setStyleSheet("background-color: #111;")
@@ -13901,6 +14208,7 @@ if __name__ == "__main__":
         sys.exit(0)
     pnl.apply_theme()
     pnl.load_settings()
+    pnl.begin_usage_session()
     app.aboutToQuit.connect(pnl.save_settings)
     # 退出必须顺带收走软键盘。挂在 aboutToQuit 上而不是某个窗口的 closeEvent：
     # 退出有多条路（F12 全局热键 → exit_requested → QApplication.quit、面板的退出

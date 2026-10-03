@@ -17,7 +17,7 @@ os.environ.pop("QT_QPA_PLATFORM", None)
 
 from PyQt6.QtCore import Qt, QRect, QTimer, qInstallMessageHandler
 from PyQt6.QtGui import QCursor
-from PyQt6.QtWidgets import QApplication, QMessageBox
+from PyQt6.QtWidgets import QApplication, QMessageBox, QCheckBox, QStyle, QStyleOptionButton
 
 from _grab import save_png
 from zorder_probe import visible_zorder
@@ -114,6 +114,14 @@ def click_logical(lx, ly):
 
 
 def click_button(button):
+    if isinstance(button, QCheckBox):
+        # QCheckBox only accepts its indicator/text, not the whole layout width.
+        option = QStyleOptionButton()
+        button.initStyleOption(option)
+        indicator = button.style().subElementRect(QStyle.SubElement.SE_CheckBoxIndicator, option, button)
+        center = button.mapToGlobal(indicator.center())
+        click_logical(center.x(), center.y())
+        return
     # 按钮的样式最小宽度有时比所在窗口还宽，几何中心会落在窗口外、点不到。
     # 取按钮和它顶层窗口的交集，点交集的中心。
     top = button.window().frameGeometry()
@@ -213,8 +221,9 @@ def run(app, panel, canvas):
     check("page rail is visible at the bottom right", rail.isVisible())
     check("page rail shows the page count", panel.rail_count.text() == "1/1", panel.rail_count.text())
     check("page rail sits in the bottom right",
-          rail.frameGeometry().right() > toolbar.frameGeometry().right()
-          and rail.frameGeometry().bottom() > toolbar.frameGeometry().bottom())
+          rail.frameGeometry().right() > QApplication.primaryScreen().availableGeometry().center().x()
+          and rail.frameGeometry().bottom() > QApplication.primaryScreen().availableGeometry().center().y()
+          and QApplication.primaryScreen().availableGeometry().contains(rail.frameGeometry()))
     check("whiteboard entry does not rebuild canvas", hwnd(canvas) == canvas_hwnd_before,
           f"before={canvas_hwnd_before} after={hwnd(canvas)}")
     check("whiteboard logo and toolbar do not overlap",
@@ -240,7 +249,12 @@ def run(app, panel, canvas):
           mouse_updates <= 3 and annotation_updates <= 3,
           f"mouse={mouse_updates} annotation={annotation_updates}")
 
-    stroke = []
+    # Isolate sampling density from prior user preferences / preset exercises.
+    panel.choose_pen_style("pen")
+    panel.show_only_sub(None)
+    canvas.pen_width = 4
+    canvas._stroke_style = "pen"
+    canvas.all_segments.clear()
     canvas.last_point = None
     canvas.current_stroke_id = 1
     canvas.current_stroke_widths = []

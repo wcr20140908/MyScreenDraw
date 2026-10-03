@@ -123,6 +123,8 @@ class LogoWindow(QWidget):
                     delta = event.globalPosition().toPoint() - self._press_pos
                     if not self._dragging and (abs(delta.x()) > 5 or abs(delta.y()) > 5):
                         self._dragging = True
+                        # The drag consumes release, so cancel QPushButton press state now.
+                        self.logo_btn.setDown(False)
 
                     if self._dragging:
                         new_pos = event.globalPosition().toPoint() - self._drag_offset
@@ -141,6 +143,7 @@ class LogoWindow(QWidget):
 
                     # 如果在拖动，阻止按钮的点击事件
                     if was_dragging:
+                        self.logo_btn.setDown(False)
                         return True
 
         return super().eventFilter(obj, event)
