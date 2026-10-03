@@ -39,7 +39,7 @@ python -m pip install pytest pytest-subtests
 - `CHANGELOG.md`、对应版本的 release notes、`SECURITY.md`。
 - 本页及其他描述“当前基线”的维护文档。
 
-不要批量替换历史 release notes 的版本号。预览标签和 GitHub prerelease 标记应一致；正式版不能仍被标为预览。打包产物通过 Release 附件分发，不提交二进制包或用户数据到 Git。
+不要批量替换历史 release notes 的版本号。预览标签和 GitHub prerelease 标记应一致；正式版不能仍被标为预览。打包产物通过 Release 附件分发，不提交二进制包或用户数据到 Git。仓库只保留当前正式版的 release notes：2026-10-03 已删除 v6.0.0-beta.1 至 beta.8 的说明文件，历史记录见 `CHANGELOG.md`，旧预览附件仍留在 GitHub Release。
 
 ## 每次正式版发布验收清单
 
@@ -58,7 +58,7 @@ python -m pip install pytest pytest-subtests
 
 ## 发布后验证
 
-发布前先复核 `release-notes-v6.0.0.md` 草稿及验证记录，不能把历史日志或空白待填项写成最终通过。附件发布并核验后，才将 README 的 beta.8 下载/校验示例切换到 6.0.0，更新支持版本表及“未发布”状态。
+每次发布前先复核 `release-notes-v6.0.0.md` 草稿及验证记录，不能把历史日志或空白待填项写成最终通过。6.0.0 已完成该步骤：附件发布并核验后，中英文 README 的下载/校验示例已切换到 6.0.0，支持版本表及“未发布”状态也已更新。
 
 从 GitHub Release 下载实际附件，不要只检查本地构建目录。比对 ZIP SHA-256，在新目录解压验证启动，确认版本显示、EXE 和 `_internal` 完整。Release 首屏和 README 提供便携 ZIP 直链，并明确 GitHub 自动生成的 Source code 附件不能直接运行。
 

@@ -2,7 +2,7 @@
 
 > Original implementation split: at most two authorized workers with disjoint file ownership, plus parent integration. The user permits subagents; this is a work split, not evidence that agents or checks ran. Preserve existing unrelated work.
 
-**Goal:** Prepare the approved three preferences together with settings/LOGO fixes for stable 6.0.0. The stable package has not been built or published.
+**Goal:** Prepare the approved three preferences together with settings/LOGO fixes for stable 6.0.0. **Status (updated 2026-10-03): built and published.** The stable ZIP and SHA-256 assets are public and hash-verified; the implementation, documentation and publication tasks below are closed.
 
 **Current pass (2026-10-03): documentation only.** Reconcile the source and
 [approved design](2026-10-03-classroom-preferences-design.md), preserving prior edits.
@@ -16,12 +16,12 @@ The write allowlist is exactly:
 - [this implementation plan](2026-10-03-classroom-preferences.md)
 - [the design plan](2026-10-03-classroom-preferences-design.md)
 
-Read `main.py`, `pen_defaults.py`, and `release_notice.py` for behaviour; do not edit
-code, scripts, tests, or validation reports. Only document/link/strict UTF-8 and diff
-checks run in this pass. No test execution, GUI, build, commit, push, or publication.
-Keep beta.8 download/checksum examples until real stable assets are published and
-verified. The tasks below retain the implementation/release roadmap; file ownership
-there is not an extension of this pass's allowlist or a claim of completed testing.
+Read `main.py`, `pen_defaults.py`, and `release_notice.py` for behaviour. That pass was
+documentation-only: code, scripts, tests, and validation reports were not edited, and
+only document/link/strict UTF-8 and diff checks ran. The stable assets have since been
+published and verified, so the beta.8 download/checksum examples were replaced by 6.0.0
+links. The tasks below retain the implementation/release roadmap; file ownership
+there is not a claim of completed testing.
 
 ### Source alignment checklist
 
@@ -75,7 +75,7 @@ Files: tests/real_release_acceptance.py, build.ps1, create_release.ps1, release 
 ### Task 5: documentation alignment (current pass)
 Files: only the seven paths in the allowlist above.
 1. Explain operation locations, defaults, saving/application timing, and cancellation/compatibility boundaries in both READMEs and stable release notes.
-2. Update the changelog, module/state ownership, and both plans without removing prior settings/LOGO fixes or beta.8 preparation links.
+2. Update the changelog, module/state ownership, and both plans without removing prior settings/LOGO fixes or the beta.8 migration notes.
 3. Check strict UTF-8, relative links/anchors, and scoped diff/whitespace; confirm files outside the allowlist are unchanged. Do not run metadata tests or rewrite validation reports.
 4. Report exactly which documents changed, which checks ran, and the untested/unpublished status.
 

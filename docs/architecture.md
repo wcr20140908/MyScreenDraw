@@ -1,9 +1,9 @@
 # Architecture and maintenance boundaries
 
-This document describes the **v6.0.0 source under release preparation**, reviewed
+This document describes the **released v6.0.0 source**, reviewed
 on 2026-10-03; it does not establish final-package acceptance. MyScreenDraw is a
 Windows desktop application built with Python and PyQt6. Packaging targets a
-PyInstaller onedir Windows x64 build; 6.0.0 has not yet been packaged or published.
+PyInstaller onedir Windows x64 build; 6.0.0 has been packaged and published.
 
 ## Modules
 

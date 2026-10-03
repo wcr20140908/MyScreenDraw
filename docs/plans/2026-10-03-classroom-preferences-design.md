@@ -2,7 +2,7 @@
 
 Approved by the user on 2026-10-03. This expands the pending stable release; it does not authorize a language rewrite or broad main.py refactor.
 
-**Status:** source behaviour reconciled with `main.py`, `pen_defaults.py`, and `release_notice.py` on 2026-10-03. Stable 6.0.0 is still unpublished and not yet packaged. This documentation pass does not run tests, start a GUI, build, commit, push, or publish. Existing validation records are not changed.
+**Status:** source behaviour reconciled with `main.py`, `pen_defaults.py`, and `release_notice.py` on 2026-10-03. Stable 6.0.0 has since been packaged and published. That documentation pass did not run tests, start a GUI, build, commit, push, or publish, and existing validation records were not changed by it.
 
 ## Behaviour
 
@@ -91,9 +91,10 @@ Physical hardware, multi-machine, and long-soak limitations must be stated separ
 record failures and interruptions as well as successes in the existing validation
 workflow when that work is authorized.
 
-This pass is limited to the seven named documentation files in the
+That pass was limited to the seven named documentation files in the
 [implementation plan](2026-10-03-classroom-preferences.md), with UTF-8, link, and diff
-checks only. Keep the beta.8 download entry and stable-release preparation wording.
+checks only. It is closed: the stable release is published, so the beta.8 download
+entry and stable-release preparation wording have been replaced by 6.0.0 links.
 No code, scripts, tests, or validation reports may change; no GUI, commit, push, or
 release is authorized here. Build/publish and the original optional discussion of
 modularization versus C/C#/C++ remain separate future work, not a language migration.
