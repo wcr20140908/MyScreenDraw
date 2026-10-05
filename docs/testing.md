@@ -69,10 +69,10 @@ Windows 注入测试不等于实际触控设备测试。最终候选版还须在
 
 本轮收尾不查看图片或视频、不截图、不进行桌面操作。`test_build_smoke.py` 仅抽取 PowerShell 冒烟函数并模拟进程，覆盖启动失败、非零退出、超时、句柄清理失败与环境恢复；不启动真实 EXE。实际本地构建结果及跳过原因见 [6.0.0 验证记录](release-validation-6.0.0.md)。
 
-整包升级使用显式运行的隔离验收脚本（不会由 pytest 自动收集）：
+整包升级使用显式运行的隔离验收脚本（不会由 pytest 自动收集）。旧预览包已从 GitHub Release 删除，请从保留的正式版 Release 下载旧包。以下以 v5.5.1 升级到 v6.0.0 为执行示例，不表示该版本组合已经通过验收：
 
 ```powershell
-python tests/verify_portable_upgrade.py MyScreenDraw-v6.0.0-beta.8-windows-x64.zip MyScreenDraw-v6.0.0-windows-x64.zip .git/release-validation/portable-upgrade
+python tests/verify_portable_upgrade.py MyScreenDraw-v5.5.1-windows-x64.zip MyScreenDraw-v6.0.0-windows-x64.zip .git/release-validation/portable-upgrade
 ```
 
 最后一个参数必须指向尚未使用的证据目录。脚本会启动实际旧、新 EXE，使用带中文、空格、方括号的隔离安装目录，执行真实更新事务，检查偏好、合成用户文件及重启计数。退出使用定向到测试进程的 Windows 消息；这不替代托盘退出交互验收。子进程 PATH 移除 Python，只证明随包运行库可用，不等于已在另一台未安装 Python 的机器验收。截图和原始日志保留在 `.git/`，不提交。

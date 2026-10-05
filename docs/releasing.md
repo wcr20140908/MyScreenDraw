@@ -39,7 +39,7 @@ python -m pip install pytest pytest-subtests
 - `CHANGELOG.md`、对应版本的 release notes、`SECURITY.md`。
 - 本页及其他描述“当前基线”的维护文档。
 
-不要批量替换历史 release notes 的版本号。预览标签和 GitHub prerelease 标记应一致；正式版不能仍被标为预览。打包产物通过 Release 附件分发，不提交二进制包或用户数据到 Git。仓库只保留当前正式版的 release notes：2026-10-03 已删除 v6.0.0-beta.1 至 beta.8 的说明文件，历史记录见 `CHANGELOG.md`，旧预览附件仍留在 GitHub Release。
+不要批量替换历史 release notes 的版本号。预览标签和 GitHub prerelease 标记应一致；正式版不能仍被标为预览。打包产物通过 Release 附件分发，不提交二进制包或用户数据到 Git。仓库主分支只保留当前正式版的 release notes：2026-10-03 已删除 v6.0.0-beta.1 至 beta.8 的说明文件。2026-10-05 已删除 GitHub 上全部 7 个预览版 Release（v5.0.0-beta.1、v6.0.0-beta.3 至 beta.8），包括发布说明、便携包和校验附件；正式版 Release、Git 标签及提交历史保留。历史变更见 `CHANGELOG.md`。
 
 ## 每次正式版发布验收清单
 
