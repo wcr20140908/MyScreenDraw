@@ -98,7 +98,7 @@ try {
     $env:QT_QPA_PLATFORM = $previousPlatform
 }
 if ($testsExit -ne 0) {
-    throw "Tests failed; refusing to build a release package"
+    throw "Tests failed (exit code $testsExit); refusing to build a release package"
 }
 python -m PyInstaller --noconfirm --clean MyScreenDraw.spec
 if ($LASTEXITCODE -ne 0) {

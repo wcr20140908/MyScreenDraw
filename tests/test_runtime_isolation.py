@@ -40,3 +40,38 @@ def test_real_settings_writer_uses_isolated_config(monkeypatch):
             config.unlink(missing_ok=True)
         else:
             config.write_bytes(previous)
+
+
+def test_session_teardown_deletes_widgets_before_interpreter_shutdown():
+    import os
+    import subprocess
+    import sys
+    script = r"""
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path.cwd() / 'tests'))
+from PyQt6.QtWidgets import QApplication, QWidget, QProgressBar
+from PyQt6.QtCore import QTimer
+from PyQt6 import sip
+from conftest import _dispose_offscreen_widgets
+app = QApplication([])
+retained = []
+for _ in range(12):
+    parent = QWidget()
+    progress = QProgressBar(parent)
+    progress.setRange(0, 0)
+    timer = QTimer(parent)
+    timer.start(100)
+    retained.append((parent, progress, timer))
+_dispose_offscreen_widgets(app)
+assert all(sip.isdeleted(value) for tree in retained for value in tree)
+assert QApplication.instance() is app
+assert not sip.isdeleted(app)
+print('Qt widget trees disposed before shutdown')
+"""
+    environment = dict(os.environ, QT_QPA_PLATFORM="offscreen", MYSCREENDRAW_NO_KEYBOARD="1")
+    for _ in range(3):
+        result = subprocess.run([sys.executable, "-c", script], cwd=Path(__file__).resolve().parents[1],
+                                env=environment, capture_output=True, timeout=30)
+        assert result.returncode == 0, (result.returncode, result.stderr)
+        assert b"disposed before shutdown" in result.stdout

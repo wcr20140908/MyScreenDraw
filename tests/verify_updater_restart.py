@@ -19,7 +19,7 @@ import zipfile
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 os.environ['MYSCREENDRAW_NO_KEYBOARD'] = '1'
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from main import make_update_batch, validate_update_zip
+from main import make_update_batch, validate_update_zip, autostart_enabled
 
 
 def sha(path):
@@ -63,6 +63,9 @@ def stop_owned(exe):
 
 
 def execute(old_zip, new_zip, version, evidence):
+    # Normal startup heals enabled autostart paths; never touch a user's entry.
+    if autostart_enabled():
+        raise RuntimeError("Use an isolated Windows profile without a MyScreenDraw autostart entry")
     evidence = evidence.resolve()
     if evidence.exists():
         raise ValueError('Evidence directory must be new; never overwrite an installation')

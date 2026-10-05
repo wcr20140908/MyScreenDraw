@@ -6,6 +6,37 @@ from pathlib import Path
 import pytest
 
 
+def _dispose_offscreen_widgets(app):
+    """Dispose Qt trees while Python/SIP and isolated runtime paths are alive."""
+    import gc
+    import main
+    from PyQt6 import sip
+    from PyQt6.QtCore import QCoreApplication, QEvent, QTimer
+
+    windows = list(app.topLevelWidgets())
+    for window in windows:
+        if sip.isdeleted(window):
+            continue
+        for timer in window.findChildren(QTimer):
+            timer.stop()
+        if isinstance(window, main.ControlPanel):
+            window.stop_update_worker()
+            listener = getattr(window, "listener", None)
+            if listener is not None:
+                listener.stop()
+                try:
+                    listener.join(timeout=1)
+                except RuntimeError:
+                    pass  # A constructor may not have started the listener.
+        # closeEvent may prompt or hide to tray: deferred deletion is non-interactive.
+        window.hide()
+        window.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    windows.clear()
+    gc.collect()
+    assert not app.topLevelWidgets(), "Offscreen test windows survived session teardown"
+
+
 @pytest.fixture(scope="session", autouse=True)
 def isolated_offscreen_runtime(tmp_path_factory):
     if os.environ.get("QT_QPA_PLATFORM", "").split(":", 1)[0] != "offscreen":
@@ -33,4 +64,10 @@ def isolated_offscreen_runtime(tmp_path_factory):
     with pytest.MonkeyPatch.context() as patch:
         for name, path in paths.items():
             patch.setattr(main, name, str(path))
-        yield
+        from PyQt6.QtWidgets import QApplication
+        # Test classes retain widget/app references; own one app for the session.
+        app = QApplication.instance() or QApplication([])
+        try:
+            yield
+        finally:
+            _dispose_offscreen_widgets(app)
