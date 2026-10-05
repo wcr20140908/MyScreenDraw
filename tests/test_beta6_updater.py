@@ -122,7 +122,7 @@ class Beta6UpdaterTests(unittest.TestCase):
                 try:
                     if mutant:
                         text = Path(script).read_text(encoding='utf-8-sig')
-                        text = text.replace("    Start-Process -FilePath", "    Remove-Item -LiteralPath $backup -Recurse -Force\n    Start-Process -FilePath")
+                        text = text.replace("    $launched = @([Diagnostics.Process]::Start($startInfo))", "    Remove-Item -LiteralPath $backup -Recurse -Force\n    $launched = @([Diagnostics.Process]::Start($startInfo))")
                         Path(script).write_text(text, encoding='utf-8-sig')
                     run = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', script], capture_output=True, timeout=30)
                     self.assertNotEqual(run.returncode, 0)

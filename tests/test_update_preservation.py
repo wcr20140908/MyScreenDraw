@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Real PowerShell file transactions, not EXE startup/real-package evidence.
 
-Only tiny temporary fixtures are used. The generated script's single Start-Process
+Only tiny temporary fixtures are used. The generated script's single Process.Start call
 is replaced with a log marker; no application or desktop UI is launched. Faults
 wrap native Move-Item, including real FileShare.None locks, rather than mocking
 Python's updater result. Run on Windows: python -m pytest tests/test_update_preservation.py -q
@@ -58,7 +58,7 @@ def transaction(tmp_path, monkeypatch, request):
         script = Path(main.make_update_batch(str(archive), str(install)))
     assert script.resolve().is_relative_to(tmp_path.resolve())
     text = script.read_text(encoding="utf-8-sig")
-    calls = re.findall(r"(?m)^    Start-Process -FilePath.*$", text)
+    calls = re.findall(r"(?m)^    \$launched = @\(\[Diagnostics\.Process\]::Start\(\$startInfo\)\)$", text)
     assert len(calls) == 1, "The test must replace exactly one interactive application launch"
     marker = "    Set-Content -LiteralPath (Join-Path $install 'launch-marker.txt') -Value 'transaction-only'"
     text = text.replace(calls[0], marker)
@@ -386,3 +386,30 @@ def test_alive_but_unready_restart_retains_backup_without_rollback(transaction):
     assert (install / "MyScreenDraw.exe").read_bytes() == payload["MyScreenDraw.exe"]
     assert (Path(result["backup"]) / "MyScreenDraw.exe").read_bytes() == old["MyScreenDraw.exe"]
     assert_files(install, private)
+
+
+def test_real_process_launch_accepts_unicode_space_bracket_install_path(tmp_path, monkeypatch):
+    import shutil
+    # Console utility, no GUI. No running user application or desktop is touched.
+    install = tmp_path / "portable [literal] 教室's"
+    install.mkdir()
+    (install / "MyScreenDraw.exe").write_bytes(b"old fixture")
+    (install / "data").mkdir()
+    (install / "data/config.json").write_bytes(b"private")
+    utility = Path(os.environ["SystemRoot"]) / "System32/where.exe"
+    archive = tmp_path / "update.zip"
+    with zipfile.ZipFile(archive, "w") as package:
+        package.write(utility, "MyScreenDraw.exe")
+    original_mkdtemp = tempfile.mkdtemp
+    with monkeypatch.context() as patch:
+        patch.setattr(main.tempfile, "mkdtemp", lambda **kw: original_mkdtemp(dir=tmp_path, **kw))
+        script = Path(main.make_update_batch(str(archive), str(install)))
+    assert script.resolve().is_relative_to(tmp_path.resolve())
+    process = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                              "-File", str(script)], capture_output=True, timeout=30,
+                             creationflags=subprocess.CREATE_NO_WINDOW)
+    result = json.loads((install / "data/update-result.json").read_text(encoding="utf-8-sig"))
+    assert process.returncode == 0, (result, process.stderr)
+    assert result["status"] == "success"
+    assert (install / "MyScreenDraw.exe").read_bytes() == utility.read_bytes()
+    assert (install / "data/config.json").read_bytes() == b"private"

@@ -1887,7 +1887,14 @@ try {
     $env:PYINSTALLER_RESET_ENVIRONMENT = '1'
     if ($version) { $env:MYSCREENDRAW_UPDATE_READY = $ready }
     Write-Result @{ status = 'starting'; version = $version }
-    Start-Process -FilePath (Join-Path $install 'MyScreenDraw.exe') -WorkingDirectory $install -ErrorAction Stop -PassThru -OutVariable launched | Out-Null
+    # PowerShell 5.1 Start-Process may resolve bracket paths as wildcards.
+    # CreateProcess via .NET treats both executable and working directory literally.
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = Join-Path $install 'MyScreenDraw.exe'
+    $startInfo.WorkingDirectory = $install
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $launched = @([Diagnostics.Process]::Start($startInfo))
     if ($version) {
         $confirmed = $false
         for ($i = 0; $i -lt 80; $i++) {

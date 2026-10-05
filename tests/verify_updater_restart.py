@@ -99,12 +99,13 @@ def execute(old_zip, new_zip, version, evidence):
     script = make_update_batch(str(copy), str(install), version='v' + version, owner_pid=None)
     started = time.monotonic()
     try:
-        run = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden',
-                              '-ExecutionPolicy', 'Bypass', '-File', script], env=env,
-                             capture_output=True, timeout=120, creationflags=subprocess.CREATE_NO_WINDOW)
-        (evidence / 'transaction.stdout').write_bytes(run.stdout)
-        (evidence / 'transaction.stderr').write_bytes(run.stderr)
-        assert run.returncode == 0, run.stderr.decode(errors='replace')
+        # File handles, not PIPE: the intentionally long-lived restarted process
+        # can inherit stdout/stderr, so communicate() must not wait for its EOF.
+        with (evidence / 'transaction.stdout').open('wb') as stdout, (evidence / 'transaction.stderr').open('wb') as stderr:
+            run = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden',
+                                  '-ExecutionPolicy', 'Bypass', '-File', script], env=env,
+                                 stdout=stdout, stderr=stderr, timeout=120, creationflags=subprocess.CREATE_NO_WINDOW)
+        assert run.returncode == 0, (evidence / 'transaction.stderr').read_text(errors='replace')
         def started_new_version():
             try:
                 data = json.loads(config.read_text(encoding='utf-8'))
