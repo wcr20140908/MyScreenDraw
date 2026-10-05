@@ -1685,21 +1685,41 @@ def validate_update_zip(path):
         return len(infos)
 
 
-def make_update_batch(zip_path, install_dir):
+def install_layout_supported(install_dir=None):
+    """应用内安装只支持便携版目录：没有 exe 就没有可锁定、可重启的程序。
+
+    源码目录（python main.py）满足不了这个前提。旧代码把「目录里没有 exe」和
+    「exe 被占用」混在同一个 60 秒文件锁循环里，结果是应用已经正常退出、脚本还在
+    空等一分钟，最后报 application_still_running 回滚——用户看到的就是
+    「重启不起来、版本也没升级」（见 data/update-result.json）。
+    """
+    target = APP_DIR if install_dir is None else install_dir
+    return os.path.isfile(os.path.join(target, "MyScreenDraw.exe"))
+
+
+def make_update_batch(zip_path, install_dir, version="", owner_pid=None):
     """Write a detached PowerShell transaction; never interpolate user paths as code."""
-    if not os.path.isfile(zip_path) or not os.path.isfile(os.path.join(install_dir, "MyScreenDraw.exe")):
+    if not os.path.isfile(zip_path):
         # Keep generation pure and testable; the detached transaction performs final checks.
-        if not os.path.isfile(zip_path):
-            raise ValueError("invalid_update_path")
+        raise ValueError("invalid_update_path")
+    if not os.path.isfile(os.path.join(install_dir, "MyScreenDraw.exe")):
+        raise ValueError("install_dir_incomplete")
     root = tempfile.mkdtemp(prefix="myscreendraw_apply_")
     script = os.path.join(root, "apply.ps1")
     def literal(path):
         return "[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + base64.b64encode(os.fsencode(os.path.abspath(path))).decode("ascii") + "'))"
+    # 旧进程 PID 只作为整数参与「等它退出/替它收尾」，不参与任何路径拼接。
+    try:
+        owner_pid_literal = str(int(owner_pid)) if owner_pid is not None else "0"
+    except (TypeError, ValueError):
+        owner_pid_literal = "0"
     # Staging and backup remain on the same volume as the installation for atomic file moves.
     text = r'''$ErrorActionPreference = 'Stop'
 $zip = ZIP_LITERAL
 $install = INSTALL_LITERAL
 $scriptRoot = SCRIPT_ROOT_LITERAL
+$ownerPid = OWNER_PID_LITERAL
+$version = VERSION_LITERAL
 $work = Join-Path $install ('.msd-update-' + [guid]::NewGuid().ToString('N'))
 $stage = Join-Path $work 'stage'
 $backup = Join-Path $work 'backup'
@@ -1763,9 +1783,36 @@ try {
     Assert-Tree $install
     $zip = Assert-Path $zip (Split-Path -Parent $zip)
     $work = Assert-Path $work $install
-    for ($i = 0; $i -lt 60; $i++) {
-        try { $stream = [IO.File]::Open((Join-Path $install 'MyScreenDraw.exe'), 'Open', 'ReadWrite', 'None'); $stream.Close(); break }
-        catch { if ($i -eq 59) { throw 'application_still_running' }; Start-Sleep -Seconds 1 }
+    # 旧进程必须先走。按 PID 等，不再用文件锁去猜「它还在不在」——文件锁探测分不清
+    # 「程序还在运行」和「这个目录里根本没有 MyScreenDraw.exe」，后者会空等 60 秒再报
+    # application_still_running，而那时应用早已退出，用户只看到版本没升级。
+    if ($ownerPid -gt 0) {
+        for ($i = 0; $i -lt 40; $i++) {
+            if (-not (Get-Process -Id $ownerPid -ErrorAction SilentlyContinue)) { break }
+            Start-Sleep -Milliseconds 500
+        }
+        # 应用已经走过保存确认并主动交棒；它挂住了就替它收尾，别让整个更新跟着一起挂。
+        $owner = Get-Process -Id $ownerPid -ErrorAction SilentlyContinue
+        if ($owner) {
+            $ownerPath = ''
+            try { $ownerPath = [string]$owner.Path } catch { $ownerPath = '' }
+            # 只收自己人：PID 可能已经被系统回收给别的进程了。
+            $owned = $ownerPath -and (
+                $ownerPath.StartsWith($install.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase) -or
+                (Split-Path -Leaf $ownerPath) -like 'python*')
+            if (-not $owned) { throw 'application_still_running' }
+            Stop-Process -Id $ownerPid -Force -ErrorAction Stop
+            for ($i = 0; $i -lt 20; $i++) {
+                if (-not (Get-Process -Id $ownerPid -ErrorAction SilentlyContinue)) { break }
+                Start-Sleep -Milliseconds 250
+            }
+        }
+    }
+    $installedExe = Join-Path $install 'MyScreenDraw.exe'
+    if (-not (Test-Path -LiteralPath $installedExe -PathType Leaf)) { throw 'install_dir_incomplete' }
+    for ($i = 0; $i -lt 40; $i++) {
+        try { $stream = [IO.File]::Open($installedExe, 'Open', 'ReadWrite', 'None'); $stream.Close(); break }
+        catch [IO.IOException] { if ($i -eq 39) { throw 'application_still_running' }; Start-Sleep -Milliseconds 500 }
     }
     $stage = Assert-Path $stage $work
     $backup = Assert-Path $backup $work
@@ -1803,7 +1850,8 @@ try {
     Start-Process -FilePath (Join-Path $install 'MyScreenDraw.exe') -WorkingDirectory $install -ErrorAction Stop
     # The user's interactive app may be visible. Launch is the commit boundary.
     $committed = $true
-    Write-Result @{ status = 'success' }
+    # 带上落地版本：下次启动要据此确认「已升级到 vX」，而不是含糊的「已是最新版本」。
+    Write-Result @{ status = 'success'; version = $version }
 } catch {
     $failure = $_.Exception.Message
     if (-not $committed) {
@@ -1845,7 +1893,7 @@ try {
         } catch { Write-Warning $_.Exception.Message }
     }
 }
-'''.replace('ZIP_LITERAL', literal(zip_path)).replace('INSTALL_LITERAL', literal(install_dir)).replace('SCRIPT_ROOT_LITERAL', literal(root))
+'''.replace('ZIP_LITERAL', literal(zip_path)).replace('INSTALL_LITERAL', literal(install_dir)).replace('SCRIPT_ROOT_LITERAL', literal(root)).replace('OWNER_PID_LITERAL', owner_pid_literal).replace('VERSION_LITERAL', literal(str(version or "")))
     try:
         with open(script, "w", encoding="utf-8-sig") as handle:
             handle.write(text)
