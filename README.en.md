@@ -11,11 +11,34 @@ MyScreenDraw is a fullscreen annotation / whiteboard / math-teaching tool built 
 - **Random name picker, timer, presentation spotlight, calculator** — a whole lesson without switching apps
 - **No account; drawings, rosters and logs are not uploaded**. Automatic update checks are enabled by default and can be disabled in Settings. Downloads and installation each require separate confirmation; neither happens silently
 
-Current version **v6.0.0** (Windows x64 portable release available). The UI follows the system language in 8 languages: English, 中文, Français, Español, Deutsch, Русский, 한국어, 日本語.
+Current version **v6.0.1** (source bugfix candidate; unpublished. The downloadable stable release remains v6.0.0). The UI follows the system language in 8 languages: English, 中文, Français, Español, Deutsch, Русский, 한국어, 日本語.
 
 > Product screenshots are not included in the public release yet; the current local captures contain development-environment details and must not be committed to GitHub.
 
-## New features and fixes in 6.0.0
+## 6.0.1 bugfix candidate (unpublished; validation pending)
+
+The updater is still being revised in source. These are planned fixes and acceptance requirements, not claims of completed implementation or passing tests:
+
+- Keep download state separate from release-check state; provide percentage/byte progress and cancellation. Show percentages only when the total size is known and trustworthy. With an unknown total, show bytes received and indeterminate progress, never an invented percentage.
+- Refuse in-app overwrite installation into a source checkout. Portable installation must pass the target version and old process PID, and safely wait for that process to exit before replacing application files.
+- Verify the installed target version and restart outcome; roll back application files on failure while preserving `data/`, `exports/`, settings, rosters, logs, and autosaves. Rollback is not a guarantee of recovery after power, permission, or disk failures.
+
+Implementation, full regression, final EXE, and public-asset verification are pending. See the [6.0.1 validation placeholder](docs/release-validation-6.0.1.md) and [candidate release notes](release-notes-v6.0.1.md). The 6.0.0 test counts below are historical evidence only, not 6.0.1 results.
+
+### Moving from 6.0.0: use a new directory, not its in-app updater
+
+**The running 6.0.0 updater has download/installation defects of its own. A new 6.0.1 package cannot retroactively repair update code executing in the old process. Do not rely on the 6.0.0 in-app updater for this upgrade.**
+
+Use these steps **after the official stable 6.0.1 Release has been published and verified**. Until then, download links remain on the published 6.0.0 assets; there are no speculative 6.0.1 asset links here.
+
+1. Download the **6.0.1 Windows x64 portable ZIP** and matching `.zip.sha256` from the official repository's stable Release. Verify SHA-256; do not choose Source code archives.
+2. Extract the entire ZIP into a new, empty directory, such as `D:\Apps\MyScreenDraw-6.0.1`. Do not overwrite the old installation or a source checkout, and do not launch the new EXE yet.
+3. Save your work, exit the old app through its tray menu, handle any save confirmation, and confirm the old `MyScreenDraw.exe` process has ended. F12 or hiding to the tray is not an exit.
+4. Back up the old `data/`, `exports/`, and projects saved elsewhere. Then copy `data/` and `exports/` into the new directory. Never overwrite private settings, rosters, autosaves, or logs with package defaults or sample files. If the destination already contains user files, back up both sets and resolve conflicts individually, not by overwriting whole folders. Keep the old directory and backups for recovery.
+5. Point desktop, Start menu, and taskbar shortcuts to the new `MyScreenDraw.exe`. If Start with Windows is enabled, check and update that path too so it does not launch the old app.
+6. Launch only the new EXE, confirm **v6.0.1**, check settings, projects, and exports, then fully exit and restart to verify. Never run both versions against the same data.
+
+## Historical features and fixes in 6.0.0 (released)
 
 These changes are included in the stable 6.0.0 portable release. The older beta.8 assets do not include these new features or fixes.
 
@@ -29,6 +52,8 @@ These changes are included in the stable 6.0.0 portable release. The older beta.
 - Pre-release offscreen regression: 1296 passed, 7 skipped, and 1184 subtests passed; the actual configuration stayed byte-identical. The release owner reported their checks complete. Automated EXE smoke remains offscreen and the build is unsigned; see the [validation record](docs/release-validation-6.0.0.md) for coverage and limits.
 
 ## Quick start
+
+These links and checksum examples still refer to published **6.0.0** assets, without the 6.0.1 candidate fixes. They will change only after 6.0.1 assets are published and verified.
 
 **[Download Windows x64 portable v6.0.0 (stable; includes EXE, no installation)](https://github.com/wcr20140908/MyScreenDraw/releases/download/v6.0.0/MyScreenDraw-v6.0.0-windows-x64.zip)**
 
@@ -174,10 +199,10 @@ A: Yes, since v5.2.0. The pen and highlighter accept several contacts at once �
 
 - **Drawings, rosters and logs are not uploaded**. Update checks retrieve public release metadata.
 - **Update checks**: The current version enables them for new installations (since beta.7) and respects an existing disabled setting. Choose stable or preview releases. A 24-hour timer starts when settings load; the first automatic check is about 24 hours later, not immediately at startup. You can also click **Check now**. Checks contact GitHub's release API (`api.github.com/repos/wcr20140908/MyScreenDraw/releases?per_page=30`). Automatic results only notify you; they never start a download or installation.
-  - Downloads stay inside the application and run in a background thread
+  - The existing design downloads in a background thread; see the known 6.0.0 download/installation defects and manual migration steps above, rather than assuming its updater works
   - The app asks before downloading and asks again before installing
   - ZIP validation rejects path traversal, symlinks, duplicate entries, oversized archives, excessive member counts, and archives missing `MyScreenDraw.exe`
-  - Installation skips `data/`, `exports/`, settings, roster data, logs, and autosaves
+  - Installation must preserve `data/`, `exports/`, settings, roster data, logs, and autosaves; preservation and failure rollback in 6.0.1 still require validation, and backups remain necessary
   - For offline use, disable update checks and do not download updates; strictly isolated environments should block network access before the first launch
 - **Start with Windows** (new in v5.5.0, off by default): when enabled, the app writes one value named `MyScreenDraw` under `HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run`, holding the path used to launch it. Turning the switch off deletes that value. Current user only — it never touches `HKEY_LOCAL_MACHINE`, needs no administrator rights, and this switch does not modify other registry entries.
 - The local log (`data/events.jsonl`) may include file names — check it before sharing

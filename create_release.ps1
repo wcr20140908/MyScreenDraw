@@ -6,7 +6,7 @@ $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location -LiteralPath $root
 $repo = 'wcr20140908/MyScreenDraw'
 $version = (& python -c "from version import VERSION; print(VERSION)").Trim()
-if ($LASTEXITCODE -ne 0 -or $version -ne '6.0.0') { throw 'Unexpected release version' }
+if ($LASTEXITCODE -ne 0 -or $version -ne '6.0.1') { throw 'Unexpected release version' }
 $tag = "v$version"
 $asset = "MyScreenDraw-$tag-windows-x64.zip"
 $assetPath = Join-Path $root $asset

@@ -292,3 +292,97 @@ def test_install_root_junction_is_rejected(transaction):
         if alias.exists():
             assert alias.absolute().is_relative_to(install.parent.absolute())
             os.rmdir(alias)  # Remove only the junction, never the referenced tree.
+
+
+@pytest.mark.parametrize("mismatch", ["version", "hash"])
+def test_verified_update_rejects_wrong_version_or_executable_hash(transaction, mismatch):
+    import hashlib
+    install, _, old, private, payload, package, run = transaction
+    manifest = {"app_version": "6.0.1", "sha256": hashlib.sha256(payload["MyScreenDraw.exe"]).hexdigest()}
+    if mismatch == "version":
+        manifest["app_version"] = "6.0.0"
+    else:
+        manifest["sha256"] = "0" * 64
+    payload["RELEASE-MANIFEST.json"] = json.dumps(manifest).encode()
+    package()
+    def require_version(text):
+        return re.sub(r"(?m)^\$version = .*$", "$version = 'v6.0.1'", text)
+    process, result = run(transform=require_version)
+    assert process.returncode != 0
+    assert result["status"] == "failed"
+    assert "mismatch" in result["detail"]
+    assert_files(install, {**old, **private})
+    assert not (install / "launch-marker.txt").exists()
+
+
+def test_transaction_version_is_not_encoded_as_a_filesystem_path(tmp_path):
+    import base64
+    from main import make_update_batch
+    install = tmp_path / "install"
+    install.mkdir()
+    (install / "MyScreenDraw.exe").write_bytes(b"old")
+    archive = tmp_path / "update.zip"
+    archive.write_bytes(b"placeholder")
+    script = Path(make_update_batch(str(archive), str(install), version="v6.0.1", owner_pid=123456789))
+    try:
+        text = script.read_text(encoding="utf-8-sig")
+        expression = next(line for line in text.splitlines() if line.startswith("$version = "))
+        encoded = re.search(r"FromBase64String\('([^']*)'\)", expression).group(1)
+        assert base64.b64decode(encoded).decode("utf-8") == "v6.0.1"
+        assert "$ownerPid = 123456789" in text
+        assert "Stop-Process" not in text  # Never kill a reused PID or arbitrary Python process.
+        assert "PYINSTALLER_RESET_ENVIRONMENT" in text
+    finally:
+        script.unlink()
+        script.parent.rmdir()
+
+
+@pytest.mark.parametrize("early_exit", [False, True])
+def test_verified_version_restart_commits_or_rolls_back(transaction, early_exit):
+    import hashlib
+    install, _, old, private, payload, package, run = transaction
+    payload["RELEASE-MANIFEST.json"] = json.dumps({
+        "app_version": "6.0.1",
+        "sha256": hashlib.sha256(payload["MyScreenDraw.exe"]).hexdigest(),
+    }).encode()
+    package()
+    def simulate_startup(text):
+        text = re.sub(r"(?m)^\$version = .*$", "$version = 'v6.0.1'", text)
+        marker = "    Set-Content -LiteralPath (Join-Path $install 'launch-marker.txt') -Value 'transaction-only'"
+        returns = "$true" if early_exit else "$false"
+        mock_process = "\n    $launched = @([pscustomobject]@{HasExited=" + returns + "})"
+        if not early_exit:
+            mock_process += ("\n    @{version=$version; executable=(Join-Path $install 'MyScreenDraw.exe')} | "
+                             "ConvertTo-Json | Set-Content -LiteralPath $ready -Encoding UTF8")
+        return text.replace(marker, marker + mock_process)
+    process, result = run(transform=simulate_startup)
+    assert_files(install, private)
+    if early_exit:
+        assert process.returncode != 0
+        assert result["status"] == "failed"
+        assert "updated_application_exited_early" in result["detail"]
+        assert_files(install, old)
+    else:
+        assert process.returncode == 0, (result, process.stderr)
+        assert result == {"status": "success", "version": "v6.0.1"}
+        assert (install / "MyScreenDraw.exe").read_bytes() == payload["MyScreenDraw.exe"]
+
+
+def test_alive_but_unready_restart_retains_backup_without_rollback(transaction):
+    import hashlib
+    install, _, old, private, payload, package, run = transaction
+    payload["RELEASE-MANIFEST.json"] = json.dumps({
+        "app_version": "6.0.1", "sha256": hashlib.sha256(payload["MyScreenDraw.exe"]).hexdigest(),
+    }).encode()
+    package()
+    def unready(text):
+        text = re.sub(r"(?m)^\$version = .*$", "$version = 'v6.0.1'", text)
+        marker = "    Set-Content -LiteralPath (Join-Path $install 'launch-marker.txt') -Value 'transaction-only'"
+        return text.replace(marker, marker + "\n    $launched = @([pscustomobject]@{HasExited=$false})").replace("$i -lt 80", "$i -lt 2")
+    process, result = run(transform=unready)
+    assert process.returncode != 0
+    assert result["status"] == "failed"
+    assert "restart_unconfirmed_backup_retained" in result["detail"]
+    assert (install / "MyScreenDraw.exe").read_bytes() == payload["MyScreenDraw.exe"]
+    assert (Path(result["backup"]) / "MyScreenDraw.exe").read_bytes() == old["MyScreenDraw.exe"]
+    assert_files(install, private)

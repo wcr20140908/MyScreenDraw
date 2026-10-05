@@ -508,7 +508,11 @@ class UpdateCheckTests(_PanelCase):
                     z.writestr('MyScreenDraw.exe', b'fake')
                 panel.project_dirty = True
                 panel._update_install_handoff = False
+                panel._downloading_release = {"tag": "v6.0.1"}
+                (Path(root) / 'MyScreenDraw.exe').write_bytes(b'old portable fixture')
                 with patch.object(self.main.QMessageBox, 'exec', return_value=choice), \
+                        patch.object(self.main.sys, 'frozen', True, create=True), \
+                        patch.object(self.main, 'APP_DIR', root), \
                         patch.object(panel, 'save_project', return_value=saved) as save, \
                         patch.object(panel, 'save_settings'), \
                         patch.object(self.main, 'make_update_batch', return_value=str(Path(root) / 'apply.ps1')), \

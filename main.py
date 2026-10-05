@@ -300,7 +300,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QLabel, QPushButton,
                              QVBoxLayout, QHBoxLayout, QWidget, QFrame, QGridLayout, QColorDialog, QSlider,
                              QInputDialog, QMessageBox, QMenu, QFileDialog, QLineEdit, QTextEdit, QListWidget,
                              QAbstractItemView, QSizePolicy, QListWidgetItem, QDialog, QDoubleSpinBox,
-                             QScroller, QToolTip, QScrollArea, QComboBox)
+                             QScroller, QToolTip, QScrollArea, QComboBox, QProgressBar)
 from PyQt6.QtCore import (Qt, QPoint, QPointF, QRectF, QTimer, QTranslator, QLibraryInfo, QLine, pyqtSignal, QLocale, QEvent,
                           QSizeF, QMarginsF, QEventLoop, QSize, QUrl, QBuffer, QIODevice, QThread)
 from PyQt6.QtGui import (QPainter, QPen, QColor, QFont, QPainterPath, QFontMetricsF, QTransform, QPolygonF,
@@ -1497,7 +1497,7 @@ def heal_autostart():
 UPDATE_API_URL = "https://api.github.com/repos/wcr20140908/MyScreenDraw/releases/latest"
 UPDATE_RELEASES_URL = "https://api.github.com/repos/wcr20140908/MyScreenDraw/releases?per_page=30"
 UPDATE_TIMEOUT_S = 6.0
-UPDATE_DOWNLOAD_TIMEOUT_S = 60.0
+UPDATE_DOWNLOAD_TIMEOUT_S = 15.0
 UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000
 MAX_UPDATE_ARCHIVE_BYTES = 512 * 1024 * 1024
 MAX_UPDATE_ARCHIVE_MEMBERS = 10000
@@ -1686,15 +1686,43 @@ def validate_update_zip(path):
 
 
 def install_layout_supported(install_dir=None):
-    """应用内安装只支持便携版目录：没有 exe 就没有可锁定、可重启的程序。
-
-    源码目录（python main.py）满足不了这个前提。旧代码把「目录里没有 exe」和
-    「exe 被占用」混在同一个 60 秒文件锁循环里，结果是应用已经正常退出、脚本还在
-    空等一分钟，最后报 application_still_running 回滚——用户看到的就是
-    「重启不起来、版本也没升级」（见 data/update-result.json）。
-    """
+    """Only a portable installation with an executable can be updated in place."""
     target = APP_DIR if install_dir is None else install_dir
     return os.path.isfile(os.path.join(target, "MyScreenDraw.exe"))
+
+
+def acknowledge_update_startup():
+    """Acknowledge only after the new application's event loop has started."""
+    ready = os.environ.pop("MYSCREENDRAW_UPDATE_READY", None)
+    if not ready or not getattr(sys, "frozen", False):
+        return False
+    temporary = None
+    try:
+        ready = os.path.abspath(ready)
+        folder = os.path.dirname(ready)
+        root = os.path.abspath(APP_DIR)
+        if (os.path.basename(ready) != "ready.json"
+                or not re.fullmatch(r"\.msd-update-[0-9a-f]{32}", os.path.basename(folder))
+                or os.path.normcase(os.path.dirname(folder)) != os.path.normcase(root)
+                or not os.path.isdir(folder)
+                or os.path.normcase(os.path.realpath(ready)) != os.path.normcase(ready)):
+            return False
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=folder,
+                                         prefix=".ready-", delete=False) as handle:
+            temporary = handle.name
+            json.dump({"version": APP_VERSION, "executable": os.path.abspath(sys.executable),
+                       "pid": os.getpid()}, handle)
+        os.replace(temporary, ready)
+        return True
+    except (OSError, ValueError):
+        LOGGER.warning("Could not acknowledge updater startup", exc_info=True)
+        return False
+    finally:
+        if temporary and os.path.exists(temporary):
+            try:
+                os.remove(temporary)
+            except OSError:
+                pass
 
 
 def make_update_batch(zip_path, install_dir, version="", owner_pid=None):
@@ -1706,8 +1734,12 @@ def make_update_batch(zip_path, install_dir, version="", owner_pid=None):
         raise ValueError("install_dir_incomplete")
     root = tempfile.mkdtemp(prefix="myscreendraw_apply_")
     script = os.path.join(root, "apply.ps1")
+    def string_literal(value):
+        return "[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + base64.b64encode(str(value).encode("utf-8")).decode("ascii") + "'))"
     def literal(path):
-        return "[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + base64.b64encode(os.fsencode(os.path.abspath(path))).decode("ascii") + "'))"
+        return string_literal(os.path.abspath(path))
+    if version and parse_version(version) is None:
+        raise ValueError("invalid_update_version")
     # 旧进程 PID 只作为整数参与「等它退出/替它收尾」，不参与任何路径拼接。
     try:
         owner_pid_literal = str(int(owner_pid)) if owner_pid is not None else "0"
@@ -1724,6 +1756,8 @@ $work = Join-Path $install ('.msd-update-' + [guid]::NewGuid().ToString('N'))
 $stage = Join-Path $work 'stage'
 $backup = Join-Path $work 'backup'
 $result = Join-Path $install 'data\update-result.json'
+$ready = Join-Path $work 'ready.json'
+$retainBackup = $false
 $plan = [Collections.Generic.List[object]]::new()
 $saved = [Collections.Generic.List[object]]::new()
 $landed = [Collections.Generic.List[object]]::new()
@@ -1773,6 +1807,13 @@ function Plan-Entry($item, $target) {
         $plan.Add(@{ source = $item.FullName; target = $target; copy = $copy })
     }
 }
+function Get-ExecutableHash($path) {
+    # Use .NET directly: PowerShell 5.1 may inherit a PS7 module search path.
+    $stream = [IO.File]::OpenRead($path)
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try { return [BitConverter]::ToString($algorithm.ComputeHash($stream)).Replace('-', '').ToLowerInvariant() }
+    finally { $algorithm.Dispose(); $stream.Dispose() }
+}
 function Write-Result($value) {
     $path = Assert-Path $result $install
     [IO.Directory]::CreateDirectory((Split-Path -Parent $path)) | Out-Null
@@ -1783,36 +1824,19 @@ try {
     Assert-Tree $install
     $zip = Assert-Path $zip (Split-Path -Parent $zip)
     $work = Assert-Path $work $install
-    # 旧进程必须先走。按 PID 等，不再用文件锁去猜「它还在不在」——文件锁探测分不清
-    # 「程序还在运行」和「这个目录里根本没有 MyScreenDraw.exe」，后者会空等 60 秒再报
-    # application_still_running，而那时应用早已退出，用户只看到版本没升级。
+    # Wait for the exact caller; never terminate an arbitrary/reused Python PID.
     if ($ownerPid -gt 0) {
         for ($i = 0; $i -lt 40; $i++) {
             if (-not (Get-Process -Id $ownerPid -ErrorAction SilentlyContinue)) { break }
-            Start-Sleep -Milliseconds 500
+            Start-Sleep -Milliseconds 250
         }
-        # 应用已经走过保存确认并主动交棒；它挂住了就替它收尾，别让整个更新跟着一起挂。
-        $owner = Get-Process -Id $ownerPid -ErrorAction SilentlyContinue
-        if ($owner) {
-            $ownerPath = ''
-            try { $ownerPath = [string]$owner.Path } catch { $ownerPath = '' }
-            # 只收自己人：PID 可能已经被系统回收给别的进程了。
-            $owned = $ownerPath -and (
-                $ownerPath.StartsWith($install.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase) -or
-                (Split-Path -Leaf $ownerPath) -like 'python*')
-            if (-not $owned) { throw 'application_still_running' }
-            Stop-Process -Id $ownerPid -Force -ErrorAction Stop
-            for ($i = 0; $i -lt 20; $i++) {
-                if (-not (Get-Process -Id $ownerPid -ErrorAction SilentlyContinue)) { break }
-                Start-Sleep -Milliseconds 250
-            }
-        }
+        if (Get-Process -Id $ownerPid -ErrorAction SilentlyContinue) { throw 'application_still_running' }
     }
     $installedExe = Join-Path $install 'MyScreenDraw.exe'
     if (-not (Test-Path -LiteralPath $installedExe -PathType Leaf)) { throw 'install_dir_incomplete' }
     for ($i = 0; $i -lt 40; $i++) {
         try { $stream = [IO.File]::Open($installedExe, 'Open', 'ReadWrite', 'None'); $stream.Close(); break }
-        catch [IO.IOException] { if ($i -eq 39) { throw 'application_still_running' }; Start-Sleep -Milliseconds 500 }
+        catch [IO.IOException] { if ($i -eq 39) { throw 'application_still_running' }; Start-Sleep -Milliseconds 250 }
     }
     $stage = Assert-Path $stage $work
     $backup = Assert-Path $backup $work
@@ -1828,6 +1852,15 @@ try {
         $source = $children[0].FullName
     }
     if (-not (Test-Path -LiteralPath (Join-Path $source 'MyScreenDraw.exe') -PathType Leaf)) { throw 'missing_application' }
+    if ($version) {
+        $manifest = Get-Content -LiteralPath (Join-Path $source 'RELEASE-MANIFEST.json') -Raw | ConvertFrom-Json
+        if ($manifest.app_version -ne $version.TrimStart('v', 'V')) { throw 'update_version_mismatch' }
+        $expectedHash = [string]$manifest.sha256
+        if ($expectedHash -notmatch '^[a-fA-F0-9]{64}$' -or
+            (Get-ExecutableHash (Join-Path $source 'MyScreenDraw.exe')) -ne $expectedHash) {
+            throw 'update_executable_hash_mismatch'
+        }
+    }
     $incoming = @(Get-ChildItem -LiteralPath $source -Force | Where-Object { $_.Name -notin @('data', 'exports') })
     foreach ($item in $incoming) {
         if ($item.Name -like '.msd-update-*') { throw 'reserved_update_path' }
@@ -1847,14 +1880,41 @@ try {
         Move-Checked $entry.source $entry.target $stage $install
     }
     if (-not (Test-Path -LiteralPath (Join-Path $install 'MyScreenDraw.exe') -PathType Leaf)) { throw 'missing_application' }
-    Start-Process -FilePath (Join-Path $install 'MyScreenDraw.exe') -WorkingDirectory $install -ErrorAction Stop
-    # The user's interactive app may be visible. Launch is the commit boundary.
+    if ($version -and (Get-ExecutableHash (Join-Path $install 'MyScreenDraw.exe')) -ne $expectedHash) {
+        throw 'installed_executable_hash_mismatch'
+    }
+    # A fresh bootloader must not inherit PyInstaller worker-process state.
+    $env:PYINSTALLER_RESET_ENVIRONMENT = '1'
+    if ($version) { $env:MYSCREENDRAW_UPDATE_READY = $ready }
+    Write-Result @{ status = 'starting'; version = $version }
+    Start-Process -FilePath (Join-Path $install 'MyScreenDraw.exe') -WorkingDirectory $install -ErrorAction Stop -PassThru -OutVariable launched | Out-Null
+    if ($version) {
+        $confirmed = $false
+        for ($i = 0; $i -lt 80; $i++) {
+            if (Test-Path -LiteralPath $ready -PathType Leaf) {
+                $ack = Get-Content -LiteralPath (Assert-Path $ready $work) -Raw | ConvertFrom-Json
+                if ($ack.version -eq $version -and $ack.executable -eq (Join-Path $install 'MyScreenDraw.exe')) {
+                    $confirmed = $true
+                    break
+                }
+            }
+            if ($launched[0].HasExited) { throw 'updated_application_exited_early' }
+            Start-Sleep -Milliseconds 250
+        }
+        if (-not $confirmed) {
+            # A live but unready process may still hold payload files. Never delete
+            # its files or the rollback backup based merely on elapsed time.
+            $retainBackup = $true
+            throw 'restart_unconfirmed_backup_retained'
+        }
+    }
+    # Only a ready new application commits the update and permits backup cleanup.
     $committed = $true
-    # 带上落地版本：下次启动要据此确认「已升级到 vX」，而不是含糊的「已是最新版本」。
     Write-Result @{ status = 'success'; version = $version }
 } catch {
     $failure = $_.Exception.Message
-    if (-not $committed) {
+    if ($version -and $launched -and -not $launched[0].HasExited) { $retainBackup = $true }
+    if (-not $committed -and -not $retainBackup) {
         for ($i = $landed.Count - 1; $i -ge 0; $i--) {
             try { Remove-Checked $landed[$i].target $install }
             catch { $failure += '; rollback_failed: ' + $_.Exception.Message }
@@ -1873,6 +1933,7 @@ try {
     # Cleanup never discards an uncommitted backup or follows a reparse point.
     if ($committed) {
         try { Remove-Checked $backup $work } catch { Write-Warning $_.Exception.Message }
+        try { Remove-Checked $ready $work } catch { Write-Warning $_.Exception.Message }
     }
     try { Remove-Checked $stage $work } catch { Write-Warning $_.Exception.Message }
     try {
@@ -1893,7 +1954,7 @@ try {
         } catch { Write-Warning $_.Exception.Message }
     }
 }
-'''.replace('ZIP_LITERAL', literal(zip_path)).replace('INSTALL_LITERAL', literal(install_dir)).replace('SCRIPT_ROOT_LITERAL', literal(root)).replace('OWNER_PID_LITERAL', owner_pid_literal).replace('VERSION_LITERAL', literal(str(version or "")))
+'''.replace('ZIP_LITERAL', literal(zip_path)).replace('INSTALL_LITERAL', literal(install_dir)).replace('SCRIPT_ROOT_LITERAL', literal(root)).replace('OWNER_PID_LITERAL', owner_pid_literal).replace('VERSION_LITERAL', string_literal(version or ""))
     try:
         with open(script, "w", encoding="utf-8-sig") as handle:
             handle.write(text)
@@ -1907,6 +1968,7 @@ try {
 
 class UpdateDownloadWorker(QThread):
     finished_download = pyqtSignal(object, object)
+    progress = pyqtSignal(int, int)
 
     def __init__(self, url, parent=None):
         super().__init__(parent)
@@ -1921,9 +1983,10 @@ class UpdateDownloadWorker(QThread):
             request = urllib.request.Request(self.url, headers={"User-Agent": f"MyScreenDraw/{APP_VERSION}"})
             with urllib.request.urlopen(request, timeout=UPDATE_DOWNLOAD_TIMEOUT_S) as response:
                 _https_response(response)
-                declared = response.headers.get("Content-Length")
-                if declared and int(declared) > MAX_UPDATE_ARCHIVE_BYTES:
+                declared = int(response.headers.get("Content-Length") or 0)
+                if declared < 0 or declared > MAX_UPDATE_ARCHIVE_BYTES:
                     raise ValueError("archive_too_large")
+                self.progress.emit(0, declared)
                 with open(path, "wb") as out:
                     total = 0
                     while True:
@@ -1936,6 +1999,9 @@ class UpdateDownloadWorker(QThread):
                         if total > MAX_UPDATE_ARCHIVE_BYTES:
                             raise ValueError("archive_too_large")
                         out.write(chunk)
+                        self.progress.emit(total, declared)
+                if declared and total != declared:
+                    raise ValueError("download_incomplete")
             if self.isInterruptionRequested():
                 raise InterruptedError("download_cancelled")
             self.download_path = path
@@ -1945,7 +2011,8 @@ class UpdateDownloadWorker(QThread):
                 if 'root' in locals():
                     shutil.rmtree(root, ignore_errors=True)
             finally:
-                self.finished_download.emit(None, f"error_{type(exc).__name__}")
+                self.finished_download.emit(None, "download_cancelled" if isinstance(exc, InterruptedError)
+                                            else f"error_{type(exc).__name__}: {exc}")
 
 
 class UpdateCheckWorker(QThread):
@@ -8415,8 +8482,11 @@ class ControlPanel(QWidget):
         try:
             with open(result_path, encoding="utf-8-sig") as result_file:
                 result = json.load(result_file)
-            self._update_status_text = (tr("update_current") if result.get("status") == "success"
-                                        else trf("update_failed", detail=str(result.get("detail", "unknown"))))
+            if result.get("status") in ("starting", "success") and parse_version(result.get("version")) == parse_version(APP_VERSION):
+                self._update_status_text = trf("update_installed", value=APP_VERSION)
+            else:
+                detail = result.get("detail", "installed_version_mismatch")
+                self._update_status_text = trf("update_failed", detail=str(detail))
             os.remove(result_path)
         except (OSError, ValueError, AttributeError):
             pass
@@ -11537,10 +11607,20 @@ class ControlPanel(QWidget):
         self.btn_download_update.clicked.connect(self.download_pending_update)
         self.btn_download_update.setEnabled(bool(self._pending_update_release))
         form.addWidget(self.btn_download_update)
+        self.update_progress_bar = QProgressBar()
+        self.update_progress_bar.setRange(0, 100)
+        self.update_progress_bar.setVisible(False)
+        form.addWidget(self.update_progress_bar)
+        self.btn_cancel_update = QPushButton(tr("update_cancel_download"))
+        self.btn_cancel_update.setVisible(False)
+        self.btn_cancel_update.clicked.connect(self.cancel_update_download)
+        form.addWidget(self.btn_cancel_update)
         self.update_status_label = QLabel(getattr(self, "_update_status_text", ""))
         self.update_status_label.setObjectName("SettingsHint")
         self.update_status_label.setWordWrap(True)
         form.addWidget(self.update_status_label)
+        if getattr(self, "_update_download_active", False):
+            self._on_update_progress(*getattr(self, "_update_download_progress", (0, 0)))
         hint(tr("update_hint"))
 
         # ---------- 关于 ----------
@@ -11695,7 +11775,8 @@ class ControlPanel(QWidget):
 
     def check_for_updates(self):
         """检查版本；自动检查仅提示新版，下载与安装仍须用户确认。"""
-        if not self.update_check_enabled or getattr(self, "_updates_stopping", False) or getattr(self, "_update_flow_busy", False):
+        if (not self.update_check_enabled or getattr(self, "_updates_stopping", False)
+                or getattr(self, "_update_flow_busy", False) or getattr(self, "_update_download_active", False)):
             return
         if self._update_worker is not None and self._update_worker.isRunning():
             return          # 已经在查了，别叠第二个请求
@@ -11787,7 +11868,8 @@ class ControlPanel(QWidget):
 
     def _offer_update_page(self, release):
         """Ask before downloading; the download stays inside the application."""
-        if getattr(self, "_update_flow_busy", False) or getattr(self, "_updates_stopping", False):
+        if (getattr(self, "_update_flow_busy", False) or getattr(self, "_updates_stopping", False)
+                or getattr(self, "_update_download_active", False)):
             return
         worker = self._update_download_worker
         if worker is not None and worker.isRunning():
@@ -11811,8 +11893,13 @@ class ControlPanel(QWidget):
         try:
             if box.exec() == QMessageBox.StandardButton.Yes:
                 self._set_update_check_enabled(False)
-                self._set_update_status(tr("update_checking"))
+                self._downloading_release = dict(release)
+                self._update_download_active = True
+                self._on_update_progress(0, 0)
+                if hasattr(self, "btn_download_update"):
+                    self.btn_download_update.setEnabled(False)
                 worker = UpdateDownloadWorker(url, self)
+                worker.progress.connect(self._on_update_progress)
                 worker.finished_download.connect(self._on_update_downloaded)
                 self._update_download_worker = worker
                 worker.start()
@@ -11820,6 +11907,36 @@ class ControlPanel(QWidget):
         finally:
             self._update_flow_busy = False
             self.resume_callbacks()
+
+    def _on_update_progress(self, received, total):
+        self._update_download_progress = (received, total)
+        bar = getattr(self, "update_progress_bar", None)
+        cancel = getattr(self, "btn_cancel_update", None)
+        if bar is not None:
+            bar.setVisible(True)
+            bar.setRange(0, 100 if total else 0)
+            if total:
+                bar.setValue(min(100, received * 100 // total))
+        if cancel is not None:
+            cancel.setVisible(True)
+            cancel.setEnabled(not getattr(self, "_update_cancel_requested", False))
+        if getattr(self, "_update_cancel_requested", False):
+            self._set_update_status(tr("update_cancelling"))
+        elif total:
+            self._set_update_status(trf("update_downloading", received=f"{received / 1048576:.1f}",
+                                        total=f"{total / 1048576:.1f}", percent=min(100, received * 100 // total)))
+        else:
+            self._set_update_status(trf("update_downloading_unknown", received=f"{received / 1048576:.1f}"))
+
+    def cancel_update_download(self):
+        worker = getattr(self, "_update_download_worker", None)
+        if worker is not None and worker.isRunning():
+            self._update_cancel_requested = True
+            worker.requestInterruption()
+            self._set_update_status(tr("update_cancelling"))
+            button = getattr(self, "btn_cancel_update", None)
+            if button is not None:
+                button.setEnabled(False)
 
     def _on_update_downloaded(self, path, error):
         handed_off = False
@@ -11831,9 +11948,16 @@ class ControlPanel(QWidget):
         try:
             if getattr(self, "_updates_stopping", False):
                 return
+            if error == "download_cancelled" or getattr(self, "_update_cancel_requested", False):
+                self._set_update_status(tr("update_download_cancelled"))
+                return
             if error:
                 raise ValueError(str(error))
+            self._set_update_status(tr("update_verifying"))
             validate_update_zip(path)
+            if not getattr(sys, "frozen", False) or not install_layout_supported(APP_DIR):
+                self._set_update_status(tr("update_source_install_unsupported"))
+                return
             box = QMessageBox(self)
             box.setWindowTitle(tr("settings"))
             box.setText(tr("update_install_prompt"))
@@ -11841,6 +11965,7 @@ class ControlPanel(QWidget):
             box.setDefaultButton(QMessageBox.StandardButton.Cancel)
             box.setStyleSheet(self.styleSheet())
             if box.exec() != QMessageBox.StandardButton.Yes:
+                self._set_update_status(tr("update_install_cancelled"))
                 return
             lifecycle = self.lifecycle
             if lifecycle.is_exiting() or lifecycle._quit_dialog_showing:
@@ -11848,14 +11973,23 @@ class ControlPanel(QWidget):
             # Installing is never permission to discard unsaved annotations. Save's
             # file dialog may be cancelled and failures must leave the app running.
             if self.project_dirty and not self.save_project():
+                self._set_update_status(tr("update_install_cancelled"))
                 return
-            script = make_update_batch(path, APP_DIR)
-            subprocess.Popen(["powershell.exe", "-NoProfile", "-NonInteractive",
-                              "-ExecutionPolicy", "Bypass", "-File", script], close_fds=True)
+            release = getattr(self, "_downloading_release", None) or self._pending_update_release
+            tag = release.get("tag", "") if isinstance(release, dict) else str(release or "")
+            if parse_version(tag) is None:
+                raise ValueError("invalid_update_version")
+            self.save_settings()
+            script = make_update_batch(path, APP_DIR, version=tag, owner_pid=os.getpid())
+            environment = os.environ.copy()
+            environment["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+            self._set_update_status(tr("update_installing"))
+            subprocess.Popen(["powershell.exe", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden",
+                              "-ExecutionPolicy", "Bypass", "-File", script], close_fds=True,
+                             env=environment, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             handed_off = True
             self._update_install_handoff = True
             track_event("update_install_started", install_dir=APP_DIR)
-            self.save_settings()
             lifecycle._do_quit(save=True)
         except Exception as exc:
             self._set_update_status(trf("update_failed", detail=str(exc)))
@@ -11866,6 +12000,15 @@ class ControlPanel(QWidget):
                 if script:
                     shutil.rmtree(os.path.dirname(script), ignore_errors=True)
             self._update_flow_busy = False
+            self._update_download_active = False
+            self._update_cancel_requested = False
+            for name in ("update_progress_bar", "btn_cancel_update"):
+                widget = getattr(self, name, None)
+                if widget is not None:
+                    widget.setVisible(False)
+            button = getattr(self, "btn_download_update", None)
+            if button is not None:
+                button.setEnabled(bool(self._pending_update_release) and not handed_off)
             self._set_update_check_enabled(bool(self.update_check_enabled))
             self.resume_callbacks()
 
@@ -14286,6 +14429,8 @@ if __name__ == "__main__":
     QTimer.singleShot(200, pnl.bind_topmost_stack)
     pnl.save_settings()
     # 托盘「重启软件」传来的恢复文件：接回它就不再问自动保存（那份更旧）。
+    # Core startup is ready even if the user pauses at the recovery dialog.
+    QTimer.singleShot(0, acknowledge_update_startup)
     restart_file = None
     argv = sys.argv[1:]
     if "--restore" in argv:
