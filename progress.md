@@ -115,3 +115,11 @@
 - All local release gates now passed; next are clean commit/push, release publication, anonymous ZIP/checksum download and extracted smoke. No completion claim before public gates.
 - Post-documentation release hygiene/artifact checks: 42 passed, 167 subtests passed in 7.46s. No owned MyScreenDraw.exe remains. Source inputs remain identical to the accepted build.
 - Pre-commit staged diff reported one cosmetic extra blank line at export_pipeline.py EOF (line 255); retained the exact accepted production source rather than rebuilding for nonfunctional whitespace. Trailing-space/indent whitespace checks excluding this allowed blank-at-EOF rule pass; source receipt still matches.
+
+## 2026-10-06 — publication and anonymous acceptance
+- Committed/pushed all 56 intended files as bfd172c5d15546b7a8c4b0181d7821f55fe71646; clean-tree artifact/source/commit verification passed. No private evidence/runtime files were staged.
+- First publish attempt stopped on GitHub HTTP422 for nonexistent v6.1.0 commit reference (script expects404); a diagnostic output wrapper then hit GBK encoding. Authoritative audit found no draft/release and no active publisher. Created and normally pushed an annotated v6.1.0 tag at the accepted commit, verified via GitHub API. A transient git ls-remote TLS failure did not cause a force push or duplicate creation.
+- Rerun used UTF-8 parent output and redacted child capture; session58234 exited0 after draft asset upload/verification and publication. No source/build gate was altered.
+- Anonymous public verification session73793 exited0: release page available; ZIP (39,900,831 bytes) and .sha256 downloaded without credentials/cookies; hashes, archive validation, all extracted files and public EXE offscreen smoke passed. Evidence build/public-release-610/public-verification.json.
+- Final README links and migration examples now point to 6.1.0; CHANGELOG and acceptance matrix record publication. Production/build source is unchanged from the accepted release.
+- Final documentation gate: 42 passed, 167 subtests passed in 7.27s; tracked-tree credential-pattern/private-path scan clean. Only six Markdown files changed after release; accepted source and public ZIP/EXE receipts still agree.

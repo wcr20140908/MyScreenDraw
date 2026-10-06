@@ -1,6 +1,6 @@
 # 6.1.0 release validation
 
-**Status: all local release gates passed on 2026-10-06; GitHub publication and public re-download verification are pending.**
+**Status: RELEASED and publicly re-downloaded/verified on 2026-10-06. All required local and publication gates passed; explicit hardware boundaries below remain.**
 
 The full regression/build suite uses `QT_QPA_PLATFORM=offscreen`. Following the explicit updated instruction on 2026-10-06, separate Windows native-input tests run on screen, serially, with isolated synthetic documents and ownership-checked input. Screenshots and diagnostic logs stay private under ignored `.ccgui/`. Windows injected touch is not a physical-touchscreen hardware test. Real multi-monitor switching, other display/DPI configurations and audible speaker output remain unverified; simulated screens do not replace physical-display acceptance.
 
@@ -88,7 +88,7 @@ The final package was built **after** the native drag fixes. The obsolete earlie
 
 - `tests/verify_document_release_610.py`: two actual frozen restore → background-autosave → reopen rounds preserved three pages, stable IDs/names, ink/text/embedded images, active page 2 and hidden-whiteboard state. The three new serializable preferences used by this fixture also persisted.
 - `tests/verify_updater_restart.py`: current updater installed the accepted 6.1.0 package over an isolated old-package copy, automatically restarted, and passed manual reopen. Four synthetic private files and five preferences were preserved; transaction/startup took 21.75 s. This does **not** establish a retroactive repair of the old embedded updater.
-- Direct external operation of the accepted frozen EXE through ownership-checked Windows UI Automation: restored the synthetic document, entered whiteboard, invoked PDF/PNG buttons and dismissed success modals. The resulting PDF has **3 readable/renderable pages**, and **3 PNGs** decode successfully. Desktop-annotation export separately produced one screen-capture PDF, matching the file-panel hint; saving a project remains whole-document in either mode. Private UIA traces/output: `.ccgui/frozen-exports-final-20261006/frozen-exports.json`. The process was shut down and no user data was used.
+- Direct external operation of the accepted frozen EXE through ownership-checked Windows UI Automation: restored the synthetic document, entered whiteboard, invoked PDF/PNG buttons and dismissed success modals. The resulting PDF has **3 readable/renderable pages**, and **3 PNGs** decode successfully. Desktop-annotation export separately produced one screen-capture PDF, matching the file-panel hint; saving a project remains whole-document in either mode. Private UIA traces/output: `.ccgui/frozen-exports-final-20261006/frozen-exports.json`. The process was shut down; no existing user project, roster or application configuration was loaded. Desktop-capture output remains private and is excluded from commits/releases.
 - Native QtPdf binaries are present in the package, and the frozen PDF output validation ran against the packaged runtime. All other package startup/reopen/update checks were offscreen.
 
 ```powershell
@@ -108,6 +108,14 @@ Each verification destination must be new. Startup checks refuse to run when the
 
 The release receipt binds source, ZIP and EXE hashes to unit tests, staging smoke, extracted-file verification and extracted smoke. Publication requires a clean committed worktree matching that receipt. Credentials, synthetic runtime data, private screenshots/logs, build directories and ZIPs are not committed. The executable is unsigned.
 
-## Publication gate
+## Publication and public artifact verification
 
-Pending: commit/push the reviewed tree; create the 6.1.0 tag and release with ZIP/checksum attachments; anonymously re-download both assets, verify the accepted hashes and run the public extracted EXE smoke test.
+- Release/tag: `v6.1.0`, stable (not draft/pre-release), published on 2026-10-06 at `wcr20140908/MyScreenDraw`.
+- Immutable release commit: `bfd172c5d15546b7a8c4b0181d7821f55fe71646`. The later README/evidence follow-up changes documentation only; production/build inputs remain the accepted snapshot above.
+- Published attachments: `MyScreenDraw-v6.1.0-windows-x64.zip` (**39,900,831 bytes**) and `MyScreenDraw-v6.1.0-windows-x64.zip.sha256`.
+- A fresh process with **no Authorization header, credential lookup or cookies** opened the public release page and downloaded both attachments. ZIP/checksum and executable hashes match the accepted values; archive CRC/hygiene, all extracted-file comparisons and public extracted EXE `--smoke-ui` passed (**exit 0**).
+- Local public evidence: `build/public-release-610/public-verification.json`; sanitized publication trace: `.ccgui/release610-publication.log`. These runtime artifacts are not committed.
+- Publication tooling note: GitHub returned HTTP 422 for an as-yet nonexistent commit/tag reference, while the release script's absent-tag branch expects 404. The first attempt stopped before creating a release. A state audit confirmed no draft; an annotated tag was explicitly created/pushed at the accepted commit, verified, and the unchanged guarded script then published successfully. No tag/release was overwritten and no force push was used.
+- A transient Git TLS handshake read failure and a diagnostic wrapper encoding issue were resolved without weakening package/source/commit gates. Credentials stayed in memory and were redacted from captured child output.
+
+The final requirement matrix, native tiers, frozen tests and public artifact evidence together establish this release's acceptance; they do not promise bug-free behavior on untested hardware.

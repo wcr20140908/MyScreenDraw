@@ -11,11 +11,11 @@ MyScreenDraw is a fullscreen annotation / whiteboard / math-teaching tool built 
 - **Random name picker, timer, presentation spotlight, calculator** — a whole lesson without switching apps
 - **No account; drawings, rosters and logs are not uploaded**. Automatic update checks are enabled by default and can be disabled in Settings. Downloads and installation each require separate confirmation; neither happens silently
 
-Current version **v6.1.0** (release verification in progress; download links below still point to the published 6.0.1). The UI follows the system language in 8 languages: English, 中文, Français, Español, Deutsch, Русский, 한국어, 日本語.
+Current version **v6.1.0** (stable release; published and independently re-downloaded for verification). The UI follows the system language in 8 languages: English, 中文, Français, Español, Deutsch, Русский, 한국어, 日本語.
 
 > Product screenshots are not included in the public release yet; the current local captures contain development-environment details and must not be committed to GitHub.
 
-## 6.1.0: document safety, streaming exports and recovery previews (in verification)
+## 6.1.0: document safety, streaming exports and recovery previews (released)
 
 - Preserve the complete document after leaving whiteboard mode; explicit unsaved-work confirmation before destructive open/update operations.
 - Background autosave, configurable intervals and a collapsed-by-default older-version picker with page previews.
@@ -23,7 +23,7 @@ Current version **v6.1.0** (release verification in progress; download links bel
 - Duplicate, rename and reorder pages; visible thumbnail and stroke geometry caches.
 - Annotation monitor selection and timer-alarm volume without changing the Windows primary display or system volume.
 
-**Publication in progress.** The latest-source build passed: 1488 tests and 1208 subtests, with 7 skipped. Native dark/light acceptance passed 102 existing-flow and 37 new-feature checks per theme, plus 4 injected-touch tests. Frozen document reopen, updater restart and PNG/PDF output passed; downloads below remain on 6.0.1 until public-asset verification finishes. See the [6.1.0 validation record](docs/release-validation-6.1.0.md) and [release notes](release-notes-v6.1.0.md).
+**Published and publicly re-downloaded for verification.** The final build passed 1488 tests and 1208 subtests, with 7 skipped. Native dark/light acceptance passed 102 existing-flow and 37 new-feature checks per theme, plus 4 injected-touch tests. Frozen document reopen, updater restart, PNG/PDF output, public ZIP/checksum verification and extracted-EXE startup all passed. Injected touch is not physical-touchscreen acceptance; Windows 11, multi-monitor/mixed-DPI, audible output and long classroom sessions remain unverified. See the [6.1.0 validation record](docs/release-validation-6.1.0.md) and [release notes](release-notes-v6.1.0.md).
 
 ## 6.0.1: download progress and verified restart (released)
 
@@ -36,16 +36,16 @@ Final build regression: **1347 passed, 7 skipped, 1197 subtests passed; build ex
 
 ### Moving from 6.0.0: use a new directory, not its in-app updater
 
-**The running 6.0.0 updater has download/installation defects of its own. A new 6.0.1 package cannot retroactively repair update code executing in the old process. Do not rely on the 6.0.0 in-app updater for this upgrade.**
+**The running 6.0.0 updater has download/installation defects of its own. A new 6.1.0 package cannot retroactively repair update code executing in the old process. Do not rely on the 6.0.0 in-app updater for this upgrade.**
 
-**The stable 6.0.1 assets have been published and verified by downloading them again.** Follow these migration steps:
+**The stable 6.1.0 assets have been published and verified by downloading them again.** Follow these migration steps:
 
-1. Download the **6.0.1 Windows x64 portable ZIP** and matching `.zip.sha256` from the official repository's stable Release. Verify SHA-256; do not choose Source code archives.
-2. Extract the entire ZIP into a new, empty directory, such as `D:\Apps\MyScreenDraw-6.0.1`. Do not overwrite the old installation or a source checkout, and do not launch the new EXE yet.
+1. Download the **6.1.0 Windows x64 portable ZIP** and matching `.zip.sha256` from the official repository's stable Release. Verify SHA-256; do not choose Source code archives.
+2. Extract the entire ZIP into a new, empty directory, such as `D:\Apps\MyScreenDraw-6.1.0`. Do not overwrite the old installation or a source checkout, and do not launch the new EXE yet.
 3. Save your work, exit the old app through its tray menu, handle any save confirmation, and confirm the old `MyScreenDraw.exe` process has ended. F12 or hiding to the tray is not an exit.
 4. Back up the old `data/`, `exports/`, and projects saved elsewhere. Then copy `data/` and `exports/` into the new directory. Never overwrite private settings, rosters, autosaves, or logs with package defaults or sample files. If the destination already contains user files, back up both sets and resolve conflicts individually, not by overwriting whole folders. Keep the old directory and backups for recovery.
 5. Point desktop, Start menu, and taskbar shortcuts to the new `MyScreenDraw.exe`. If Start with Windows is enabled, check and update that path too so it does not launch the old app.
-6. Launch only the new EXE, confirm **v6.0.1**, check settings, projects, and exports, then fully exit and restart to verify. Never run both versions against the same data.
+6. Launch only the new EXE, confirm **v6.1.0**, check settings, projects, and exports, then fully exit and restart to verify. Never run both versions against the same data.
 
 ## Historical features and fixes in 6.0.0 (released)
 
@@ -62,11 +62,11 @@ These changes are included in the stable 6.0.0 portable release. The older beta.
 
 ## Quick start
 
-These links and checksum examples refer to the published and verified **6.0.1 stable release**.
+These links and checksum examples refer to the published and verified **6.1.0 stable release**.
 
-**[Download Windows x64 portable v6.0.1 (stable; includes EXE, no installation)](https://github.com/wcr20140908/MyScreenDraw/releases/download/v6.0.1/MyScreenDraw-v6.0.1-windows-x64.zip)**
+**[Download Windows x64 portable v6.1.0 (stable; includes EXE, no installation)](https://github.com/wcr20140908/MyScreenDraw/releases/download/v6.1.0/MyScreenDraw-v6.1.0-windows-x64.zip)**
 
-[Release page and notes](https://github.com/wcr20140908/MyScreenDraw/releases/tag/v6.0.1) · [SHA-256 checksum](https://github.com/wcr20140908/MyScreenDraw/releases/download/v6.0.1/MyScreenDraw-v6.0.1-windows-x64.zip.sha256). The public assets were downloaded again and hash-verified; the extracted EXE passed an offscreen startup check.
+[Release page and notes](https://github.com/wcr20140908/MyScreenDraw/releases/tag/v6.1.0) · [SHA-256 checksum](https://github.com/wcr20140908/MyScreenDraw/releases/download/v6.1.0/MyScreenDraw-v6.1.0-windows-x64.zip.sha256). The public assets were downloaded again and hash-verified; the extracted EXE passed an offscreen startup check.
 
 > Do not download GitHub's automatic **Source code (zip)** / **Source code (tar.gz)** assets or **Code → Download ZIP**. Those contain source code, not the runnable application.
 
@@ -136,7 +136,7 @@ Each imported PDF page becomes an independent whiteboard page. PNG/PDF export sh
 
 ### New classroom preferences in 6.0.0
 
-All three features are in **Settings** on the main toolbar. Introduced in 6.0.0, they are also included in the 6.0.1 download above.
+All three features are in **Settings** on the main toolbar. Introduced in 6.0.0, they are also included in the 6.1.0 download above.
 
 #### Top of Settings: free/open-source and third-party service notice
 
@@ -185,7 +185,7 @@ Click **Mouse** to let mouse/touch input pass through the canvas to the applicat
 Download the ZIP and `.zip.sha256` from the same Release, then run in PowerShell:
 
 ```powershell
-Get-FileHash -Algorithm SHA256 .\MyScreenDraw-v6.0.1-windows-x64.zip
+Get-FileHash -Algorithm SHA256 .\MyScreenDraw-v6.1.0-windows-x64.zip
 ```
 
 Compare the hash with the value in the `.sha256` file. Quit the old application through the tray, back up `data/`, `exports/`, and projects saved elsewhere, and extract the entire new ZIP into a new directory. Copy the backed-up data as needed. Do not run two versions against the same data. Autosave is not a version backup.
