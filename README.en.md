@@ -11,9 +11,19 @@ MyScreenDraw is a fullscreen annotation / whiteboard / math-teaching tool built 
 - **Random name picker, timer, presentation spotlight, calculator** — a whole lesson without switching apps
 - **No account; drawings, rosters and logs are not uploaded**. Automatic update checks are enabled by default and can be disabled in Settings. Downloads and installation each require separate confirmation; neither happens silently
 
-Current version **v6.0.1** (stable release). The UI follows the system language in 8 languages: English, 中文, Français, Español, Deutsch, Русский, 한국어, 日本語.
+Current version **v6.1.0** (release verification in progress; download links below still point to the published 6.0.1). The UI follows the system language in 8 languages: English, 中文, Français, Español, Deutsch, Русский, 한국어, 日本語.
 
 > Product screenshots are not included in the public release yet; the current local captures contain development-environment details and must not be committed to GitHub.
+
+## 6.1.0: document safety, streaming exports and recovery previews (in verification)
+
+- Preserve the complete document after leaving whiteboard mode; explicit unsaved-work confirmation before destructive open/update operations.
+- Background autosave, configurable intervals and a collapsed-by-default older-version picker with page previews.
+- Page-by-page PNG/PDF output with progress, cancellation and original failed-page numbers; import PDFs as independent board pages.
+- Duplicate, rename and reorder pages; visible thumbnail and stroke geometry caches.
+- Annotation monitor selection and timer-alarm volume without changing the Windows primary display or system volume.
+
+**Publication in progress.** The latest-source build passed: 1488 tests and 1208 subtests, with 7 skipped. Native dark/light acceptance passed 102 existing-flow and 37 new-feature checks per theme, plus 4 injected-touch tests. Frozen document reopen, updater restart and PNG/PDF output passed; downloads below remain on 6.0.1 until public-asset verification finishes. See the [6.1.0 validation record](docs/release-validation-6.1.0.md) and [release notes](release-notes-v6.1.0.md).
 
 ## 6.0.1: download progress and verified restart (released)
 
@@ -89,7 +99,7 @@ These links and checksum examples refer to the published and verified **6.0.1 st
 - The compact page list is anchored to the page navigation bar.
 - First/last-page arrows appear grey but show a boundary hint when clicked.
 - Select a page and use the red **Delete** button below the list. Confirmation defaults to cancel; deleting the only page leaves one blank page.
-- Multi-page management with thumbnail navigation
+- Multi-page management with thumbnail navigation; use **Copy** / **Rename** below the list and drag thumbnails to reorder. Copies default to after the source; Settings can choose before, first or last
 - White / black board switching
 - Page-by-page export to PNG / PDF / SVG / EPS (page numbers on multi-page exports; SVG/EPS are vector and stay editable)
 
@@ -117,6 +127,12 @@ The Settings button opens five sections — appearance, interface, drawing, syst
 - **Start with Windows** is off by default and writes only the current user's Run entry when enabled
 - **Update channel** lets you choose stable or preview releases
 - **In-app updates** ask before downloading and before installing, and preserve `data/`, `exports/`, settings, autosaves, roster data, and logs
+
+### Document and annotation preferences in 6.1.0
+
+**Settings** includes autosave interval, page-copy placement, annotation monitor and timer-alarm volume. Selecting an annotation monitor does not change the Windows primary display; a disconnected target falls back to an available display. Alarm volume defaults to **100** and can be set to **0** for silence; Windows volume and mute still apply.
+
+Each imported PDF page becomes an independent whiteboard page. PNG/PDF export shows progress and supports cancellation. If a page fails, a modal lists the original missing page numbers; a usable partial PDF receives a separate filename and is never reported as complete success.
 
 ### New classroom preferences in 6.0.0
 
@@ -161,7 +177,8 @@ Click **Mouse** to let mouse/touch input pass through the canvas to the applicat
 
 ### Project files & autosave
 - Tools → Open / Save manages `.msd` project files (all whiteboard pages included)
-- Autosave runs every 30 s; after an abnormal exit the next launch asks whether to restore
+- Autosave checks every 30 s by default and only writes changed content. Settings offers 15/30/60/120/300 s presets or a custom 5–86400 s interval. Very short intervals increase snapshot/compression/disk work and consume the retained-version count faster.
+- The startup recovery prompt previews the selected version. Expand the older-version options to choose another valid autosave; selection only changes the preview, and Restore applies it
 - Rely on explicit saves; autosave is only for recovery
 
 ### Verify a portable ZIP and upgrade manually

@@ -265,6 +265,9 @@ import ast
 import contextlib
 import copy
 import tempfile
+from export_pipeline import export_document, ExportResult, ExportFailure
+from stroke_cache import StrokeGeometryCache
+from recovery_dialog import RecoveryDialog
 import zipfile
 import shutil
 import stat
@@ -275,15 +278,19 @@ import urllib.request
 import urllib.error
 import hashlib
 from datetime import datetime
-from persistence import (atomic_write_json, atomic_write_json_gz, read_json_maybe_gz,
+from concurrent.futures import ThreadPoolExecutor
+from persistence import (atomic_write_json, atomic_write_json_gz, atomic_write_project, atomic_write_autosave, read_json_maybe_gz,
                          cleanup_temp_files, normalize_project_data, make_project_data,
                          ensure_file_size, PROJECT_KIND, AUTOSAVE_KIND, MAX_ABS_COORD,
-                         MAX_IMAGES_PER_PAGE)
+                         MAX_IMAGES_PER_PAGE, MAX_PAGES)
 from calculator import evaluate as safe_calculate, CalculatorError
 from display_utils import (clamp_rect, choose_screen, clamp_ruler_width, pixels_per_mm_from_dpi, sane_dpi,
                            valid_pixels_per_mm, screen_key, normalize_calibrations,
                            protractor_angle_degrees, ruler_geometry as physical_ruler_geometry,
                            ruler_mm_from_local_x)
+from alarm_audio import play_alarm_async
+from document_preferences import DocumentPreferences, bounded_int, monitor_key, select_monitor, COPY_PLACEMENTS
+from page_list import PageListWidget
 from version import APP_VERSION
 import formula
 import touch_keyboard
@@ -300,7 +307,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QLabel, QPushButton,
                              QVBoxLayout, QHBoxLayout, QWidget, QFrame, QGridLayout, QColorDialog, QSlider,
                              QInputDialog, QMessageBox, QMenu, QFileDialog, QLineEdit, QTextEdit, QListWidget,
                              QAbstractItemView, QSizePolicy, QListWidgetItem, QDialog, QDoubleSpinBox,
-                             QScroller, QToolTip, QScrollArea, QComboBox, QProgressBar)
+                             QScroller, QToolTip, QScrollArea, QComboBox, QProgressBar, QProgressDialog)
 from PyQt6.QtCore import (Qt, QPoint, QPointF, QRectF, QTimer, QTranslator, QLibraryInfo, QLine, pyqtSignal, QLocale, QEvent,
                           QSizeF, QMarginsF, QEventLoop, QSize, QUrl, QBuffer, QIODevice, QThread)
 from PyQt6.QtGui import (QPainter, QPen, QColor, QFont, QPainterPath, QFontMetricsF, QTransform, QPolygonF,
@@ -755,7 +762,7 @@ def serialize_page(page):
             entry["box_min_h"] = float(floor)
         tree = item.get("formula")
         if tree:
-            entry["formula"] = tree
+            entry["formula"] = copy.deepcopy(tree)
         serialized["texts"].append(entry)
     for item in page.get("shapes", []):
         shape_data = {
@@ -787,11 +794,15 @@ def serialize_page(page):
             shape_data["rotation"] = item["rotation"]
         serialized["shapes"].append(shape_data)
     serialized["images"] = [serialize_image(item) for item in page.get("images", [])]
+    for key in ("page_id", "name"):
+        if key in page:
+            serialized[key] = page[key]
     return serialized
 
 def deserialize_page(data):
     """JSON 页面数据 → 画布可用的页面快照。"""
-    page = {"segments": [], "texts": [], "shapes": [], "images": []}
+    page = {"segments": [], "texts": [], "shapes": [], "images": [],
+            "page_id": data.get("page_id", str(uuid.uuid4()))}
     for seg in data.get("segments", []):
         p1, p2 = seg["p1"], seg["p2"]
         color = QColor(seg.get("color", "#000000"))
@@ -876,6 +887,9 @@ def deserialize_page(data):
             shape["rotation"] = _coerce_float(item.get("rotation", 0), 0.0)
         page["shapes"].append(shape)
     page["images"] = [deserialize_image(item) for item in data.get("images", [])]
+    for key in ("page_id", "name"):
+        if key in data:
+            page[key] = data[key]
     return page
 
 def page_signature(page):
@@ -1232,33 +1246,6 @@ def place_under_ceiling(window_id, ceiling):
                              SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
     except Exception:
         pass
-
-VK_VOLUME_UP = 0xAF
-KEYEVENTF_KEYUP = 0x0002
-
-def force_system_max_volume():
-    """倒计时结束用：连按 50 次系统音量+，既解除静音又拉满音量（音量+自带解除静音）。"""
-    try:
-        user32 = ctypes.windll.user32
-        for _ in range(50):
-            user32.keybd_event(VK_VOLUME_UP, 0, 0, 0)
-            user32.keybd_event(VK_VOLUME_UP, 0, KEYEVENTF_KEYUP, 0)
-    except Exception:
-        pass
-
-def play_alarm_async():
-    """后台线程播放提示铃声，不阻塞界面。"""
-    def run():
-        try:
-            import winsound
-            for _ in range(4):
-                winsound.Beep(1319, 160)
-                winsound.Beep(1568, 160)
-                winsound.Beep(2093, 320)
-                time.sleep(0.15)
-        except Exception:
-            pass
-    threading.Thread(target=run, daemon=True).start()
 
 def set_window_owner(window_id, owner_id):
     """把窗口设为 owner 的 owned window。
@@ -3191,11 +3178,17 @@ class DrawingCanvas(QMainWindow):
         self.draw_state = "PEN"
         self.eraser_type = "CIRCLE"
         self.all_segments = []
+        self._stroke_geometry_cache = StrokeGeometryCache()
         self.text_items = []
         self.shape_items = []
         self.image_items = []     # 导入的图片/PDF 页：以 PNG→base64 内嵌进项目文件
         self.whiteboard_mode = False
         self.board_style = "WHITE"
+        self._page_id = str(uuid.uuid4())
+        self._page_name = ""
+        self._page_revision = 0
+        self._revision_counter = 0
+        self._serialized_page_cache = {}
         self.content_revision = 0     # O(1) 内容版本号：让实时缩略图看见原地移动/改色/撤销
         self.pages = []
         self.current_page = 0
@@ -3337,6 +3330,20 @@ class DrawingCanvas(QMainWindow):
         return QPointF((line.p1().x() + line.p2().x()) / 2, (line.p1().y() + line.p2().y()) / 2)
 
     def object_bounds(self, object_id):
+        for item in self.text_items:
+            if item["id"] == object_id:
+                return self.text_bounds(item)
+        for item in self.shape_items:
+            if item["id"] == object_id:
+                return self.shape_bounds(item)
+        for item in self.image_items:
+            if item["id"] == object_id:
+                return self.image_bounds(item)
+        cache = self._stroke_geometry_cache
+        cache.sync(self.all_segments, GROUPED_STYLES, self.segment_ink_radius)
+        return cache.bounds_for(object_id)
+
+    def _uncached_stroke_bounds(self, object_id):
         points = []
         for seg in self.all_segments:
             if seg["id"] == object_id:
@@ -3661,6 +3668,9 @@ class DrawingCanvas(QMainWindow):
 
     def capture_page(self):
         return {
+            "page_id": self._page_id,
+            "name": self._page_name,
+            "_revision": self._page_revision,
             "segments": self.clone_segments(),
             "texts": self.clone_text_items(),
             "shapes": self.clone_shape_items(),
@@ -3673,12 +3683,62 @@ class DrawingCanvas(QMainWindow):
         capture_page() 会把每条线段/图形/文本深拷贝一份，用来做撤销快照没问题，
         但缩略图每 150ms 就要一次，深拷贝整页会在书写时抢走绘制线程的时间。
         """
-        return {"segments": self.all_segments, "shapes": self.shape_items, "texts": self.text_items, "images": self.image_items}
+        return {"page_id": self._page_id, "name": self._page_name,
+                "_revision": self._page_revision, "segments": self.all_segments,
+                "shapes": self.shape_items, "texts": self.text_items, "images": self.image_items}
 
-    def mark_content_changed(self):
-        """标记页面发生了原地修改，使实时缩略图下一拍必定更新。"""
+    def mark_content_changed(self, repaint=True, strokes_changed=True):
+        """Invalidate revision caches after mutation, never just navigation."""
+        if strokes_changed:
+            self._stroke_geometry_cache.invalidate()
+        self._revision_counter += 1
+        self._page_revision = self._revision_counter
         self.content_revision += 1
-        self.update()
+        if self.panel:
+            self.panel.project_dirty = True
+        if repaint:
+            self.update()
+
+    @staticmethod
+    def page_cache_key(page):
+        """Revision identity, with O(1) guards for live append/remove operations."""
+        segments = page.get("segments", [])
+        last = segments[-1]["line"] if segments else None
+        return (page.get("page_id", id(page)), page.get("_revision", 0),
+                page.get("name", ""), len(segments), len(page.get("texts", [])),
+                len(page.get("shapes", [])), len(page.get("images", [])),
+                (last.x2(), last.y2()) if last is not None else None)
+
+    def document_signature(self):
+        """No clones/JSON/painting: page navigation alone is not an edit."""
+        live = self.live_page()
+        pages = self.pages or [live]
+        for page in pages:
+            if "page_id" not in page:
+                page["page_id"] = str(uuid.uuid4())
+        return (self.board_style, tuple(self.page_cache_key(
+            live if i == self.current_page else page) for i, page in enumerate(pages)))
+
+    def document_pages(self):
+        # A hidden whiteboard is still the same complete document. Desktop ink
+        # edits its active page, matching enter/exit-whiteboard behavior.
+        self.save_current_page()
+        return list(self.pages)
+
+    def serialized_document_pages(self):
+        """Return immutable-by-convention pure-data pages; reuse untouched pages."""
+        pages = self.document_pages()
+        cached = {}
+        result = []
+        for page in pages:
+            key = self.page_cache_key(page)
+            data = self._serialized_page_cache.get(key)
+            if data is None:
+                data = serialize_page(page)
+            cached[key] = data
+            result.append(data)
+        self._serialized_page_cache = cached
+        return result
 
     def content_signature(self):
         """极轻量内容指纹：判断缩略图要不要重画，避免空转重绘。"""
@@ -3700,6 +3760,10 @@ class DrawingCanvas(QMainWindow):
             self.text_drag_rect = None
             if self.panel:
                 self.panel.close_text_input()
+        self._page_id = page.setdefault("page_id", str(uuid.uuid4()))
+        self._page_name = page.get("name", "")
+        self._page_revision = page.get("_revision", 0)
+        self._revision_counter = max(self._revision_counter, self._page_revision)
         self.all_segments = [clone_segment(seg) for seg in page.get("segments", [])]
         self.text_items = [
             self.clone_text_item(item)
@@ -3710,7 +3774,9 @@ class DrawingCanvas(QMainWindow):
         self.selected_ids.clear()
         self.pending_points = []
         self.dash_chain = None     # 撤销/换页后虚线连击作废
-        self.mark_content_changed()
+        # Loading/navigation is not a mutation; preserve this page's cache key.
+        self.content_revision += 1
+        self.update()
 
     def ensure_page_state(self):
         if not self.pages:
@@ -3725,10 +3791,12 @@ class DrawingCanvas(QMainWindow):
         if timer is not None and timer.isActive():
             timer.stop()
         self.ensure_page_state()
-        self.pages[self.current_page] = self.capture_page()
+        if self.page_cache_key(self.pages[self.current_page]) != self.page_cache_key(self.live_page()):
+            self.pages[self.current_page] = self.capture_page()
 
     # --- 撤销/重做：整页快照栈，按操作发生的时间顺序回退 ---
     def commit_undo(self, snapshot):
+        self.mark_content_changed()
         self.undo_stack.append(snapshot)
         if len(self.undo_stack) > self.undo_limit:
             del self.undo_stack[0]
@@ -3758,6 +3826,7 @@ class DrawingCanvas(QMainWindow):
         self.current_stroke_widths = []
         self.last_point = None
         self.load_page(snapshot)        # 编辑态由 load_page 统一作废
+        self.mark_content_changed()
         if self.whiteboard_mode:
             self.save_current_page()
         self.last_undo_key = None
@@ -3932,6 +4001,10 @@ class DrawingCanvas(QMainWindow):
         panel.sync_settings_ui()
 
     def new_page(self):
+        if len(self.pages) >= MAX_PAGES:
+            if self.panel:
+                notify_user(self.panel, tr("page_list"), trf("page_limit", count=MAX_PAGES), level="warning")
+            return False
         self.enter_whiteboard()
         self._cancel_smart_recognition(drop_pending=True)  # 新页：放弃上一页未触发的延迟识别
         self.save_current_page()
@@ -3940,6 +4013,7 @@ class DrawingCanvas(QMainWindow):
         self.load_page(self.pages[self.current_page])
         self.reset_history()
         self.arm_page_pen_return()
+        self.mark_content_changed()
         track_event("whiteboard_page_new", page=self.current_page + 1)
 
     def delete_page(self, index=None):
@@ -3969,6 +4043,61 @@ class DrawingCanvas(QMainWindow):
             self.panel.project_dirty = True
         if changed_page:
             self.arm_page_pen_return()
+        return True
+
+    def duplicate_page(self, index=None, placement="after"):
+        if not self.whiteboard_mode or len(self.pages) >= MAX_PAGES:
+            return False
+        index = self.current_page if index is None else index
+        if not 0 <= index < len(self.pages) or placement not in ("after", "before", "first", "last"):
+            return False
+        self.finish_active_ink()
+        self.save_current_page()
+        source = self.pages[index]
+        duplicate = {
+            "page_id": str(uuid.uuid4()), "_revision": 0,
+            "name": trf("page_copy_name", name=source.get("name") or trf("page_label", index=index + 1))[:256],
+            "segments": [clone_segment(seg) for seg in source.get("segments", [])],
+            "texts": [self.clone_text_item(item) for item in source.get("texts", [])],
+            "shapes": [self.clone_shape(item) for item in source.get("shapes", [])],
+            "images": [self.clone_image(item) for item in source.get("images", [])],
+        }
+        destination = {"after": index + 1, "before": index, "first": 0, "last": len(self.pages)}[placement]
+        self.pages.insert(destination, duplicate)
+        self.current_page = destination
+        self.load_page(duplicate)
+        self.reset_history()
+        self.mark_content_changed()
+        self.arm_page_pen_return()
+        return True
+
+    def rename_page(self, index, name):
+        if not self.whiteboard_mode or not 0 <= index < len(self.pages) or not isinstance(name, str):
+            return False
+        name = name.strip()
+        if not name or len(name) > 256:
+            return False
+        self.save_current_page()
+        if self.pages[index].get("name", "") == name:
+            return False
+        self.pages[index]["name"] = name
+        if index == self.current_page:
+            self._page_name = name
+        if self.panel:
+            self.panel.project_dirty = True
+        return True
+
+    def move_page(self, source, destination):
+        if (not self.whiteboard_mode or source == destination or
+                not 0 <= source < len(self.pages) or not 0 <= destination < len(self.pages)):
+            return False
+        self.finish_active_ink()
+        self.save_current_page()
+        page = self.pages.pop(source)
+        self.pages.insert(destination, page)
+        self.current_page = next(i for i, p in enumerate(self.pages) if p["page_id"] == self._page_id)
+        if self.panel:
+            self.panel.project_dirty = True
         return True
 
     def switch_page(self, offset):
@@ -4608,7 +4737,7 @@ class DrawingCanvas(QMainWindow):
         self.bump_text_revision(item)
         # 内容变了就把框高撑够：要求是最后一行整行都在框内，而不是任由文字画到框外。
         self.fit_text_box(item)
-        self.content_revision += 1          # 缩略图靠它判断要不要重画
+        self.mark_content_changed(repaint=False, strokes_changed=False)
         if self.whiteboard_mode:
             self.schedule_page_snapshot()
         if self.panel:
@@ -5751,6 +5880,9 @@ class DrawingCanvas(QMainWindow):
         ray_len = math.hypot(item["p2"].x() - v.x(), item["p2"].y() - v.y())
         new_angle = math.radians(a1 + sign * new_mag)
         item["p2"] = QPointF(v.x() + ray_len * math.cos(new_angle), v.y() - ray_len * math.sin(new_angle))
+        # Coalesced undo may skip push_undo; every visible angle edit still needs
+        # its own persistence/thumbnail revision after changing the geometry.
+        self.mark_content_changed(strokes_changed=False)
         if self.whiteboard_mode:
             self.save_current_page()
         track_event("angle_adjusted", degrees=round(new_mag))
@@ -5800,6 +5932,7 @@ class DrawingCanvas(QMainWindow):
         }
 
     def restore_selection_state(self, state):
+        self._stroke_geometry_cache.invalidate()
         for saved in state["segments"]:
             self.all_segments[saved["index"]]["line"] = QLine(saved["line"])
             self.all_segments[saved["index"]]["pen"] = QPen(saved["pen"])
@@ -6218,6 +6351,37 @@ class DrawingCanvas(QMainWindow):
                     or y2 + margin < clip.top() or y1 - margin > clip.bottom())
 
     def draw_segments(self, painter, segments, clip=None):
+        if segments is not self.all_segments:
+            return self._draw_segments_uncached(painter, segments, clip)
+        commands = self._stroke_geometry_cache.sync(segments, GROUPED_STYLES, self.segment_ink_radius)
+        for command in commands:
+            if clip is not None and not clip.intersects(command.clip_bounds):
+                continue
+            segment = command.segment
+            style = segment.get("style")
+            if command.path is None:
+                if style == "calligraphy":
+                    self._draw_nib_segment(painter, segment)
+                else:
+                    painter.setPen(segment["pen"])
+                    painter.drawLine(segment["line"])
+            elif not segment.get("marker"):
+                self._draw_styled_path(painter, command.path, QPen(segment["pen"]),
+                                       style, segment.get("options"))
+            else:
+                pen = QPen(segment["pen"])
+                color = QColor(pen.color())
+                alpha = color.alpha()
+                color.setAlpha(255)
+                pen.setColor(color)
+                painter.save()
+                painter.setOpacity(alpha / 255)
+                painter.setPen(pen)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawPath(command.path)
+                painter.restore()
+
+    def _draw_segments_uncached(self, painter, segments, clip=None):
         """普通笔迹逐段绘制；荧光笔按整笔合成一条路径，避免重叠处叠色发黑。
 
         clip 非空时跳过区域外的段。荧光笔那条整笔路径仍然要完整拼出来（一笔的透明度
@@ -6840,14 +7004,14 @@ class DrawingCanvas(QMainWindow):
         painter.drawPath(path)
         painter.restore()
 
-    def render_page_pixmap(self, page, size):
+    def render_page_pixmap(self, page, size, *, board_style=None):
         """把一页页面数据渲染为缩略图或导出图，兼容 JSON 和运行时页面。"""
         width, height = self._page_px_size(size)
         pixmap = QPixmap(width, height)
         painter = QPainter(pixmap)
         try:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            self._render_page_painter(painter, page, width, height)
+            self._render_page_painter(painter, page, width, height, board_style=board_style)
         finally:
             painter.end()
         return pixmap
@@ -6858,12 +7022,13 @@ class DrawingCanvas(QMainWindow):
             return max(1, int(size.width())), max(1, int(size.height()))
         return 1920, 1080
 
-    def _render_page_painter(self, painter, page, width, height):
+    def _render_page_painter(self, painter, page, width, height, *, board_style=None):
         """在给定 painter 上渲染一页：探测序列化→deserialize→边界适配→draw_content。
 
         PNG/SVG/缩略图共用这一绘制体，保证同一页面在各导出格式下外观一致。
         """
-        painter.fillRect(QRectF(0, 0, width, height), self.board_background())
+        background = (QColor("#254237") if board_style == "BLACK" else QColor("#f7f7f1")) if board_style else self.board_background()
+        painter.fillRect(QRectF(0, 0, width, height), background)
         if not isinstance(page, dict):
             page = {"segments": [], "texts": [], "shapes": [], "images": []}
         segments = page.get("segments") or []
@@ -6877,6 +7042,8 @@ class DrawingCanvas(QMainWindow):
         elif shapes and isinstance(shapes[0], dict) and isinstance(shapes[0].get("color"), str):
             needs_deserialize = True
         elif images and isinstance(images[0], dict) and isinstance(images[0].get("data"), str):
+            needs_deserialize = True
+        elif texts and isinstance(texts[0], dict) and isinstance(texts[0].get("pos"), (list, tuple)):
             needs_deserialize = True
         if needs_deserialize:
             page = deserialize_page(page)
@@ -6934,6 +7101,8 @@ class DrawingCanvas(QMainWindow):
         generator.setViewBox(QRectF(0, 0, width, height))
         generator.setTitle("MyScreenDraw")
         painter = QPainter(generator)
+        if not painter.isActive():
+            raise OSError("SVG painter could not start")
         try:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             self._render_page_painter(painter, page, width, height)
@@ -8460,6 +8629,19 @@ class ControlPanel(QWidget):
         self.canvas = None
         self.project_path = None
         self.project_dirty = False
+        self._saved_document_signature = None
+        self._document_transition_active = False
+        self._unsaved_prompt_active = False
+        self._document_generation = 0
+        self._autosave_executor = None
+        self._autosave_future = None
+        self._autosave_job = None
+        self._autosave_error = None
+        self._autosave_stopping = False
+        self._autosave_poll_timer = QTimer(self)
+        self._autosave_poll_timer.setInterval(100)
+        self._autosave_poll_timer.timeout.connect(self._poll_autosave)
+        QApplication.instance().aboutToQuit.connect(self.shutdown_autosave)
         self.color_buttons = []
         self.theme_name = "dark"
         self.theme = self.THEMES[self.theme_name]
@@ -8473,6 +8655,12 @@ class ControlPanel(QWidget):
         self.update_check_enabled = True    # 默认自动检查；下载和安装始终需用户确认
         self.update_channel = "stable"
         self.whiteboard_auto_pen = True
+        self.page_copy_placement = "after"
+        self.autosave_interval_seconds = AUTOSAVE_INTERVAL
+        self.timer_alarm_volume = 100
+        self.annotation_screen = ""
+        QApplication.instance().screenAdded.connect(self._on_screens_changed)
+        QApplication.instance().screenRemoved.connect(self._on_screens_changed)
         self.pen_defaults_enabled = False
         self.pen_defaults = normalize_presets(None, PEN_STYLES, PEN_STYLE_OPTIONS)
         self.notice_state = {"launches": 0, "last_version": ""}
@@ -8604,10 +8792,14 @@ class ControlPanel(QWidget):
         self.thumbnail_panel.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
         self.thumbnail_panel.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         thumb_layout = QVBoxLayout(self.thumbnail_panel)
-        self.thumbnail_list = QListWidget(); self.thumbnail_list.setViewMode(QListWidget.ViewMode.IconMode)
+        self._thumbnail_cache = {}
+        self._thumbnail_order = ()
+        self.thumbnail_list = PageListWidget(); self.thumbnail_list.setViewMode(QListWidget.ViewMode.IconMode)
         self.thumbnail_list.setIconSize(QSize(260, 170)); self.thumbnail_list.setGridSize(QSize(280, 205))
         self.thumbnail_list.setMinimumSize(0, 0)
-        self.thumbnail_list.setMovement(QListWidget.Movement.Static)
+        self.thumbnail_list.setMovement(QListWidget.Movement.Snap)
+        self.thumbnail_list.reorder_requested.connect(self.reorder_whiteboard_page)
+        self.thumbnail_list.verticalScrollBar().valueChanged.connect(lambda _: self._render_visible_thumbnails())
         self.thumbnail_list.setResizeMode(QListWidget.ResizeMode.Adjust)
         self.thumbnail_list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.thumbnail_list.currentRowChanged.connect(self._thumbnail_page_changed)
@@ -8622,7 +8814,16 @@ class ControlPanel(QWidget):
         self.btn_delete_page.setMinimumHeight(36)
         self.btn_delete_page.setStyleSheet("QPushButton { background: #d93025; color: white; border: none; border-radius: 6px; } QPushButton:hover { background: #b3261e; }")
         self.btn_delete_page.clicked.connect(self.delete_whiteboard_page)
-        thumb_layout.addWidget(self.btn_delete_page)
+        self.btn_copy_page = QPushButton(tr("copy_page"))
+        self.btn_copy_page.setMinimumHeight(36)
+        self.btn_copy_page.clicked.connect(self.copy_whiteboard_page)
+        self.btn_rename_page = QPushButton(tr("rename_page"))
+        self.btn_rename_page.setMinimumHeight(36)
+        self.btn_rename_page.clicked.connect(self.rename_whiteboard_page)
+        page_actions = QHBoxLayout()
+        for button in (self.btn_copy_page, self.btn_rename_page, self.btn_delete_page):
+            page_actions.addWidget(button)
+        thumb_layout.addLayout(page_actions)
         self.thumbnail_panel.hide()
         self.thumbnail_panel.setStyleSheet(self.styleSheet())
 
@@ -8763,7 +8964,7 @@ class ControlPanel(QWidget):
         # 自动保存定时器：每30秒保存一次画布内容
         self.autosave_timer = QTimer(self)
         self.autosave_timer.timeout.connect(self.auto_save)
-        self.autosave_timer.start(AUTOSAVE_INTERVAL * 1000)  # 转换为毫秒
+        self.autosave_timer.start(self.autosave_interval_seconds * 1000)  # 转换为毫秒
 
         self.listener = keyboard.Listener(on_press=self.on_global_key_press); self.listener.start()
         track_event("app_started", theme=self.theme_name)
@@ -9411,9 +9612,9 @@ class ControlPanel(QWidget):
         # 反向也要让位：否则「开子菜单→缩略图关」之后再开缩略图，子菜单还在，
         # 两个浮窗又并存，争抢原样复现。
         self.show_only_sub(None)
-        self.refresh_page_thumbnails(force=True)
         self._position_thumbnail_panel()
         self.thumbnail_panel.show()
+        self.refresh_page_thumbnails(force=True)
         self.raise_floating(self.thumbnail_panel)
         self._thumbnail_live_timer.start()      # 打开即进入实时渲染
 
@@ -9425,56 +9626,113 @@ class ControlPanel(QWidget):
     def refresh_page_thumbnails(self, force=False):
         if not hasattr(self, "thumbnail_list") or not self.canvas:
             return
-        # 缩略图面板没打开时不必渲染：update_whiteboard_ui 每次翻页/进出白板都会调到这里，
-        # 而每次都会把整本白板逐页渲染成 pixmap，页数一多就是明显的翻页卡顿。
         if not force and not self.thumbnail_panel.isVisible():
             return
+        cv = self.canvas
+        cv.document_signature()  # Assign IDs to legacy pages without serializing.
+        pages = cv.pages
+        order = tuple(page["page_id"] for page in pages)
         self._syncing_thumbnails = True
         try:
-            self.thumbnail_list.clear()
-            pages = self.canvas.pages if self.canvas.whiteboard_mode else [self.canvas.capture_page()]
-            current = self.canvas.current_page
+            if order != self._thumbnail_order or self.thumbnail_list.count() != len(order):
+                self.thumbnail_list.clear()
+                for page in pages:
+                    item = QListWidgetItem()
+                    item.setData(Qt.ItemDataRole.UserRole, page["page_id"])
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignHCenter)
+                    cached = self._thumbnail_cache.get(page["page_id"])
+                    if cached is not None:
+                        item.setIcon(cached[1])
+                    self.thumbnail_list.addItem(item)
+                self._thumbnail_order = order
+                self._thumbnail_cache = {key: value for key, value in self._thumbnail_cache.items() if key in order}
             for index, page in enumerate(pages):
-                # 当前页取实时内容：pages[current] 要等松手 save_current_page() 才更新，
-                # 用它渲染的话正在写的这一笔永远缺席，缩略图始终慢半拍。
-                source = self.canvas.live_page() if (self.canvas.whiteboard_mode and index == current) else page
-                pixmap = self.canvas.render_page_pixmap(source, self.THUMBNAIL_SIZE)
-                item = QListWidgetItem(QIcon(pixmap), trf("page_label", index=index + 1))
-                item.setTextAlignment(Qt.AlignmentFlag.AlignHCenter)
-                self.thumbnail_list.addItem(item)
-            if pages:
-                self.thumbnail_list.setCurrentRow(min(current, len(pages) - 1))
+                name = cv._page_name if index == cv.current_page else page.get("name", "")
+                self.thumbnail_list.item(index).setText(name or trf("page_label", index=index + 1))
+            if pages and self.thumbnail_list.currentRow() != cv.current_page:
+                self.thumbnail_list.setCurrentRow(cv.current_page)
+                self.thumbnail_list.scrollToItem(self.thumbnail_list.item(cv.current_page))
+            self.thumbnail_list.doItemsLayout()
         finally:
             self._syncing_thumbnails = False
-        self._thumbnail_signature = self.canvas.content_signature()
+        self._thumbnail_signature = cv.content_signature()
+        self._render_visible_thumbnails()
+
+    def _render_visible_thumbnails(self):
+        if (getattr(self, "_syncing_thumbnails", False) or not self.canvas or
+                not self.thumbnail_panel.isVisible() or not self.canvas.whiteboard_mode or
+                getattr(self, "_grabbing", False)):
+            return
+        cv = self.canvas
+        viewport = self.thumbnail_list.viewport().rect()
+        started = time.perf_counter()
+        rendered = 0
+        for index in range(min(self.thumbnail_list.count(), len(cv.pages))):
+            item = self.thumbnail_list.item(index)
+            if not self.thumbnail_list.visualItemRect(item).intersects(viewport):
+                continue
+            source = cv.live_page() if index == cv.current_page else cv.pages[index]
+            page_id = source.get("page_id")
+            key = (cv.page_cache_key(source), cv.board_style, cv.width(), cv.height(),
+                   self.THUMBNAIL_SIZE.width(), self.THUMBNAIL_SIZE.height())
+            cached = self._thumbnail_cache.get(page_id)
+            if cached is not None and cached[0] == key:
+                if item.icon().cacheKey() != cached[1].cacheKey():
+                    item.setIcon(cached[1])
+                continue
+            try:
+                pixmap = cv.render_page_pixmap(source, self.THUMBNAIL_SIZE)
+                icon = QIcon(pixmap)
+            except Exception:
+                LOGGER.exception("Thumbnail rendering failed for page %s", index + 1)
+                icon = QIcon()
+            self._thumbnail_cache[page_id] = (key, icon)
+            item.setIcon(icon)
+            rendered += 1
+            # Bound each GUI turn; the next live tick/scroll picks up remaining
+            # visible pages, never pre-render every offscreen page.
+            if rendered >= 2 or time.perf_counter() - started >= 0.012:
+                break
+        if rendered:
+            cost_ms = (time.perf_counter() - started) * 1000.0
+            target = int(max(self.THUMBNAIL_LIVE_MS, min(self.THUMBNAIL_MAX_MS, cost_ms * self.THUMBNAIL_DUTY)))
+            self._thumbnail_live_timer.setInterval(target)
 
     def _tick_live_thumbnail(self):
-        """实时缩略图节拍：只在内容真的变了时重画当前页那一格。"""
         if getattr(self, "_grabbing", False):
-            return                              # 抓屏是暂时隐藏，不要因此永久 stop
+            return
         if not self.canvas or not self.thumbnail_panel.isVisible() or not self.canvas.whiteboard_mode:
             self._thumbnail_live_timer.stop()
             return
-        signature = self.canvas.content_signature()
-        if signature == getattr(self, "_thumbnail_signature", None):
-            return
-        self._thumbnail_signature = signature
         if self.thumbnail_list.count() != len(self.canvas.pages):
-            self.refresh_page_thumbnails(force=True)   # 加/删页：整列表重建
-            return
-        item = self.thumbnail_list.item(self.canvas.current_page)
-        if item is None:
             self.refresh_page_thumbnails(force=True)
+        else:
+            self._render_visible_thumbnails()
+        self._thumbnail_signature = self.canvas.content_signature()
+
+    def copy_whiteboard_page(self):
+        if self.canvas and self.canvas.duplicate_page(placement=self.page_copy_placement):
+            self.update_whiteboard_ui()
+        elif self.canvas and len(self.canvas.pages) >= MAX_PAGES:
+            notify_user(self, tr("page_list"), trf("page_limit", count=MAX_PAGES), level="warning")
+
+    def rename_whiteboard_page(self):
+        if not self.canvas or not self.canvas.whiteboard_mode:
             return
-        started = time.perf_counter()
-        item.setIcon(QIcon(self.canvas.render_page_pixmap(self.canvas.live_page(), self.THUMBNAIL_SIZE)))
-        # 缩略图渲染跑在主线程上，写满一页的白板单帧要几十毫秒——固定节拍会按比例吃掉
-        # 笔迹的绘制时间，表现为「越写越顿」。这里按实测耗时把节拍拉长到它的 10 倍，
-        # 让缩略图最多占用 10% 主线程：轻页面保持 150ms「落墨即现」，重页面自动降频。
-        cost_ms = (time.perf_counter() - started) * 1000.0
-        target = int(max(self.THUMBNAIL_LIVE_MS, min(self.THUMBNAIL_MAX_MS, cost_ms * self.THUMBNAIL_DUTY)))
-        if abs(self._thumbnail_live_timer.interval() - target) > 20:
-            self._thumbnail_live_timer.setInterval(target)
+        self.pause_callbacks()
+        try:
+            name, accepted = QInputDialog.getText(self, tr("rename_page"), tr("page_name"),
+                                                text=self.canvas._page_name or trf("page_label", index=self.canvas.current_page + 1))
+            if accepted and self.canvas.rename_page(self.canvas.current_page, name):
+                self.update_whiteboard_ui()
+        finally:
+            self.resume_callbacks()
+            if self.thumbnail_panel.isVisible():
+                self._thumbnail_live_timer.start()
+
+    def reorder_whiteboard_page(self, source, destination):
+        if self.canvas and self.canvas.move_page(source, destination):
+            self.update_whiteboard_ui()
 
     def update_whiteboard_ui(self):
         if not self.canvas:
@@ -10002,13 +10260,12 @@ class ControlPanel(QWidget):
         self.update_timer_ui()
 
     def _timer_finished(self):
-        """倒计时到点：解除静音并拉满音量 + 响铃 + 红色闪烁提醒。"""
+        """倒计时到点：按设置音量响铃并闪烁，不改变系统音量。"""
         self.timer_running = False
         self.timer_alerting = True
         self.timer_clock.stop()
         self.timer_flash.start()
-        force_system_max_volume()
-        play_alarm_async()
+        play_alarm_async(self.timer_alarm_volume)
         track_event("timer_finished", target=self.timer_target)
         self.update_timer_ui()
 
@@ -11592,6 +11849,10 @@ class ControlPanel(QWidget):
         self.pen_defaults_editor.current_captured.connect(self.save_pen_default)
         form.addWidget(self.pen_defaults_editor)
 
+        section("settings_document")
+        self.document_preferences = DocumentPreferences(self)
+        form.addWidget(self.document_preferences)
+
         # ---------- 系统 ----------
         section("settings_system")
         self.btn_autostart = QPushButton(tr("autostart_off"))
@@ -11979,7 +12240,7 @@ class ControlPanel(QWidget):
                 return
             # Installing is never permission to discard unsaved annotations. Save's
             # file dialog may be cancelled and failures must leave the app running.
-            if self.project_dirty and not self.save_project():
+            if not self.confirm_unsaved_changes(tr("update_installing")):
                 self._set_update_status(tr("update_install_cancelled"))
                 return
             release = getattr(self, "_downloading_release", None) or self._pending_update_release
@@ -12176,7 +12437,7 @@ class ControlPanel(QWidget):
         if hasattr(self, 'timer'):
             self.timer.start(self.HEARTBEAT_MS)
         if hasattr(self, 'autosave_timer'):
-            self.autosave_timer.start(AUTOSAVE_INTERVAL * 1000)
+            self.autosave_timer.start(self.autosave_interval_seconds * 1000)
         # 其他定时器（缩略图、激光笔淡出、键盘监控）按需启动，不在这里恢复
 
     def heartbeat_refresh(self):
@@ -12343,6 +12604,10 @@ class ControlPanel(QWidget):
         return {
             "notice_state": normalize_notice_state(self.notice_state),
             "whiteboard_auto_pen": bool(self.whiteboard_auto_pen),
+            "autosave_interval_seconds": self.autosave_interval_seconds,
+            "page_copy_placement": self.page_copy_placement,
+            "timer_alarm_volume": self.timer_alarm_volume,
+            "annotation_screen": self.annotation_screen,
             "pen_defaults_enabled": bool(self.pen_defaults_enabled),
             "pen_defaults": normalize_presets(self.pen_defaults, PEN_STYLES, PEN_STYLE_OPTIONS),
             "last_annotate_tool": self.last_annotate_tool,
@@ -12397,12 +12662,15 @@ class ControlPanel(QWidget):
         settings = self.collect_settings()
         if not settings:
             return
+        if getattr(self, "_last_settings_write", None) == (CONFIG_FILE, settings) and os.path.isfile(CONFIG_FILE):
+            return
         last_error = None
         for attempt in range(5):
             try:
                 # Unique temp name + atomic replace; retries cover Windows file locks
                 # (antivirus / concurrent autosave / explorer preview).
                 atomic_write_json(CONFIG_FILE, settings)
+                self._last_settings_write = (CONFIG_FILE, copy.deepcopy(settings))
                 track_event("settings_saved", keys=len(settings))
                 return
             except PermissionError as e:
@@ -12540,6 +12808,10 @@ class ControlPanel(QWidget):
         except Exception as e:
             track_event("config_load_error", error=str(e))
 
+        self.set_autosave_interval(settings.get("autosave_interval_seconds", AUTOSAVE_INTERVAL), persist=False)
+        self.set_timer_alarm_volume(settings.get("timer_alarm_volume", 100), persist=False)
+        self.set_page_copy_placement(settings.get("page_copy_placement", "after"), persist=False)
+        self.set_annotation_screen(settings.get("annotation_screen", ""), persist=False, apply=False)
         self.notice_state = normalize_notice_state(settings.get("notice_state"))
         self.whiteboard_auto_pen = settings.get("whiteboard_auto_pen") if isinstance(settings.get("whiteboard_auto_pen"), bool) else True
         self.pen_defaults_enabled = settings.get("pen_defaults_enabled") if isinstance(settings.get("pen_defaults_enabled"), bool) else False
@@ -12724,57 +12996,93 @@ class ControlPanel(QWidget):
             if getattr(self, "pen_defaults_editor", None) is not None:
                 self.pen_defaults_editor.set_presets(self.pen_defaults)
             self.sync_settings_ui()
+            if self.annotation_screen:
+                self.apply_annotation_screen()
             track_event("settings_loaded", tool=cv.draw_state, theme=self.theme_name)
         except Exception as e:
             track_event("settings_apply_failed", error=str(e))
 
     def auto_save(self):
-        """自动保存配置 + 画布内容。"""
-        if not self.canvas:
+        """Compare revisions first, snapshot on the GUI thread, write off-thread."""
+        if not self.canvas or self._autosave_stopping:
             return
-        self.save_settings()  # 偏好也定期落盘，异常退出也不丢
+        self._poll_autosave()
+        if self._autosave_future is not None:
+            return  # One in-flight snapshot, never an unbounded queue of pages.
+        self.save_settings()
         try:
-            if self.canvas.whiteboard_mode:
-                self.canvas.save_current_page()
-                pages = [serialize_page(page) for page in self.canvas.pages]
-            else:
-                pages = [serialize_page(self.canvas.capture_page())]
-            if not any(page_has_content(page) for page in pages):
-                return  # 空白不写，避免刷一堆空快照
-
-            # 内容没变就不写。不做这一步的话，一节课不动画布也会每 30 秒落一份
-            # 完整快照，几小时下来目录里全是彼此相同的文件。
-            signature = json.dumps(pages, ensure_ascii=False, sort_keys=True,
-                                   separators=(",", ":"), allow_nan=False)
+            signature = (self._document_generation, self.canvas.document_signature())
             if signature == getattr(self, "_last_autosave_signature", None):
                 return
+            pages = self.canvas.serialized_document_pages()
+            if not any(page_has_content(page) for page in pages):
+                return
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            # 文件名精度只到秒。定时器是 30 秒一次撞不上，但 auto_save 也可能被别处
-            # 直接调用；同名会静默覆盖掉刚写的那一份，追加序号避免丢内容。
             filepath = os.path.join(AUTOSAVE_DIR, f"autosave_{timestamp}.json.gz")
             suffix = 1
             while os.path.exists(filepath):
                 filepath = os.path.join(AUTOSAVE_DIR, f"autosave_{timestamp}_{suffix}.json.gz")
                 suffix += 1
-            # Keep autosaves on the same schema construction path as normal projects;
-            # duplicated payloads previously drifted to a legacy `version` field.
             data = make_project_data(
-                pages=pages,
-                current_page=self.canvas.current_page,
+                pages=pages, current_page=self.canvas.current_page,
                 whiteboard_mode=self.canvas.whiteboard_mode,
-                board_style=self.canvas.board_style,
-                app_version=APP_VERSION,
+                board_style=self.canvas.board_style, app_version=APP_VERSION,
                 kind=AUTOSAVE_KIND,
             )
             data["timestamp"] = timestamp
-            atomic_write_json_gz(filepath, data)
-            self._last_autosave_signature = signature
+            if self._autosave_executor is None:
+                self._autosave_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="msd-autosave")
+            self._autosave_error = None
+            self._autosave_job = (signature, filepath, len(pages))
+            # data contains only detached primitives. Neither Qt widgets nor live
+            # dicts/formula trees are accessed from the worker.
+            self._autosave_future = self._autosave_executor.submit(atomic_write_autosave, filepath, data)
+            self._autosave_poll_timer.start()
+        except Exception as exc:
+            self._autosave_error = str(exc)
+            LOGGER.exception("自动保存快照失败")
+            track_event("autosave_failed", error=str(exc))
+
+    def _poll_autosave(self):
+        future = self._autosave_future
+        if future is None or not future.done():
+            return
+        signature, filepath, count = self._autosave_job
+        self._autosave_future = None
+        self._autosave_job = None
+        self._autosave_poll_timer.stop()
+        try:
+            future.result()
+            if signature[0] == self._document_generation:
+                self._last_autosave_signature = signature
+            self._autosave_error = None
             self._cleanup_autosave_files()
-            track_event("autosave_success", pages=len(pages),
-                        bytes=os.path.getsize(filepath))
-        except Exception as e:
-            LOGGER.exception("自动保存失败")
-            track_event("autosave_failed", error=str(e))
+            track_event("autosave_success", pages=count, bytes=os.path.getsize(filepath))
+        except Exception as exc:
+            self._autosave_error = str(exc)
+            LOGGER.exception("自动保存写入失败")
+            track_event("autosave_failed", error=str(exc))
+
+    def wait_for_autosave(self, timeout=None):
+        """Drain an existing job during shutdown/tests, never start another."""
+        future = self._autosave_future
+        if future is not None:
+            try:
+                future.result(timeout=timeout)
+            except TimeoutError:
+                return False
+            except Exception:
+                pass  # _poll_autosave records failure without marking it saved.
+            self._poll_autosave()
+        return self._autosave_error is None
+
+    def shutdown_autosave(self):
+        self._autosave_stopping = True
+        self._autosave_poll_timer.stop()
+        self.wait_for_autosave()
+        if self._autosave_executor is not None:
+            self._autosave_executor.shutdown(wait=True)
+            self._autosave_executor = None
 
     def _list_autosave_files(self):
         """自动保存列表，新→旧。
@@ -12822,16 +13130,19 @@ class ControlPanel(QWidget):
             cv.board_style = board_style
         current = int(data.get("current_page", 0) or 0)
         current = max(0, min(len(pages) - 1, current))
-        if data.get("whiteboard_mode"):
-            cv.whiteboard_mode = True
-            cv.pages = pages
-            cv.current_page = current
-            cv.load_page(pages[current])
-        else:
-            cv.whiteboard_mode = False
-            cv.pages = []
-            cv.current_page = 0
-            cv.load_page(pages[current])
+        cv._cancel_all_pointers()
+        cv._cancel_smart_recognition(drop_pending=True)
+        cv.flush_pending_snapshot()
+        cv.whiteboard_mode = bool(data.get("whiteboard_mode"))
+        cv.pages = pages
+        cv.current_page = current
+        cv._serialized_page_cache.clear()
+        cv.load_page(pages[current])
+        self.project_path = None
+        self.project_dirty = True
+        self._saved_document_signature = None
+        self._last_autosave_signature = None
+        self._document_generation += 1
         cv.reset_history()
         self.update_whiteboard_ui()
         self.update_history_ui()
@@ -12840,31 +13151,57 @@ class ControlPanel(QWidget):
         return True
 
     def offer_autosave_restore(self):
-        """启动时若有未空的自动保存，询问是否恢复。"""
-        filepath, data = self._latest_restorable_autosave()
-        if not data:
+        """Recommend the latest valid autosave, with lazy older-version previews."""
+        if not self.canvas or self._document_transition_active:
             return False
-        stamp = data.get("timestamp") or os.path.basename(filepath)
-        pages = data.get("pages") or []
-        mode = tr("whiteboard") if data.get("whiteboard_mode") else tr("annotate")
-        detail = f"{mode} · {len(pages)}\n{stamp}"
-        reply = QMessageBox.question(
-            self, tr("restore_autosave"), detail,
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            track_event("autosave_restore_declined", file=os.path.basename(filepath))
+        candidates = [path for _, path in self._list_autosave_files()]
+        if not candidates:
             return False
+        self._document_transition_active = True
+        self.pause_callbacks()
+        dialog = None
+        preview_style = ["WHITE"]
         try:
+            def load_data(path):
+                data = normalize_project_data(read_json_maybe_gz(path), kind=AUTOSAVE_KIND)
+                if not any(page_has_content(page) for page in data["pages"]):
+                    raise ValueError("empty autosave")
+                preview_style[0] = data["board_style"]
+                return data
+
+            def render_preview(page, size):
+                # Explicit deserialization covers text-only documents as well.
+                # Only background color needs the saved board style; never apply
+                # a preview document or mode to the live canvas.
+                return self.canvas.render_page_pixmap(deserialize_page(page), size,
+                                                      board_style=preview_style[0])
+
+            dialog = RecoveryDialog(candidates, load_data, render_preview, self)
+            if dialog.selected_data is None:
+                return False
+            dialog.setWindowModality(Qt.WindowModality.ApplicationModal)
+            dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+            self.raise_floating(dialog, bind_owner=False)
+            if dialog.exec() != QDialog.DialogCode.Accepted or dialog.selected_data is None:
+                track_event("autosave_restore_declined")
+                return False
+            if not self.confirm_unsaved_changes(tr("restore_autosave")):
+                return False
+            data = dialog.selected_data
             ok = self.apply_autosave_data(data)
             track_event("autosave_restored" if ok else "autosave_restore_empty",
-                        file=os.path.basename(filepath), pages=len(pages))
+                        file=os.path.basename(dialog.selected_path), pages=len(data["pages"]))
             return ok
-        except Exception as e:
-            track_event("autosave_restore_failed", error=str(e), file=os.path.basename(filepath))
-            notify_user(self, tr("restore_failed"), str(e), level="warning", exc=e)
+        except Exception as exc:
+            track_event("autosave_restore_failed", error=str(exc))
+            notify_user(self, tr("restore_failed"), str(exc), level="warning", exc=exc)
             return False
+        finally:
+            if dialog is not None:
+                dialog.hide()
+                dialog.deleteLater()
+            self._document_transition_active = False
+            self.resume_callbacks()
 
     AUTOSAVE_KEEP_HOURS = 72        # 保留最近三天的自动保存
     # 数量上限。光按 72 小时保留是不够的：每 30 秒一份，三天就是 8640 份，
@@ -13087,12 +13424,12 @@ class ControlPanel(QWidget):
         if not path:
             return False
         try:
-            self.canvas.save_current_page()
-            pages = [serialize_page(page) for page in (self.canvas.pages if self.canvas.whiteboard_mode else [self.canvas.capture_page()])]
+            pages = self.canvas.serialized_document_pages()
             data = make_project_data(pages=pages, current_page=self.canvas.current_page, whiteboard_mode=self.canvas.whiteboard_mode, board_style=self.canvas.board_style, app_version=APP_VERSION, metadata={"title": os.path.basename(path)})
-            atomic_write_json(path, data)
+            atomic_write_project(path, data)
             self.project_path = path
             self.project_dirty = False
+            self._saved_document_signature = self.canvas.document_signature()
             self.setWindowTitle(f"{tr('app')} - {os.path.basename(path)}")
             track_event("project_saved", path=os.path.basename(path), pages=len(pages))
             return True
@@ -13130,32 +13467,84 @@ class ControlPanel(QWidget):
             return False
         return self.open_project_from_path(path)
 
-    def open_project_from_path(self, path):
-        """按给定路径打开 .msd/.json 项目文件（对话框与拖拽共用入口）。"""
-        if not path:
+    def has_unsaved_changes(self):
+        if not self.canvas:
+            return bool(self.project_dirty)
+        if self.project_dirty:
+            return True
+        signature = self.canvas.document_signature()
+        if self._saved_document_signature is not None:
+            return signature != self._saved_document_signature
+        return (len(self.canvas.pages) > 1 or
+                any(page_has_content(page) for page in self.canvas.pages) or
+                page_has_content(self.canvas.live_page()))
+
+    def confirm_unsaved_changes(self, action):
+        """One cancel-default modal guard for destructive document transitions."""
+        if self._unsaved_prompt_active:
             return False
-        self.canvas._cancel_smart_recognition(drop_pending=True)  # 加载项目：放弃未触发的延迟识别
+        if not self.has_unsaved_changes():
+            return True
+        self._unsaved_prompt_active = True
+        self.pause_callbacks()
+        box = QMessageBox(self)
+        box.setWindowTitle(action)
+        box.setText(tr("unsaved_changes_prompt"))
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        box.setStandardButtons(QMessageBox.StandardButton.Save |
+                               QMessageBox.StandardButton.Discard |
+                               QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        box.setEscapeButton(QMessageBox.StandardButton.Cancel)
         try:
-            ensure_file_size(path)
-            with open(path, encoding="utf-8") as handle:
-                data = normalize_project_data(json.load(handle), kind=PROJECT_KIND)
+            self.raise_floating(box, bind_owner=False)
+            choice = box.exec()
+            if choice == QMessageBox.StandardButton.Save:
+                return bool(self.save_project())
+            return choice == QMessageBox.StandardButton.Discard
+        finally:
+            box.hide()
+            box.deleteLater()
+            self._unsaved_prompt_active = False
+            self.resume_callbacks()
+
+    def open_project_from_path(self, path):
+        """Validate first; only replace live work after an explicit safe choice."""
+        if not path or self._document_transition_active:
+            return False
+        self._document_transition_active = True
+        try:
+            data = normalize_project_data(read_json_maybe_gz(path), kind=PROJECT_KIND)
             pages = [deserialize_page(page) for page in data["pages"]]
+            if not self.confirm_unsaved_changes(tr("open_project")):
+                return False
             cv = self.canvas
+            cv._cancel_all_pointers()
+            cv._cancel_smart_recognition(drop_pending=True)
+            cv.flush_pending_snapshot()
             cv.whiteboard_mode = bool(data["whiteboard_mode"])
             cv.board_style = data["board_style"]
-            cv.pages = pages if cv.whiteboard_mode else []
-            cv.current_page = data["current_page"] if cv.whiteboard_mode else 0
-            cv.load_page(pages[data["current_page"]])
+            cv.pages = pages
+            cv.current_page = data["current_page"]
+            cv._serialized_page_cache.clear()
+            cv.load_page(pages[cv.current_page])
             cv.reset_history()
             self.project_path = path
             self.project_dirty = False
+            self._saved_document_signature = cv.document_signature()
+            self._last_autosave_signature = None
+            self._document_generation += 1
+            self.setWindowTitle(f"{tr('app')} - {os.path.basename(path)}")
             self.update_whiteboard_ui()
             self.update_history_ui()
             track_event("project_opened", path=os.path.basename(path), pages=len(pages))
             return True
-        except (OSError, ValueError, json.JSONDecodeError) as exc:
+        except (OSError, ValueError, TypeError, KeyError) as exc:
             notify_user(self, tr("open_failed"), map_io_exception(exc, path), level="warning", exc=exc)
             return False
+        finally:
+            self._document_transition_active = False
 
     def restore_from_restart(self, path):
         """托盘「重启软件」把当前工作存进临时文件再拉起新进程，新进程从这里接回。
@@ -13200,12 +13589,13 @@ class ControlPanel(QWidget):
                 try:
                     pix = cv.render_page_pixmap(page, size)
                 except Exception as exc:
-                    LOGGER.exception("render_page_pixmap failed: %s", exc)
-                    continue
+                    raise RuntimeError(f"Page {idx + 1}: {exc}") from exc
                 if pix is not None and not pix.isNull():
                     if total > 1:
                         self._stamp_page_number(pix, idx + 1, total)
                     rendered.append(pix)
+                else:
+                    raise RuntimeError(f"Page {idx + 1}: null rendering")
             return rendered
         return [self.grab_screen()]
 
@@ -13237,118 +13627,261 @@ class ControlPanel(QWidget):
             painter.end()
 
     def target_screen(self):
-        """Screen used for capture/export: canvas screen, else panel, else primary."""
+        if self.annotation_screen:
+            return select_monitor(QApplication.screens(), self.annotation_screen, QApplication.primaryScreen())
         return self.active_screen(getattr(self, "canvas", None), self)
+
+    def _sync_document_preferences(self):
+        preferences = getattr(self, "document_preferences", None)
+        if preferences is not None:
+            preferences.sync_from_panel()
+
+    def set_autosave_interval(self, seconds, persist=True, sync=True):
+        self.autosave_interval_seconds = bounded_int(seconds, AUTOSAVE_INTERVAL, 5, 86400)
+        timer = getattr(self, "autosave_timer", None)
+        if timer is not None:
+            timer.setInterval(self.autosave_interval_seconds * 1000)
+        if sync:
+            self._sync_document_preferences()
+        if persist:
+            self.save_settings()
+        return self.autosave_interval_seconds
+
+    def set_page_copy_placement(self, placement, persist=True):
+        self.page_copy_placement = placement if placement in COPY_PLACEMENTS else "after"
+        self._sync_document_preferences()
+        if persist:
+            self.save_settings()
+
+    def set_timer_alarm_volume(self, value, persist=True):
+        self.timer_alarm_volume = bounded_int(value, 100, 0, 100)
+        self._sync_document_preferences()
+        if persist:
+            self.save_settings()
+        return self.timer_alarm_volume
+
+    def set_annotation_screen(self, preference, persist=True, apply=True):
+        self.annotation_screen = preference if isinstance(preference, str) and len(preference) <= 512 else ""
+        if apply and self.canvas:
+            self.apply_annotation_screen()
+        self._sync_document_preferences()
+        if persist:
+            self.save_settings()
+
+    def _on_screens_changed(self, *_):
+        if self.canvas and self.annotation_screen:
+            self.apply_annotation_screen()
+        self._sync_document_preferences()
+
+    def apply_annotation_screen(self):
+        """Move our windows only; never change the Windows primary monitor."""
+        cv = self.canvas
+        target = self.target_screen()
+        if cv is None or target is None:
+            return
+        previous = cv.screen()
+        previous_geometry = previous.geometry() if previous is not None else target.geometry()
+        area = target.availableGeometry()
+        state = cv.windowState()
+        self.close_thumbnail_panel()
+        cv.setWindowState(state & ~Qt.WindowState.WindowFullScreen)
+        handle = cv.windowHandle()
+        if handle is not None:
+            handle.setScreen(target)
+        cv.setGeometry(target.geometry())
+        cv.setWindowState(state)
+        for window in self.opacity_targets() + [getattr(self, "page_rail", None)]:
+            if window is None:
+                continue
+            x = area.left() + window.x() - previous_geometry.left()
+            y = area.top() + window.y() - previous_geometry.top()
+            x, y = clamp_rect(x, y, window.width(), window.height(),
+                             (area.x(), area.y(), area.width(), area.height()))
+            window.move(x, y)
+        cv.refresh_speed_scale()
+        cv.update()
+        self._position_page_rail()
 
     @staticmethod
     def write_pdf(path, pixmaps):
-        if not pixmaps:
-            raise RuntimeError(tr("export_failed"))
-        first = pixmaps[0]
-        if first is None or first.isNull():
-            raise RuntimeError(tr("export_failed"))
-        writer = QPdfWriter(path)
-        writer.setResolution(96)
-        writer.setCreator("MyScreenDraw")
-        page_size = QSizeF(max(1, first.width()) / 96 * 25.4, max(1, first.height()) / 96 * 25.4)
-        writer.setPageSize(QPageSize(page_size, QPageSize.Unit.Millimeter))
-        writer.setPageMargins(QMarginsF(0, 0, 0, 0))
-        painter = QPainter(writer)
+        """Compatibility wrapper; validate all pages and output just like the UI."""
+        result = export_document("PDF", path, pixmaps, lambda pix, index, total: pix)
+        if not result.success:
+            raise RuntimeError("; ".join(f"{f.page}: {f.detail}" for f in result.failures)
+                               or tr("export_failed"))
+        return result
+
+    def _create_document_progress(self, title, total):
+        progress = QProgressDialog(title, tr("cancel"), 0, total, self)
+        progress.setWindowTitle(title)
+        progress.setWindowModality(Qt.WindowModality.ApplicationModal)
+        progress.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.setValue(0)
+        progress.show()
+        self.raise_floating(progress, bind_owner=False)
+        return progress
+
+    def _show_export_result(self, result, fmt):
+        """Partial/cancelled output must never look like a successful full export."""
+        count = len(result.exported_indices)
+        location = (result.exported_paths[0] if len(result.exported_paths) == 1
+                    else EXPORT_DIR)
+        if result.success:
+            summary = trf("export_" + fmt.lower() + "_summary", count=count, path=location)
+            notify_user(self, tr("export_done"), summary, level="information")
+            return
+        box = QMessageBox(self)
+        box.setWindowTitle(tr("export_cancelled") if result.cancelled else tr("export_failed"))
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setText(trf("export_incomplete", count=count, total=result.total, path=location))
+        missing = sorted(set(range(1, result.total + 1)) - set(result.exported_indices))
+        box.setInformativeText(trf("export_missing_pages", pages=", ".join(map(str, missing[:100]))
+                                  + (" …" if len(missing) > 100 else "")))
+        box.setDetailedText("\n".join(
+            f"{failure.page}: {failure.detail}" for failure in result.failures[:100]))
+        box.setStandardButtons(QMessageBox.StandardButton.Ok)
+        box.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
         try:
-            for index, pix in enumerate(pixmaps):
-                if pix is None or pix.isNull():
-                    continue
-                if index:
-                    writer.newPage()
-                painter.drawPixmap(painter.viewport(), pix, pix.rect())
+            self.raise_floating(box, bind_owner=False)
+            box.exec()
         finally:
-            painter.end()
+            box.hide()
+            box.deleteLater()
 
     def export_pages(self, fmt):
-        if not self.canvas:
-            return
-        self.timer.stop()
-        path = ""          # 记录当前正在写的文件，供失败提示定位
-        page_count = 0
+        if not self.canvas or self._document_transition_active:
+            return None
+        fmt = str(fmt).upper()
+        if fmt not in ("PNG", "PDF", "SVG", "EPS"):
+            raise ValueError("unsupported export format")
+        if fmt in ("SVG", "EPS") and not self.canvas.whiteboard_mode:
+            notify_user(self, tr("export_done"), tr("export_whiteboard_only"), level="information")
+            return None
+        self._document_transition_active = True
+        self.pause_callbacks()
+        progress = None
+        path = ""
+        result = None
         try:
-            if not hasattr(self, "collect_export_pages"):
-                raise AttributeError("collect_export_pages")
-            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            cv = self.canvas
+            # Snapshot runtime pages, not their bitmaps. The application-modal
+            # progress dialog prevents editing while each page is painted.
+            pages = cv.document_pages() if cv.whiteboard_mode else [None]
+            size = cv.size()
+            if size.width() < 2 or size.height() < 2:
+                screen = self.target_screen()
+                size = screen.geometry().size() if screen is not None else QSize(1920, 1080)
             os.makedirs(EXPORT_DIR, exist_ok=True)
-            fmt = str(fmt).upper()
-            if fmt in ("SVG", "EPS"):
-                summary, page_count = self._export_vector_pages(fmt, stamp)
-                if summary is None:
-                    # SVG/EPS 仅白板模式：已在下面统一弹一次提示，跳过后续通知
-                    notify_user(self, tr("export_done"), tr("export_whiteboard_only"), level="information")
-                    return
-            else:
-                pages = self.collect_export_pages()
-                pages = [pix for pix in (pages or []) if pix is not None and not pix.isNull()]
-                if not pages:
-                    raise RuntimeError(tr("export_failed"))
-                page_count = len(pages)
-                if fmt == "PNG":
-                    paths = []
-                    for index, pix in enumerate(pages):
-                        suffix = f"_p{index + 1}" if len(pages) > 1 else ""
-                        path = os.path.join(EXPORT_DIR, f"Export_{stamp}{suffix}.png")
-                        if not pix.save(path, "PNG"):
-                            raise RuntimeError(f"{tr('export_failed')}: {path}")
-                        paths.append(path)
-                    summary = tr("export_png_summary").format(
-                        count=len(paths),
-                        path=EXPORT_DIR if len(paths) > 1 else paths[0],
-                    )
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            path = os.path.join(EXPORT_DIR, f"Export_{stamp}.{fmt.lower()}")
+            progress = self._create_document_progress(tr("export"), len(pages))
+
+            def update(index, total, phase):
+                progress.setLabelText(trf("document_page_progress", index=index, total=total))
+                progress.setValue(index - 1 if phase == "before" else index)
+                QApplication.processEvents()
+
+            def render(page, index, total):
+                if page is None:
+                    # The progress window is a new top-level tool; keep it out of
+                    # desktop captures as well as the existing floating panels.
+                    progress.hide()
+                    try:
+                        pix = self.grab_screen()
+                    finally:
+                        progress.show()
+                        self.pause_callbacks()
                 else:
-                    path = os.path.join(EXPORT_DIR, f"Export_{stamp}.pdf")
-                    self.write_pdf(path, pages)
-                    summary = tr("export_pdf_summary").format(count=len(pages), path=path)
-            track_event("export", fmt=fmt, pages=page_count, whiteboard=bool(self.canvas.whiteboard_mode))
-            notify_user(self, tr("export_done"), summary, level="information")
-        except (OSError, ValueError, RuntimeError) as exc:
+                    pix = cv.render_page_pixmap(page, size)
+                if pix is not None and not pix.isNull() and total > 1:
+                    self._stamp_page_number(pix, index, total)
+                return pix
+
+            if fmt in ("SVG", "EPS"):
+                result = self._export_vector_pages(fmt, path, pages, size, update, progress.wasCanceled)
+            else:
+                result = export_document(fmt, path, pages, render,
+                                                progress=update, cancelled=progress.wasCanceled)
+            progress.close()
+            track_event("export" if result.success else "export_incomplete", fmt=fmt,
+                        pages=len(result.exported_indices), requested=result.total,
+                        failed_pages=[f.page for f in result.failures], cancelled=result.cancelled)
+            self._show_export_result(result, fmt)
+            return result
+        except (OSError, ValueError, RuntimeError, MemoryError) as exc:
+            if progress is not None:
+                progress.close()
+            result = ExportResult(len(locals().get("pages", [])), (), (),
+                                  (ExportFailure(0, map_io_exception(exc, path)),), False, False)
             track_event("export_failed", fmt=fmt, error=str(exc))
-            notify_user(self, tr("export_failed"), map_io_exception(exc, path), level="warning", exc=exc)
+            self._show_export_result(result, fmt)
+            return result
         finally:
-            self.timer.start(self.HEARTBEAT_MS)
+            if progress is not None:
+                progress.close()
+                progress.deleteLater()
+            self._document_transition_active = False
+            self.resume_callbacks()
             self.heartbeat_refresh()
 
-    def _export_vector_pages(self, fmt, stamp):
-        """SVG/EPS 矢量导出：仅白板模式，逐页写出，返回 (summary, page_count)。
-        非白板模式返回 (None, 0)，由调用方统一提示「仅支持白板」。"""
-        cv = self.canvas
-        if not cv.whiteboard_mode:
-            return None, 0
-        cv.save_current_page()
-        page_datas = [serialize_page(page) for page in cv.pages]
-        if not page_datas:
-            raise RuntimeError(tr("export_failed"))
-        size = cv.size()
-        if size.width() < 2 or size.height() < 2:
-            screen = self.target_screen()
-            geo = screen.geometry() if screen is not None else None
-            size = QSize(geo.width(), geo.height()) if geo is not None else QSize(1920, 1080)
-        paths = []
-        total = len(page_datas)
-        for index, page_data in enumerate(page_datas):
-            suffix = f"_p{index + 1}" if total > 1 else ""
-            path = os.path.join(EXPORT_DIR, f"Export_{stamp}{suffix}.{fmt.lower()}")
-            if fmt == "SVG":
-                cv.write_svg_page(path, page_data, size)
-            else:
-                # EPS 无法内嵌 PNG，把图片解码为原始 RGB 供 eps_export 用 colorimage 运算符嵌入
-                decoded = {}
-                for img in page_data.get("images", []):
-                    pixels = decode_image_pixels(img.get("data"))
-                    if pixels is not None:
-                        decoded[img.get("id")] = pixels
-                eps_export.write_eps(path, page_data, size.width(), size.height(),
-                                     board_style=cv.board_style, decoded_images=decoded)
-            paths.append(path)
-        summary = (tr("export_svg_summary") if fmt == "SVG"
-                   else tr("export_eps_summary")).format(
-            count=len(paths), path=EXPORT_DIR if len(paths) > 1 else paths[0])
-        return summary, len(paths)
+    def _export_vector_pages(self, fmt, destination, pages, size, progress, cancelled):
+        """Stream validated, atomic SVG/EPS files with original page numbers."""
+        indices, paths, failures = [], [], []
+        stopped = False
+        processed = 0
+        total = len(pages)
+        for index, page in enumerate(pages, 1):
+            temporary = None
+            progress(index, total, "before")
+            if cancelled():
+                stopped = True
+                break
+            try:
+                stem, extension = os.path.splitext(destination)
+                target = f"{stem}_p{index}{extension}" if total > 1 else destination
+                fd, temporary = tempfile.mkstemp(prefix=".msd-export-", suffix=extension,
+                                                 dir=os.path.dirname(destination))
+                os.close(fd)
+                data = serialize_page(page)
+                if fmt == "SVG":
+                    from PyQt6.QtSvg import QSvgRenderer
+                    self.canvas.write_svg_page(temporary, data, size)
+                    if not QSvgRenderer(temporary).isValid():
+                        raise OSError("SVG read-back validation failed")
+                else:
+                    decoded = {}
+                    for image in data.get("images", []):
+                        pixels = decode_image_pixels(image.get("data"))
+                        if pixels is None:
+                            raise ValueError("EPS image decode failed")
+                        decoded[image.get("id")] = pixels
+                    eps_export.write_eps(temporary, data, size.width(), size.height(),
+                                         board_style=self.canvas.board_style, decoded_images=decoded)
+                    with open(temporary, "rb") as handle:
+                        if not handle.read(16).startswith(b"%!PS-Adobe"):
+                            raise OSError("EPS read-back validation failed")
+                if cancelled():
+                    stopped = True
+                    break
+                os.replace(temporary, target)
+                temporary = None
+                indices.append(index)
+                paths.append(target)
+            except Exception as exc:
+                failures.append(ExportFailure(index, str(exc)[:2000]))
+            finally:
+                if temporary is not None:
+                    with contextlib.suppress(OSError):
+                        os.remove(temporary)
+            processed = index
+            progress(index, total, "after")
+            if cancelled():
+                stopped = True
+                break
+        return ExportResult(total, tuple(indices), tuple(paths), tuple(failures), stopped, processed == total)
 
     # --- 计算器 ---
     def _make_tool_window(self, title_text):
@@ -14241,119 +14774,105 @@ class ControlPanel(QWidget):
         return item
 
     def import_pdf(self, path):
-        """逐页有界渲染并批量插入 PDF，不把整本文件同时驻留在内存。"""
+        """Stage bounded PDF pages, then append them as independent board pages.
+
+        No live page/history/selection is changed until every selected PDF page
+        rendered successfully. Cancellation and errors discard the whole batch.
+        """
+        if not self.canvas or self._document_transition_active:
+            return 0
         try:
             from PyQt6.QtPdf import QPdfDocument
         except ImportError:
             notify_user(self, tr("import_failed"), tr("import_pdf_unsupported"), level="warning")
             return 0
         document = QPdfDocument(None)
-        error = document.load(path)
-        if error != QPdfDocument.Error.None_:
-            try:
-                document.close()
-            except (AttributeError, RuntimeError):
-                pass
-            raise ValueError(str(error) or tr("import_failed"))
-        total = document.pageCount()
-        pages = min(total, self.MAX_PDF_PAGES, MAX_IMAGES_PER_PAGE - len(self.canvas.image_items))
-        if total > self.MAX_PDF_PAGES:
-            notify_user(self, tr("import_done"),
-                        trf("import_pdf_pages_limited", count=self.MAX_PDF_PAGES), level="information")
-        if pages <= 0:
-            try:
-                document.close()
-            except (AttributeError, RuntimeError):
-                pass
-            return 0
-
-        cv = self.canvas
-        before = cv.capture_page()
-        old_selected = set(cv.selected_ids)
-        old_undo_depth = len(cv.undo_stack)
-        old_redo_stack = list(cv.redo_stack)
-        old_undo_key = cv.last_undo_key
-        autosave_timer = getattr(self, "autosave_timer", None)
-        was_autosaving = bool(autosave_timer and autosave_timer.isActive())
-        if was_autosaving:
-            autosave_timer.stop()
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        inserted = 0
-        batch_started = False
-        resident_pixels = sum(
-            max(0, item["pixmap"].width() * item["pixmap"].height())
-            for item in cv.image_items if item.get("pixmap") is not None and not item["pixmap"].isNull()
-        )
+        progress = None
+        self._document_transition_active = True
+        self.pause_callbacks()
         try:
-            for index in range(pages):
-                point_size = document.pagePointSize(index)
-                if point_size.width() <= 0 or point_size.height() <= 0:
-                    continue
-                scale = self.PDF_EXPORT_DPI / 72.0
-                source_width = max(1, int(point_size.width() * scale))
-                source_height = max(1, int(point_size.height() * scale))
-                remaining_pixels = self.MAX_PDF_TOTAL_PIXELS - resident_pixels
-                target = _bounded_image_size(
-                    source_width, source_height, self.MAX_IMPORT_PIXELS,
-                    remaining_pixels,
-                )
-                if target.isEmpty():
-                    break
-                image = document.render(index, target)
-                if image.isNull():
-                    continue
-                pixmap = QPixmap.fromImage(image)
-                if pixmap.isNull():
-                    continue
-                actual_pixels = pixmap.width() * pixmap.height()
-                if actual_pixels <= 0 or actual_pixels > remaining_pixels:
-                    continue
-                if not batch_started:
-                    # `before` 已在批次开始时捕获；直接提交它，避免 push_undo()
-                    # 对含大量图片的当前页再做一次相同的完整克隆。
-                    cv.commit_undo(before)
-                    batch_started = True
-                item = self.insert_image_pixmap(
-                    pixmap, record_undo=False, finalize=False)
-                if item is None:
-                    continue
-                inserted += 1
-                resident_pixels += actual_pixels
-                # Let Qt repaint the wait cursor and canvas without admitting a
-                # second user action into the half-built batch.
-                QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
-            if inserted:
-                if cv.whiteboard_mode:
-                    cv.save_current_page()
-                self.sync_selection_controls()
-                self.position_selection_panel(cv.selection_bounds())
-                cv.mark_content_changed()
-            elif batch_started:
-                cv.undo_stack = cv.undo_stack[:old_undo_depth]
-                cv.redo_stack = old_redo_stack
-                cv.last_undo_key = old_undo_key
-            return inserted
-        except Exception:
-            if batch_started:
-                cv.load_page(before)
-                cv.selected_ids = old_selected
-                if cv.whiteboard_mode:
-                    cv.save_current_page()
-                cv.undo_stack = cv.undo_stack[:old_undo_depth]
-                cv.redo_stack = old_redo_stack
-                cv.last_undo_key = old_undo_key
-                self.sync_selection_controls()
-                self.position_selection_panel(cv.selection_bounds())
-                cv.panel.update_history_ui() if cv.panel else None
-            raise
+            error = document.load(path)
+            if error != QPdfDocument.Error.None_:
+                raise ValueError(str(error) or tr("import_failed"))
+            cv = self.canvas
+            existing = cv.document_pages()
+            total = document.pageCount()
+            count = min(total, self.MAX_PDF_PAGES, MAX_PAGES - len(existing))
+            if count <= 0:
+                raise ValueError(trf("page_limit", count=MAX_PAGES))
+            if count < total:
+                notify_user(self, tr("import_done"), trf("import_pdf_pages_limited", count=count),
+                            level="information")
+            resident_pixels = sum(
+                image["pixmap"].width() * image["pixmap"].height()
+                for page in existing for image in page.get("images", [])
+                if image.get("pixmap") is not None and not image["pixmap"].isNull())
+            remaining = self.MAX_PDF_TOTAL_PIXELS - resident_pixels
+            staged = []
+            progress = self._create_document_progress(tr("import_media"), count)
+            for index in range(count):
+                progress.setLabelText(trf("document_page_progress", index=index + 1, total=count))
+                progress.setValue(index)
+                QApplication.processEvents()
+                if progress.wasCanceled():
+                    notify_user(self, tr("import_media"), tr("import_pdf_cancelled"), level="information")
+                    return 0
+                try:
+                    points = document.pagePointSize(index)
+                    if points.width() <= 0 or points.height() <= 0:
+                        raise ValueError("invalid PDF page size")
+                    scale = self.PDF_EXPORT_DPI / 72.0
+                    # Allocate a fair share so an early large page cannot silently
+                    # consume the entire document budget and suppress later pages.
+                    budget = min(self.MAX_IMAGE_PIXELS, remaining // (count - index))
+                    target = _bounded_image_size(max(1, int(points.width() * scale)),
+                                                 max(1, int(points.height() * scale)),
+                                                 self.MAX_IMPORT_PIXELS, budget)
+                    if target.isEmpty():
+                        raise ValueError("PDF image memory budget exhausted")
+                    image = document.render(index, target)
+                    if image.isNull() or image.width() * image.height() > budget:
+                        raise ValueError("invalid PDF page rendering")
+                    pixmap = QPixmap.fromImage(image)
+                    del image
+                    if pixmap.isNull():
+                        raise ValueError("null PDF bitmap")
+                    remaining -= pixmap.width() * pixmap.height()
+                    fit = min(1.0, max(1, cv.width()) * 0.95 / pixmap.width(),
+                              max(1, cv.height()) * 0.95 / pixmap.height())
+                    item = {"id": uuid.uuid4(), "pos": QPointF(cv.width() / 2, cv.height() / 2),
+                            "size": QSizeF(pixmap.width() * fit, pixmap.height() * fit),
+                            "rotation": 0.0, "pixmap": pixmap}
+                    staged.append({"page_id": str(uuid.uuid4()),
+                                   "name": f"{os.path.basename(path)[:230]} — {index + 1}",
+                                   "segments": [], "texts": [], "shapes": [], "images": [item]})
+                except Exception as exc:
+                    raise RuntimeError(trf("import_pdf_page_error", index=index + 1,
+                                           detail=str(exc)[:500])) from exc
+                progress.setValue(index + 1)
+                QApplication.processEvents()
+                if progress.wasCanceled():
+                    notify_user(self, tr("import_media"), tr("import_pdf_cancelled"), level="information")
+                    return 0
+            # Commit only after the whole bounded batch succeeds. Histories remain
+            # per-page, just as with new_page/switch_page, never across PDF pages.
+            cv.enter_whiteboard()
+            cv.pages = existing + staged
+            cv.current_page = len(existing)
+            cv.load_page(staged[0])
+            cv.reset_history()
+            cv.mark_content_changed()
+            self.update_whiteboard_ui()
+            self.sync_selection_controls()
+            self.position_selection_panel(QRectF())
+            return len(staged)
         finally:
-            try:
-                document.close()
-            except (AttributeError, RuntimeError):
-                pass
-            QApplication.restoreOverrideCursor()
-            if was_autosaving:
-                autosave_timer.start(AUTOSAVE_INTERVAL * 1000)
+            document.close()
+            if progress is not None:
+                progress.close()
+                progress.deleteLater()
+            self._document_transition_active = False
+            self.resume_callbacks()
 
 if __name__ == "__main__":
     ensure_directories()

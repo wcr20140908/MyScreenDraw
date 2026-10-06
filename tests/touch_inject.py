@@ -147,10 +147,22 @@ def inject(contacts, retry=True):
 
 def raise_topmost(widget):
     """Put widget at the top of the OS Z order so injected pixels reach it."""
-    geo = widget.frameGeometry()
-    user32.SetWindowPos(int(widget.winId()), HWND_TOPMOST,
-                        geo.x(), geo.y(), geo.width(), geo.height(),
-                        SWP_SHOWWINDOW)
+    # Qt geometries are logical; passing them as native pixels can resize a
+    # high-DPI window. Raise only, preserving the native client geometry.
+    user32.SetWindowPos(int(widget.winId()), HWND_TOPMOST, 0, 0, 0, 0,
+                        SWP_SHOWWINDOW | 0x0001 | 0x0002 | 0x0010)
+
+
+def native_client_geometry(widget):
+    """Return physical screen x/y/width/height, excluding the native title bar."""
+    user32.GetClientRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+    user32.ClientToScreen.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.POINT)]
+    rect, origin = wintypes.RECT(), wintypes.POINT()
+    handle = int(widget.winId())
+    if not (user32.GetClientRect(handle, ctypes.byref(rect)) and
+            user32.ClientToScreen(handle, ctypes.byref(origin))):
+        raise TouchInjectionUnavailable("Could not read native client geometry")
+    return origin.x, origin.y, rect.right - rect.left, rect.bottom - rect.top
 
 
 def owns_pixel(widget, x, y):

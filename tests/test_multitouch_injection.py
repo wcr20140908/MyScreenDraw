@@ -32,7 +32,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from tests.touch_inject import (TouchInjectionUnavailable, drag_one_finger,
-                                drag_two_fingers, init_injection, owns_pixel,
+                                drag_two_fingers, init_injection, owns_pixel, native_client_geometry,
                                 qt_sees_touchscreen, raise_topmost)
 
 # Must precede QApplication construction, so it runs at import time.
@@ -106,14 +106,13 @@ class CanvasInjectionTests(unittest.TestCase):
         return seen
 
     def aim(self):
-        geo = self.canvas.frameGeometry()
-        centre = geo.center()
-        cx, cy = centre.x(), centre.y()
+        x, y, width, height = native_client_geometry(self.canvas)
+        cx, cy = x + width // 2, y + height // 2
         if not owns_pixel(self.canvas, cx, cy):
             self.skipTest("canvas is not topmost at its own centre pixel -- "
                           "another window owns it, injection cannot reach us")
-        reach_x = max(40, min(200, geo.width() // 4))
-        reach_y = max(20, min(60, geo.height() // 6))
+        reach_x = max(40, min(200, width // 4))
+        reach_y = max(20, min(60, height // 6))
         return cx, cy, reach_x, reach_y
 
     def two_finger_write(self):

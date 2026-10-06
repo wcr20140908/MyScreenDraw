@@ -8,6 +8,7 @@ Needs a real desktop session -- injection is positional and the offscreen platfo
 has no window at any screen pixel. Skips instead of failing when unavailable.
 """
 import sys
+import time
 import unittest
 from pathlib import Path
 
@@ -16,7 +17,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from tests.touch_inject import (TouchInjectionUnavailable, drag_two_fingers,
-                                init_injection, owns_pixel, qt_sees_touchscreen,
+                                init_injection, owns_pixel, native_client_geometry, qt_sees_touchscreen,
                                 raise_topmost)
 
 # Must happen before QApplication is constructed, so it runs at import time.
@@ -75,14 +76,22 @@ class TouchInjectionTests(unittest.TestCase):
 
     def gesture(self):
         """Pinch apart at the probe's real centre; returns collected frames."""
-        centre = self.probe.frameGeometry().center()
-        cx, cy = centre.x(), centre.y()
+        x, y, width, height = native_client_geometry(self.probe)
+        cx, cy = x + width // 2, y + height // 2
         if not owns_pixel(self.probe, cx, cy):
             self.skipTest("probe is not topmost at its own centre pixel")
-        drag_two_fingers((cx - 80, cy), (cx + 80, cy),
-                         (cx - 140, cy), (cx + 140, cy))
-        for _ in range(20):
+        def drain():
             self.app.processEvents()
+            time.sleep(0.01)
+        drag_two_fingers((cx - 80, cy), (cx + 80, cy),
+                         (cx - 140, cy), (cx + 140, cy), pump=drain)
+        # Native pointer delivery is asynchronous. Twenty tight processEvents()
+        # calls can finish before Windows posts a single frame under load.
+        deadline = time.monotonic() + 0.75
+        while time.monotonic() < deadline:
+            drain()
+            if self.probe.frames and self.probe.frames[-1][0] == "END":
+                break
         return self.probe.frames
 
     def test_injected_gesture_arrives_as_touch_not_mouse(self):

@@ -277,6 +277,7 @@ class AppLifecycleManager:
                                      f'myscreendraw_restart_{os.getpid()}.msd')
         original_path = self.panel.project_path
         original_dirty = self.panel.project_dirty
+        original_signature = getattr(self.panel, "_saved_document_signature", None)
         original_title = self.panel.windowTitle()
         try:
             success = self.panel.save_project(recovery_file)
@@ -286,6 +287,7 @@ class AppLifecycleManager:
             # 临时快照不能改变用户当前文件的保存目标或未保存标记。
             self.panel.project_path = original_path
             self.panel.project_dirty = original_dirty
+            self.panel._saved_document_signature = original_signature
             self.panel.setWindowTitle(original_title)
         if not success:
             # 保存失败时继续重启会丢掉所有未保存工作，必须留在当前进程。
@@ -421,6 +423,11 @@ class AppLifecycleManager:
                     window.hide()
             except Exception:
                 pass
+
+        # Let already-started atomic autosaves finish before files/process exit.
+        shutdown_autosave = getattr(self.panel, "shutdown_autosave", None)
+        if shutdown_autosave is not None:
+            shutdown_autosave()
 
         # 清理托盘图标
         if self.tray_icon:

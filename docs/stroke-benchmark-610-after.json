@@ -1,0 +1,10 @@
+{
+  "segments": 21600,
+  "strokes": 120,
+  "cold_ms": 346.883,
+  "warm_full_ms": 131.205,
+  "warm_clipped_ms": 0.426,
+  "all_bounds_ms": 0.423,
+  "active_append_frame_ms": 0.313,
+  "platform": "offscreen"
+}

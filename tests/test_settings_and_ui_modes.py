@@ -510,7 +510,7 @@ class UpdateCheckTests(_PanelCase):
                 panel._update_install_handoff = False
                 panel._downloading_release = {"tag": "v6.0.1"}
                 (Path(root) / 'MyScreenDraw.exe').write_bytes(b'old portable fixture')
-                with patch.object(self.main.QMessageBox, 'exec', return_value=choice), \
+                with patch.object(self.main.QMessageBox, 'exec', side_effect=[choice, self.main.QMessageBox.StandardButton.Save]), \
                         patch.object(self.main.sys, 'frozen', True, create=True), \
                         patch.object(self.main, 'APP_DIR', root), \
                         patch.object(panel, 'save_project', return_value=saved) as save, \
@@ -556,7 +556,7 @@ class UpdateCheckTests(_PanelCase):
              self.test_default_check_only_notifies),
             ('download_pending_update', 'self._offer_update_page(release)', 'pass',
              self.test_manual_download_is_separate_from_check),
-            ('_on_update_downloaded', 'if self.project_dirty and not self.save_project():', 'if False:',
+            ('_on_update_downloaded', 'if not self.confirm_unsaved_changes(tr("update_installing")):', 'if False:',
              self.test_install_confirmation_save_gate_and_powershell_handoff),
             ('_on_update_downloaded', '"powershell.exe"', '"cmd.exe"',
              self.test_install_confirmation_save_gate_and_powershell_handoff),

@@ -69,3 +69,5 @@ _beta7_grabs/
 # 便携包只作为 GitHub Release 附件发布（create_release.ps1），不入库。
 MyScreenDraw-v*.zip
 MyScreenDraw-v*.zip.sha256
+# Private native-test screenshots, fixtures and diagnostics
+.ccgui/

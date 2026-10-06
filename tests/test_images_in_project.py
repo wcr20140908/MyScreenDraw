@@ -15,12 +15,20 @@ from persistence import (validate_page_data, MAX_IMAGES_PER_PAGE, MAX_IMAGE_DATA
 
 
 def _valid_image(**overrides):
+    from PyQt6.QtCore import QBuffer, QByteArray, QIODevice
+    from PyQt6.QtGui import QImage, QColor
+    image = QImage(2, 2, QImage.Format.Format_ARGB32)
+    image.fill(QColor("red"))
+    buffer = QBuffer()
+    buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+    assert image.save(buffer, "PNG")
+    png_data = bytes(buffer.data())
     item = {
         "id": "img-1",
         "pos": [100.0, 200.0],
         "size": [40.0, 30.0],
         "rotation": 0.0,
-        "data": base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16).decode("ascii"),
+        "data": base64.b64encode(png_data).decode("ascii"),
     }
     item.update(overrides)
     return {"segments": [], "texts": [], "shapes": [], "images": [item]}

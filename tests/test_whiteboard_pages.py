@@ -118,10 +118,12 @@ class WhiteboardPagesTests(unittest.TestCase):
     def test_cancel_confirmation_leaves_content_and_history_unchanged(self):
         self.ink("retained")
         self.canvas.push_undo()
+        dirty_before = self.panel.project_dirty
         self.run_confirmation(QMessageBox.StandardButton.Cancel)
         self.assertEqual(self.canvas.all_segments[0]["id"], "retained")
         self.assertEqual(len(self.canvas.undo_stack), 1)
-        self.assertFalse(self.panel.project_dirty)
+        self.assertEqual(self.panel.project_dirty, dirty_before)
+        self.assertTrue(self.panel.has_unsaved_changes())
 
     def test_confirm_deletes_and_refreshes_list(self):
         self.canvas.new_page()

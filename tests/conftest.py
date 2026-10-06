@@ -6,14 +6,14 @@ from pathlib import Path
 import pytest
 
 
-def _dispose_offscreen_widgets(app):
+def _dispose_offscreen_widgets(app, owned_windows=None):
     """Dispose Qt trees while Python/SIP and isolated runtime paths are alive."""
     import gc
     import main
     from PyQt6 import sip
     from PyQt6.QtCore import QCoreApplication, QEvent, QTimer
 
-    windows = list(app.topLevelWidgets())
+    windows = list(app.topLevelWidgets() if owned_windows is None else owned_windows)
     for window in windows:
         if sip.isdeleted(window):
             continue
@@ -21,6 +21,7 @@ def _dispose_offscreen_widgets(app):
             timer.stop()
         if isinstance(window, main.ControlPanel):
             window.stop_update_worker()
+            window.shutdown_autosave()
             listener = getattr(window, "listener", None)
             if listener is not None:
                 listener.stop()
@@ -34,7 +35,8 @@ def _dispose_offscreen_widgets(app):
     QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
     windows.clear()
     gc.collect()
-    assert not app.topLevelWidgets(), "Offscreen test windows survived session teardown"
+    if owned_windows is None:
+        assert not app.topLevelWidgets(), "Offscreen test windows survived session teardown"
 
 
 @pytest.fixture(scope="session", autouse=True)

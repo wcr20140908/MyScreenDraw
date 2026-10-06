@@ -297,7 +297,10 @@ class Beta5SplitUiTests(unittest.TestCase):
             self.assertTrue(self.panel.save_project(path))
             saved_as = self.panel.project_path
             cv.all_segments = []
-            self.assertTrue(self.panel.restore_from_restart(path))
+            # Clearing a saved document is now correctly detected as unsaved.
+            # This same-process restart simulation must explicitly discard it.
+            with patch.object(main.QMessageBox, "exec", return_value=main.QMessageBox.StandardButton.Discard):
+                self.assertTrue(self.panel.restore_from_restart(path))
             self.assertEqual([s["id"] for s in cv.all_segments], ["restart-me"])
             self.assertIsNone(self.panel.project_path)
             self.assertTrue(self.panel.project_dirty)

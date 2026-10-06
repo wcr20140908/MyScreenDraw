@@ -60,8 +60,8 @@ function Invoke-Smoke([string]$Executable, [string]$Directory) {
 }
 
 $version = (& python -c "from version import VERSION; print(VERSION)").Trim()
-if ($LASTEXITCODE -ne 0 -or $version -ne "6.0.1") {
-    throw "Release build requires version 6.0.1, found '$version'"
+if ($LASTEXITCODE -ne 0 -or $version -ne "6.1.0") {
+    throw "Release build requires version 6.1.0, found '$version'"
 }
 
 # Never package checked-out runtime data or stale PyInstaller output.

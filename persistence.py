@@ -3,6 +3,8 @@
 """Project persistence helpers shared by autosave and user project files."""
 from __future__ import annotations
 
+import base64
+import binascii
 import gzip
 import json
 import math
@@ -11,6 +13,7 @@ import re
 import tempfile
 from datetime import datetime
 from typing import Any
+from uuid import UUID
 
 SCHEMA_VERSION = 1
 PROJECT_KIND = "myscreendraw-project"
@@ -99,12 +102,75 @@ def atomic_write_json_gz(path: str, data: Any, *, compresslevel: int = 6) -> Non
         raise
 
 
+def _write_bounded_json(stream: Any, encoder: json.JSONEncoder, data: dict) -> None:
+    total = 0
+    for chunk in encoder.iterencode(data):
+        encoded = chunk.encode("utf-8")
+        total += len(encoded)
+        if total > MAX_PROJECT_BYTES:
+            raise ValueError("Project JSON exceeds reader's uncompressed size limit")
+        stream.write(encoded)
+
+
+def _atomic_write_project_payload(path: str, data: Any, *, kind: str, compressed: bool) -> None:
+    """Validate first; stream bounded JSON to a same-directory temporary file.
+
+    Both the disk file and its decompressed JSON must fit the reader's limit.
+    The generic atomic_write_json* helpers are still for configs/legacy callers.
+    """
+    normalized = normalize_project_data(data, kind=kind)
+    # _revision is a runtime thumbnail cache, not persisted page state.
+    normalized["pages"] = [{k: v for k, v in page.items() if k != "_revision"}
+                           for page in normalized["pages"]]
+    encoder = json.JSONEncoder(ensure_ascii=False, indent=None if compressed else 2,
+                               separators=(",", ":") if compressed else None,
+                               allow_nan=False)
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    os.makedirs(directory, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix="." + os.path.basename(path) + ".", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "wb") as raw:
+            if compressed:
+                with gzip.GzipFile(fileobj=raw, mode="wb", compresslevel=6, mtime=0) as stream:
+                    _write_bounded_json(stream, encoder, normalized)
+            else:
+                _write_bounded_json(raw, encoder, normalized)
+            if raw.tell() > MAX_PROJECT_BYTES:
+                raise ValueError("Project file exceeds reader's on-disk size limit")
+            raw.flush()
+            os.fsync(raw.fileno())
+        os.replace(temporary, path)
+    except Exception:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+
+
+def atomic_write_project(path: str, data: Any) -> None:
+    """Atomically write a validated, reader-compatible plain .msd project."""
+    _atomic_write_project_payload(path, data, kind=PROJECT_KIND, compressed=False)
+
+
+def atomic_write_autosave(path: str, data: Any) -> None:
+    """Atomically write a validated, bounded gzip autosave (.json.gz)."""
+    _atomic_write_project_payload(path, data, kind=AUTOSAVE_KIND, compressed=True)
+
+
 def read_json_maybe_gz(path: str) -> Any:
     """Load a .json or .json.gz payload. Autosaves written before 5.2.2 are plain."""
     ensure_file_size(path)
-    opener = gzip.open if str(path).endswith(".gz") else open
-    with opener(path, "rb") as handle:
-        payload = handle.read(MAX_PROJECT_BYTES + 1)
+    # Files may be renamed or saved with arbitrary extensions. Inspect the
+    # stream itself, while retaining both physical and decompressed size limits.
+    with open(path, "rb") as raw:
+        compressed = raw.read(2) == b"\x1f\x8b"
+        raw.seek(0)
+        if compressed:
+            with gzip.GzipFile(fileobj=raw, mode="rb") as handle:
+                payload = handle.read(MAX_PROJECT_BYTES + 1)
+        else:
+            payload = raw.read(MAX_PROJECT_BYTES + 1)
     if len(payload) > MAX_PROJECT_BYTES:
         raise ValueError("项目解压后大小超出限制")
     return json.loads(payload.decode("utf-8"))
@@ -163,6 +229,19 @@ def validate_page_data(page: Any) -> tuple[bool, str]:
     if (len(segments) > MAX_SEGMENTS_PER_PAGE or len(texts) > MAX_TEXTS_PER_PAGE
             or len(shapes) > MAX_SHAPES_PER_PAGE or len(images) > MAX_IMAGES_PER_PAGE):
         return False, "页面对象数量超出限制"
+
+    # Optional persistent page identity/name. _revision is runtime-only.
+    if "page_id" in page:
+        page_id = page["page_id"]
+        if not isinstance(page_id, str) or len(page_id) != 36:
+            return False, "Invalid page ID"
+        try:
+            if str(UUID(page_id)) != page_id:
+                return False, "Invalid page ID"
+        except ValueError:
+            return False, "Invalid page ID"
+    if "name" in page and (not isinstance(page["name"], str) or len(page["name"]) > 256):
+        return False, "Invalid page name"
 
     # One stroke legitimately consists of many segments sharing an id. Texts and
     # shapes are individual objects, and ids may not alias another object class.
@@ -270,6 +349,15 @@ def validate_page_data(page: Any) -> tuple[bool, str]:
         data = item.get("data")
         if not isinstance(data, str) or not data or len(data) > MAX_IMAGE_DATA_BYTES:
             return False, "图片数据无效"
+        try:
+            raw = base64.b64decode(data, validate=True)
+        except (ValueError, binascii.Error):
+            return False, "Invalid image base64"
+        # Match deserialize_image's Qt decoder, not merely a PNG magic prefix.
+        from PyQt6.QtGui import QImage
+        if QImage.fromData(raw).isNull():
+            return False, "Image cannot be decoded"
+
     return True, ""
 
 
@@ -284,10 +372,16 @@ def normalize_project_data(data: Any, *, kind: str | None = None) -> dict[str, A
             raise ValueError("项目缺少 pages")
     if not isinstance(pages, list) or not pages or len(pages) > MAX_PAGES:
         raise ValueError("项目 pages 无效")
+    page_ids: set[str] = set()
     for page in pages:
         ok, reason = validate_page_data(page)
         if not ok:
             raise ValueError(reason)
+        page_id = page.get("page_id")
+        if page_id is not None:
+            if page_id in page_ids:
+                raise ValueError("Duplicate page ID")
+            page_ids.add(page_id)
     current = data.get("current_page", 0)
     if not isinstance(current, int) or isinstance(current, bool):
         current = 0

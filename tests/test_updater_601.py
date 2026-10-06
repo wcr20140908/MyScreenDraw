@@ -170,6 +170,7 @@ def panel_stub():
         update_progress_bar=Mock(), btn_download_update=Mock(), btn_cancel_update=Mock(),
         pause_callbacks=Mock(), resume_callbacks=Mock(), styleSheet=lambda: "",
         save_settings=Mock(), save_project=Mock(return_value=True), project_dirty=False,
+        confirm_unsaved_changes=Mock(return_value=True),
         lifecycle=SimpleNamespace(is_exiting=lambda: False, _quit_dialog_showing=False, _do_quit=Mock()),
     )
 
@@ -309,6 +310,7 @@ def test_download_completion_failure_or_cancel_keeps_app_running_and_cleans(inst
     elif failure == "save-cancel":
         case.panel.project_dirty = True
         case.panel.save_project.return_value = False
+        case.panel.confirm_unsaved_changes.return_value = False
     elif failure == "stopping":
         case.panel._updates_stopping = True
     error = {"worker-error": "error_OSError", "download-cancelled": "download_cancelled"}.get(failure)

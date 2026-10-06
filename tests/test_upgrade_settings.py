@@ -43,7 +43,8 @@ smart_multitouch speed_width timer_mode timer_target panel_x panel_y panel_scree
 logo_x logo_y toolbar_x toolbar_y toolbar_detached orientation draw_state shape_type
 text_font_size drawing_mode ruler_calibrations ui_mode ui_radius ui_opacity
 update_check_enabled update_channel notice_state whiteboard_auto_pen
-pen_defaults_enabled pen_defaults last_annotate_tool""".split())
+pen_defaults_enabled pen_defaults last_annotate_tool autosave_interval_seconds
+annotation_screen timer_alarm_volume page_copy_placement""".split())
 TOOLS = ("PEN", "MARKER", "LASER", "ERASER", "SELECT", "TEXT", "SHAPE")
 
 
@@ -165,6 +166,10 @@ def rich_settings(rig):
     p.pen_defaults_enabled = True
     p.notice_state = {"launches": 9, "last_version": "v6.0.0"}
     p.last_annotate_tool = "MARKER"
+    p.autosave_interval_seconds = 47
+    p.annotation_screen = "synthetic-disconnected-monitor|serial"
+    p.timer_alarm_volume = 31
+    p.page_copy_placement = "before"
     p.pen_defaults = {key: capture_current(c, key) for key in (*rig.main.PEN_STYLES, "marker", "laser")}
     settings = p.collect_settings()
     assert set(settings) == set(FIELDS), "Update the audit when collect_settings changes"

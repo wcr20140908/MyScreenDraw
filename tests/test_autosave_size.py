@@ -131,6 +131,7 @@ class AutosaveCase(unittest.TestCase):
         self.addCleanup(self.stop_timers)
 
     def stop_timers(self):
+        self.panel.shutdown_autosave()
         for name in ("listener", "timer", "autosave_timer", "_thumbnail_live_timer"):
             try:
                 getattr(self.panel, name).stop()
@@ -218,6 +219,7 @@ class AutosaveWriteTests(AutosaveCase):
         self.draw_something()
         self.panel._last_autosave_signature = None
         self.panel.auto_save()
+        self.assertTrue(self.panel.wait_for_autosave(10))
         produced = [n for n in self.names() if n.endswith(".json.gz")]
         self.assertTrue(produced, f"未写出 .json.gz，目录内容: {self.names()}")
 
@@ -226,8 +228,10 @@ class AutosaveWriteTests(AutosaveCase):
         self.draw_something()
         self.panel._last_autosave_signature = None
         self.panel.auto_save()
+        self.assertTrue(self.panel.wait_for_autosave(10))
         first = self.names()
         self.panel.auto_save()
+        self.assertTrue(self.panel.wait_for_autosave(10))
         self.assertEqual(self.names(), first, "内容未变却又写了一份")
 
     def test_changed_content_writes_again(self):
@@ -237,16 +241,19 @@ class AutosaveWriteTests(AutosaveCase):
         self.draw_something()
         self.panel._last_autosave_signature = None
         self.panel.auto_save()
+        self.assertTrue(self.panel.wait_for_autosave(10))
         before = len(self.names())
         self.canvas.all_segments.append(
             {"line": QLine(99, 99, 120, 130), "pen": QPen(), "id": "t", "marker": False})
         self.panel.auto_save()
+        self.assertTrue(self.panel.wait_for_autosave(10))
         self.assertGreater(len(self.names()), before, "内容变了必须落新的一份")
 
     def test_what_was_written_can_be_restored(self):
         self.draw_something()
         self.panel._last_autosave_signature = None
         self.panel.auto_save()
+        self.assertTrue(self.panel.wait_for_autosave(10))
         path, data = self.panel._latest_restorable_autosave()
         self.assertIsNotNone(path, "写出的 autosave 必须能被读回")
         self.assertTrue(data.get("pages"))
@@ -258,6 +265,7 @@ class AutosaveWriteTests(AutosaveCase):
         self.canvas.image_items = []
         self.panel._last_autosave_signature = None
         self.panel.auto_save()
+        self.assertTrue(self.panel.wait_for_autosave(10))
         self.assertEqual([n for n in self.names() if n.startswith("autosave_")], [])
 
 
