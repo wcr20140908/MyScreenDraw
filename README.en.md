@@ -176,7 +176,7 @@ Before first use, calibrate: Tools → Drawing aids → **Calibrate this screen*
 Click **Mouse** to let mouse/touch input pass through the canvas to the application underneath; the toolbar contracts to its basic controls. Click **Annotation** to resume drawing and reveal the full annotation menu. Existing annotations are preserved.
 
 ### Project files & autosave
-- Tools → Open / Save manages `.msd` project files (all whiteboard pages included)
+- File → Open / Save manages `.msd` project files (all whiteboard pages included)
 - Autosave checks every 30 s by default and only writes changed content. Settings offers 15/30/60/120/300 s presets or a custom 5–86400 s interval. Very short intervals increase snapshot/compression/disk work and consume the retained-version count faster.
 - The startup recovery prompt previews the selected version. Expand the older-version options to choose another valid autosave; selection only changes the preview, and Restore applies it
 - Rely on explicit saves; autosave is only for recovery

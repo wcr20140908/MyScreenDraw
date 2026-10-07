@@ -78,9 +78,11 @@ Same synthetic input: 120 grouped marker strokes / 21,600 segments, 1280×900 im
 
 The cache trades a slower first construction for much cheaper repeated partial repaints and hit bounds. These synthetic results do not establish actual touchscreen latency, every pen's speed, or performance on other machines. Exact-image tests establish equivalence independently of timings; no timing threshold is used as a flaky correctness assertion.
 
-## Teaching feature assessment (not implemented in this change)
+## Software-use teaching assessment (not implemented in 6.1.0)
 
-The next useful teaching improvement would be a compact, opt-in classroom preset rather than another always-visible panel: larger controls, a clear document-save/recovery indicator, and a quiet timer profile. A temporary presentation lock could reduce accidental page deletion or opening during lectures. Session recording, cloud sync and attendance analytics add permissions, storage and privacy work; they should remain separate proposals until the document-safety release is verified. No such extra features are claimed as delivered in 6.1.0.
+Correction dated 2026-10-07: in this request, “teaching” means teaching people how to use MyScreenDraw, not adding classroom presets, presentation locks, attendance features, or lesson recording. The earlier assessment addressed the wrong scope.
+
+MyScreenDraw 6.1.0 does **not** include a tutorial center, first-start onboarding, anchored walkthroughs, or teaching-progress tracking. The proposed follow-up is a complete, skippable software-use teaching system with an entry under **Tools → Teaching**, first-start guidance, real-operation practice, chapter replay, and isolated practice data. ClassIsland's tutorial implementation is the reference for the follow-up research; this is a proposal, not a feature delivered or validated by the 6.1.0 tests. This documentation correction does not change the published `v6.1.0` tag or release assets.
 
 ## Frozen package acceptance
 
