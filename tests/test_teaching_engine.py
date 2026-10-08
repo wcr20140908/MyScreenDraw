@@ -283,3 +283,81 @@ def test_failed_durable_progress_is_not_a_failed_learning_operation():
     value.start('c01', 'c01.save')
     assert value.next()
     assert value.phase == 'completed'
+
+
+# Sequence presentation is a separate notification, not another user operation.
+def test_sequence_notifies_new_stage_only_after_accepted_result():
+    from teaching.engine import TutorialEngine
+    stages = []
+    step = replace(operation(next='end_chapter'), wait=WaitSpec((
+        WaitClause('tool.changed', 'success', equals={'drawing': False}),
+        WaitClause('tool.changed', 'success', equals={'drawing': True}),
+    )))
+    value = TutorialEngine(make_catalog([step]), session_id='session', on_sequence=stages.append)
+    value.start('c01', 'c01.save')
+    assert not value.consume(result(value, 'tool.changed', outcome='cancelled'))
+    assert stages == []
+    assert value.consume(result(value, 'tool.changed', details={'drawing': False}))
+    assert stages == [1]
+    assert value.consume(result(value, 'tool.changed', details={'drawing': True}))
+    assert stages == [1] and value.phase == 'completed'
+
+
+def test_sequence_presentation_cannot_issue_or_consume_user_operation():
+    from teaching.engine import TutorialEngine
+    observations = []
+    step = replace(operation(next='end_chapter'), wait=WaitSpec((
+        WaitClause('tool.changed', 'success'), WaitClause('project.saved', 'success'),
+    )))
+    value = None
+    def changed(index):
+        observations.append((index, value.begin_operation('project.saved')))
+    value = TutorialEngine(make_catalog([step]), session_id='session', on_sequence=changed)
+    value.start('c01', 'c01.save')
+    assert value.consume(result(value, 'tool.changed'))
+    assert observations == [(1, None)]
+    assert value.begin_operation('project.saved') is not None
+
+
+def test_sequence_presentation_failure_stops_without_completion():
+    from teaching.engine import TutorialEngine, TutorialEngineError
+    reports = []
+    step = replace(operation(next='end_chapter'), wait=WaitSpec((
+        WaitClause('tool.changed', 'success'), WaitClause('project.saved', 'success'),
+    )))
+    def fail(index):
+        raise RuntimeError('synthetic stage layout failure')
+    value = TutorialEngine(make_catalog([step]), session_id='session', on_sequence=fail,
+                           on_progress=lambda *args: reports.append(args))
+    value.start('c01', 'c01.save')
+    with pytest.raises(TutorialEngineError):
+        value.consume(result(value, 'tool.changed'))
+    assert value.phase == 'error'
+    assert value.begin_operation('project.saved') is None
+    assert not any(item[1] == 'completed' for item in reports)
+
+
+def test_previous_availability_is_read_only_navigation_state(engine):
+    assert engine.can_previous is False
+    assert engine.consume(result(engine))
+    assert engine.can_previous is True
+    engine.pause()
+    assert engine.can_previous is True
+    engine.resume()
+    assert engine.previous()
+    assert engine.can_previous is False
+
+
+
+def test_progress_callback_stop_during_start_never_enters_first_step():
+    from teaching.engine import TutorialEngine
+    presentations = []
+    value = None
+    def progress(chapter, status, revision):
+        if status == 'in_progress' and value.phase == 'running':
+            value.stop()
+    value = TutorialEngine(make_catalog(), session_id='session', on_progress=progress,
+                           on_step=presentations.append)
+    value.start('c01', 'c01.save')
+    assert value.phase == 'stopped' and value.current_step_id is None
+    assert presentations == [None]

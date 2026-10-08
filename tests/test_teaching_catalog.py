@@ -190,3 +190,19 @@ def test_hero_image_must_exist_and_stay_inside_root(loader, course_json):
     course_json['chapters'][0]['steps'][0]['hero_image'] = '../outside.png'
     with pytest.raises(ValueError):
         loader.validate(course_json)
+
+
+@pytest.mark.parametrize('targets', [['toolbar.mode', 'toolbar.pen'], ['toolbar.pen'] * 3])
+def test_allowed_targets_must_map_one_to_one_to_wait_stages(loader, course_json, targets):
+    course_json['chapters'][0]['steps'][0]['allowed_targets'] = targets
+    with pytest.raises(ValueError, match='targets'):
+        loader.validate(course_json)
+
+
+def test_information_step_cannot_have_operation_stage_targets(loader, course_json):
+    step = course_json['chapters'][0]['steps'][0]
+    step.pop('wait', None)
+    step['kind'] = 'information'
+    step['allowed_targets'] = ['toolbar.pen']
+    with pytest.raises(ValueError, match='targets'):
+        loader.validate(course_json)

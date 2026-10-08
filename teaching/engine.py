@@ -20,6 +20,7 @@ class TutorialEngineError(RuntimeError):
 class TutorialEngine:
     def __init__(self, catalog: TutorialCatalog, *, session_id: str,
                  on_step: Callable[[TutorialStep | None], None] | None = None,
+                 on_sequence: Callable[[int], None] | None = None,
                  on_progress: Callable[[str, str, int], object] | None = None,
                  condition_reader: Callable[[str, str | None], object] | None = None) -> None:
         if not isinstance(catalog, TutorialCatalog):
@@ -33,6 +34,7 @@ class TutorialEngine:
         self.sequence_index = 0
         self.last_error: str | None = None
         self._on_step = on_step
+        self._on_sequence = on_sequence
         self._on_progress = on_progress
         self._condition_reader = condition_reader or (lambda name, argument: False)
         self._course: TutorialCourse | None = None
@@ -52,6 +54,10 @@ class TutorialEngine:
         if self._chapter is None or self._step_id is None:
             return None
         return self._chapter.step_by_id(self._step_id)
+
+    @property
+    def can_previous(self) -> bool:
+        return bool(self._history) and self.phase in ('running', 'paused')
 
     @property
     def chapter_id(self) -> str | None:
@@ -74,12 +80,15 @@ class TutorialEngine:
                 self._on_step(None)
 
     def _present(self, step: TutorialStep | None) -> None:
-        if self._on_step is None:
+        self._notify_presentation(self._on_step, step)
+
+    def _notify_presentation(self, callback: Callable | None, argument: object) -> None:
+        if callback is None:
             return
         previous = self._presenting
         self._presenting = True
         try:
-            self._on_step(step)
+            callback(argument)
         except Exception as exc:
             self._fail('presentation_failed')
             raise TutorialEngineError('failed to present teaching step') from exc
@@ -108,8 +117,10 @@ class TutorialEngine:
         self._history.clear()
         self.last_error = None
         self.phase = 'running'
+        run_id = self.run_id
         self._report('in_progress')
-        self._enter(chapter.steps[0].id)
+        if self.phase == 'running' and self.run_id == run_id:
+            self._enter(chapter.steps[0].id)
 
     def _enter(self, step_id: str) -> None:
         if self._chapter is None:
@@ -159,6 +170,8 @@ class TutorialEngine:
         self._issued.clear()
         if self.sequence_index == len(step.wait.clauses):
             self._advance()
+        else:
+            self._notify_presentation(self._on_sequence, self.sequence_index)
         return True
 
     def _advance(self) -> None:

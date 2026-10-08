@@ -148,6 +148,8 @@ class CatalogLoader:
         targets = _list(raw.get('allowed_targets', []), 16, 'targets', empty=True)
         if any(not isinstance(item, str) or item not in self.target_ids for item in targets):
             raise ValueError('unknown allowed target')
+        if targets and (wait is None or len(targets) != len(wait.clauses)):
+            raise ValueError('allowed targets must map one-to-one to wait stages')
         branches = []
         for branch in _list(raw.get('branches', []), 16, 'branches', empty=True):
             branch = _object(branch, {'condition', 'equals', 'next', 'argument'},
