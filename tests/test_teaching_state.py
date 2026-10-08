@@ -186,3 +186,49 @@ def test_oversized_state_is_left_intact_not_truncated(tmp_path):
     assert not store.prepare_welcome()
     assert path.read_bytes() == original
     assert not list(tmp_path.glob('*.corrupt.*'))
+
+
+_MUTATIONS = [
+    lambda value:value.set_welcome('skipped'),
+    lambda value:value.record_chapter('c02.edit','completed',compat_revision=1),
+    lambda value:value.sync_catalog({'c01.ink':2}),
+    lambda value:value.mark_context_seen('file.save'),
+    lambda value:value.set_context_hints_enabled(False),
+    lambda value:value.reset(show_welcome=True),
+]
+
+
+@pytest.mark.parametrize('mutate',_MUTATIONS,ids=['welcome','chapter','compatibility','context','hints','reset'])
+def test_failed_atomic_write_retains_valid_memory_progress_but_never_damages_disk(store,monkeypatch,mutate):
+    store.set_welcome('accepted')
+    store.record_chapter('c01.ink','completed',compat_revision=1)
+    before=store.snapshot()
+    disk=store.path.read_bytes()
+    def denied(*args,**kwargs):
+        raise OSError('controlled replacement failure')
+    monkeypatch.setattr('teaching.state.os.replace',denied)
+    assert mutate(store) is False
+    assert store.read_only
+    assert store.snapshot()!=before
+    retained=store.snapshot()
+    assert store.last_error=='save_failed'
+    assert store.path.read_bytes()==disk
+    assert not list(store.path.parent.glob('.tutorial-state.json.*.tmp'))
+    # The approved plan keeps valid session progress after a disk error.
+    # Repeating an idempotent change stays memory-only and cannot damage disk.
+    assert mutate(store) is False
+    assert store.snapshot()==retained
+    assert store.path.read_bytes()==disk
+
+
+@pytest.mark.parametrize('mutate',_MUTATIONS,ids=['welcome','chapter','compatibility','context','hints','reset'])
+def test_future_schema_read_only_attempts_never_change_memory_or_disk(tmp_path,mutate):
+    from teaching.state import TutorialStateStore
+    path=tmp_path/'future.json'
+    original=b'{"schema_version":99,"private":"leave intact"}'
+    path.write_bytes(original)
+    value=TutorialStateStore(path)
+    before=value.snapshot()
+    assert mutate(value) is False
+    assert value.snapshot()==before
+    assert path.read_bytes()==original

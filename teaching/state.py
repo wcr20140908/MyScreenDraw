@@ -154,12 +154,18 @@ class TutorialStateStore:
                 self._persist()
             self.last_error = 'corrupt_state'
 
-    def _persist(self) -> bool:
+    def _persist(self, candidate: dict | None = None) -> bool:
+        candidate = self._data if candidate is None else candidate
         if self.read_only:
+            # An actual disk write error retains valid session-only progress.
+            # Unknown/future/corrupt input is different: never replace its safe
+            # read-only view with newly asserted completion or welcome choices.
+            if self.last_error == 'save_failed':
+                self._data = candidate
             return False
         temporary: str | None = None
         try:
-            data = json.dumps(self._data, ensure_ascii=False, allow_nan=False,
+            data = json.dumps(candidate, ensure_ascii=False, allow_nan=False,
                               separators=(',', ':'), sort_keys=True).encode('utf-8')
             if len(data) > MAX_STATE_BYTES:
                 raise ValueError('state size exceeded')
@@ -171,8 +177,10 @@ class TutorialStateStore:
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary, self.path)
+            self._data = candidate
             return True
         except (OSError, ValueError):
+            self._data = candidate
             self.read_only, self.last_error = True, 'save_failed'
             return False
         finally:
@@ -185,11 +193,20 @@ class TutorialStateStore:
     def prepare_welcome(self) -> bool:
         return self.welcome == 'unseen' and not self.read_only and self._persist()
 
+    def ensure_writable(self) -> bool:
+        """Atomically confirm persistence without changing learning decisions.
+
+        Called once at a safe first-welcome boundary, not on every readiness poll.
+        A failed write preserves the original file and disables automatic welcome.
+        """
+        return self._persist(copy.deepcopy(self._data))
+
     def set_welcome(self, decision: str) -> bool:
         if not isinstance(decision, str) or decision not in WELCOME_DECISIONS:
             raise ValueError('invalid welcome decision')
-        self._data['welcome'] = decision
-        return self._persist()
+        candidate = copy.deepcopy(self._data)
+        candidate['welcome'] = decision
+        return self._persist(candidate)
 
     def chapter_record(self, chapter_id: str) -> dict:
         _chapter_id(chapter_id)
@@ -221,17 +238,19 @@ class TutorialStateStore:
         record['needs_review'] = completed is not None and completed != compat_revision
         # A skipped/incomplete replay does not erase proven compatible completion.
         record['status'] = 'completed' if completed == compat_revision else status
-        self._data['chapters'][chapter_id] = record
-        self._data['last_started'] = {'course_id': chapter_id.split('.', 1)[0], 'chapter_id': chapter_id}
-        return self._persist()
+        candidate = copy.deepcopy(self._data)
+        candidate['chapters'][chapter_id] = record
+        candidate['last_started'] = {'course_id': chapter_id.split('.', 1)[0], 'chapter_id': chapter_id}
+        return self._persist(candidate)
 
     def sync_catalog(self, chapter_revisions: Mapping[str, int]) -> bool:
         validated = {}
         for chapter_id, revision in chapter_revisions.items():
             validated[_chapter_id(chapter_id)] = require_revision(revision)
+        candidate = copy.deepcopy(self._data)
         changed = False
         for chapter_id, revision in validated.items():
-            record = self._data['chapters'].get(chapter_id)
+            record = candidate['chapters'].get(chapter_id)
             if record is None or record['compat_revision'] == revision:
                 continue
             record['compat_revision'] = revision
@@ -239,7 +258,7 @@ class TutorialStateStore:
                                       and record['completed_revision'] != revision)
             record['status'] = ('completed' if record['completed_revision'] == revision else 'not_started')
             changed = True
-        return self._persist() if changed else not self.read_only
+        return self._persist(candidate) if changed else not self.read_only
 
     def should_offer_context_hint(self, context_id: str) -> bool:
         require_id(context_id, 'context id')
@@ -248,23 +267,25 @@ class TutorialStateStore:
 
     def mark_context_seen(self, context_id: str) -> bool:
         require_id(context_id, 'context id')
-        if context_id not in self._data['context_seen']:
-            if len(self._data['context_seen']) >= _MAX_RECORDS:
+        candidate = copy.deepcopy(self._data)
+        if context_id not in candidate['context_seen']:
+            if len(candidate['context_seen']) >= _MAX_RECORDS:
                 raise ValueError('context history full')
-            self._data['context_seen'].append(context_id)
-            self._data['context_seen'].sort()
-        return self._persist()
+            candidate['context_seen'].append(context_id)
+            candidate['context_seen'].sort()
+        return self._persist(candidate)
 
     def set_context_hints_enabled(self, enabled: bool) -> bool:
         if type(enabled) is not bool:
             raise ValueError('hint setting must be boolean')
-        self._data['context_hints_enabled'] = enabled
-        return self._persist()
+        candidate = copy.deepcopy(self._data)
+        candidate['context_hints_enabled'] = enabled
+        return self._persist(candidate)
 
     def reset(self, *, show_welcome: bool = False) -> bool:
         if type(show_welcome) is not bool:
             raise ValueError('welcome option must be boolean')
         hints = self.context_hints_enabled
-        self._data = _empty('unseen' if show_welcome else 'dismissed')
-        self._data['context_hints_enabled'] = hints
-        return self._persist()
+        candidate = _empty('unseen' if show_welcome else 'dismissed')
+        candidate['context_hints_enabled'] = hints
+        return self._persist(candidate)
