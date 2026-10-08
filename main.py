@@ -3192,6 +3192,7 @@ class DrawingCanvas(QMainWindow):
         self.content_revision = 0     # O(1) 内容版本号：让实时缩略图看见原地移动/改色/撤销
         self.pages = []
         self.current_page = 0
+        self._ink_page_pending = False
         self.undo_stack = []
         self.redo_stack = []
         self.undo_limit = 100  # 智能识别的一笔占两步（先回笔迹再回落笔前），额度放宽到100步，
@@ -3230,6 +3231,7 @@ class DrawingCanvas(QMainWindow):
         self.last_point = None
         self.current_stroke_id = None
         self.current_stroke_widths = []
+        self.current_stroke_segments = []
         self.current_stroke_points = []
         # 批注笔常驻智能识别：随手画自动转标准图形，可在批注设置里关闭
         self.smart_shapes_enabled = True
@@ -3748,6 +3750,7 @@ class DrawingCanvas(QMainWindow):
                 (last.x2(), last.y2()) if last is not None else None)
 
     def load_page(self, page):
+        self._ink_page_pending = False
         # 整页替换会让「正在编辑的那一框」失去意义（它可能属于上一页）。放在这里而不是
         # 各个调用点：new_page / switch_page / apply_snapshot / 打开项目全都经过 load_page，
         # 逐个去改必然漏掉一个，漏掉的那条路径就会留下一个指向已消失对象的编辑虚线框。
@@ -3784,6 +3787,7 @@ class DrawingCanvas(QMainWindow):
             self.current_page = 0
 
     def save_current_page(self):
+        self._ink_page_pending = False
         # 挂着的合并快照在这里作废：本方法做的就是它要做的事，而且做得更完整。
         # 不取消的话它会在换页之后才响，把新页的内容写进去——或者更糟，写到刚切走
         # 的那一页上。
@@ -3795,8 +3799,8 @@ class DrawingCanvas(QMainWindow):
             self.pages[self.current_page] = self.capture_page()
 
     # --- 撤销/重做：整页快照栈，按操作发生的时间顺序回退 ---
-    def commit_undo(self, snapshot):
-        self.mark_content_changed()
+    def commit_undo(self, snapshot, *, repaint=True, strokes_changed=True):
+        self.mark_content_changed(repaint=repaint, strokes_changed=strokes_changed)
         self.undo_stack.append(snapshot)
         if len(self.undo_stack) > self.undo_limit:
             del self.undo_stack[0]
@@ -3824,6 +3828,7 @@ class DrawingCanvas(QMainWindow):
         self.current_stroke_id = None
         self.current_stroke_points = []
         self.current_stroke_widths = []
+        self.current_stroke_segments = []
         self.last_point = None
         self.load_page(snapshot)        # 编辑态由 load_page 统一作废
         self.mark_content_changed()
@@ -3895,11 +3900,12 @@ class DrawingCanvas(QMainWindow):
             self.panel.update_history_ui()
         self.update()
 
-    def commit_stroke_delta(self, stroke_id, segments):
+    def commit_stroke_delta(self, stroke_id, segments, *, repaint=True, strokes_changed=True):
         """一笔画完时入栈。segments 为空（点一下没动）则不占撤销步骤。"""
         if not segments:
             return False
-        self.commit_undo(self._stroke_delta(stroke_id, segments))
+        self.commit_undo(self._stroke_delta(stroke_id, segments),
+                         repaint=repaint, strokes_changed=strokes_changed)
         return True
 
     def undo(self):
@@ -4028,6 +4034,7 @@ class DrawingCanvas(QMainWindow):
         self.current_stroke_id = None
         self.current_stroke_points = []
         self.current_stroke_widths = []
+        self.current_stroke_segments = []
         self.last_point = None
         self.save_current_page()  # Also stops a delayed snapshot before indices change.
         changed_page = index == self.current_page
@@ -4794,6 +4801,8 @@ class DrawingCanvas(QMainWindow):
         if timer is not None and timer.isActive():
             timer.stop()
             self._flush_page_snapshot()
+        elif self._ink_page_pending:
+            self.save_current_page()
 
     def make_shape_item(self, rect):
         return {
@@ -4970,6 +4979,7 @@ class DrawingCanvas(QMainWindow):
         "current_stroke_id": None,
         "current_stroke_points": list,
         "current_stroke_widths": list,
+        "current_stroke_segments": list,
         "current_pressure": 1.0,
         "pending_smart": None,
         "_hold_anchor": None,
@@ -5171,6 +5181,7 @@ class DrawingCanvas(QMainWindow):
         self.current_stroke_id = None
         self.current_stroke_points = []
         self.current_stroke_widths = []
+        self.current_stroke_segments = []
         self.last_point = None
         self.update()
 
@@ -5183,6 +5194,7 @@ class DrawingCanvas(QMainWindow):
         self.last_point = pos
         self.current_stroke_id = uuid.uuid4()
         self.current_stroke_widths = []
+        self.current_stroke_segments = []
         self.current_stroke_points = [QPointF(pos)]
         self._stroke_uses_delta = True
         # 速度状态属于「这一笔」：不重置会让新笔沿用上一笔的末速，起笔粗细随机。
@@ -5206,6 +5218,7 @@ class DrawingCanvas(QMainWindow):
         self.last_point = None
         self.current_stroke_points = []
         self.current_stroke_widths = []
+        self.current_stroke_segments = []
 
     def _finish_pointer_stroke(self):
         """一笔结束（抬笔/抬指）时按完成时间入栈。
@@ -5219,12 +5232,20 @@ class DrawingCanvas(QMainWindow):
         self.pending_undo = None       # 落笔前的整页快照作废，改由增量条目描述这一笔
         if stroke_id is None:
             return True                # 已被停笔定形收束，撤销条目在那时就入栈了
+        segments = self.current_stroke_segments
+        if not segments or segments[0]["id"] != stroke_id:
+            segments = [s for s in self.all_segments if s["id"] == stroke_id]
+        dirty = self.ink_dirty_rect(segments)
         self._finish_stroke_style(stroke_id)
-        if self.commit_stroke_delta(stroke_id, [s for s in self.all_segments if s["id"] == stroke_id]):
-            self.mark_content_changed()
-            self.update()
+        # Taper edits pen widths in place; all other finishes are append-only.
+        changed_widths = self._stroke_style in ("fountain", "brush")
+        if self.commit_stroke_delta(stroke_id, segments, repaint=False, strokes_changed=changed_widths):
+            self._ink_page_pending = self.whiteboard_mode
+            dirty = dirty.united(self.ink_dirty_rect(segments))
+            self.update(dirty.toAlignedRect())
         # 这一笔到此结束。留着旧 id 会让「接管时丢弃合成鼠标笔」误判到已画完的笔迹上。
         self.current_stroke_id = None
+        self.current_stroke_segments = []
         self._mouse_stroke_since = None
         return True
 
@@ -6234,9 +6255,30 @@ class DrawingCanvas(QMainWindow):
                     if style == "calligraphy":
                         seg["nib"] = float(self.calligraphy_angle)
                 self.all_segments.append(seg)
+                self.current_stroke_segments.append(seg)
                 self.current_stroke_widths.append(width)
                 previous = point
         self.last_point = pos
+
+    def ink_dirty_rect(self, segments, previous_mouse=None):
+        """Only new/finished ink and old/new marker cursor can have changed."""
+        area = QRectF()
+        for segment in segments:
+            line = segment["line"]
+            margin = self.segment_ink_radius(segment) + 2.0
+            bounds = QRectF(QPointF(line.p1()), QPointF(line.p2())).normalized()
+            area = area.united(bounds.adjusted(-margin, -margin, margin, margin))
+        if self.draw_state == "MARKER":
+            reach = max(3.0, float(self.marker_width)/2.0) + 3.0
+            for point in (previous_mouse, self.mouse_pos):
+                if point is not None:
+                    area = area.united(QRectF(point.x()-reach, point.y()-reach, reach*2, reach*2))
+        return area
+
+    def repaint_ink(self, segments, previous_mouse=None):
+        area = self.ink_dirty_rect(segments, previous_mouse)
+        if not area.isEmpty():
+            self.update(area.toAlignedRect())
 
     # --- 笔形：宽度、颜色、收笔 ---
     TAPER_START_FACTOR = 0.35     # 钢笔/毛笔起笔从笔宽的 35% 渐粗
@@ -6281,7 +6323,9 @@ class DrawingCanvas(QMainWindow):
         style = self._stroke_style
         if style not in ("fountain", "brush", "arrow"):
             return
-        segments = [s for s in self.all_segments if s["id"] == stroke_id]
+        segments = self.current_stroke_segments
+        if not segments or segments[0]["id"] != stroke_id:
+            segments = [s for s in self.all_segments if s["id"] == stroke_id]
         if not segments:
             return
         if style in ("fountain", "brush"):
@@ -6320,7 +6364,9 @@ class DrawingCanvas(QMainWindow):
         for side in (-1, 1):
             a = angle + math.pi - side * math.radians(self._stroke_options.get("head_angle", 28))
             end = QPoint(round(tip.x() + head * math.cos(a)), round(tip.y() + head * math.sin(a)))
-            self.all_segments.append(clone_segment(last, line=QLine(tip.toPoint(), end)))
+            segment = clone_segment(last, line=QLine(tip.toPoint(), end))
+            self.all_segments.append(segment)
+            segments.append(segment)
 
     @staticmethod
     def segment_ink_radius(seg):
@@ -6353,10 +6399,8 @@ class DrawingCanvas(QMainWindow):
     def draw_segments(self, painter, segments, clip=None):
         if segments is not self.all_segments:
             return self._draw_segments_uncached(painter, segments, clip)
-        commands = self._stroke_geometry_cache.sync(segments, GROUPED_STYLES, self.segment_ink_radius)
-        for command in commands:
-            if clip is not None and not clip.intersects(command.clip_bounds):
-                continue
+        self._stroke_geometry_cache.sync(segments, GROUPED_STYLES, self.segment_ink_radius)
+        for command in self._stroke_geometry_cache.visible_commands(clip):
             segment = command.segment
             style = segment.get("style")
             if command.path is None:
@@ -7789,8 +7833,9 @@ class DrawingCanvas(QMainWindow):
             self.draw_state = "AID"
             self.update()
             return
-        # 每次按下先暂存整页快照，松开时若内容确实变了才计入撤销栈
-        self.pending_undo = self.capture_page()
+        # Ink already has per-stroke delta undo. Cloning the whole page here
+        # is discarded on release and makes pen-down cost grow with old ink.
+        self.pending_undo = None if self.draw_state in ("PEN", "MARKER", "LASER") else self.capture_page()
         if self.draw_state == "LASER":
             self.laser_trail = []
             self.push_laser_point(pos)
@@ -7861,6 +7906,9 @@ class DrawingCanvas(QMainWindow):
         elif self.draw_state in ("PEN", "MARKER"):
             # 又落新笔：先清掉上一笔的停笔计时，避免旧笔在新笔画到一半时突然定形
             self._cancel_smart_recognition(drop_pending=True)
+            if self.selected_ids:
+                previous_selection = self.selection_bounds().adjusted(-48, -48, 48, 48)
+                self.update(previous_selection.toAlignedRect())
             self.selected_ids.clear()
             self._begin_stroke(pos)
             self._start_smart_hold(pos)
@@ -7877,6 +7925,8 @@ class DrawingCanvas(QMainWindow):
         if self._touch_synthesized(event):
             return
         pos = event.position().toPoint()
+        previous_mouse = self.mouse_pos
+        first_new_segment = len(self.all_segments)
         self.mouse_pos = pos
         self.aid_hover_pos = QPointF(pos)
         self.aid_shift_pressed = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
@@ -7958,7 +8008,10 @@ class DrawingCanvas(QMainWindow):
             self.text_drag_rect = QRectF(self.text_drag_start, QPointF(pos)).normalized()
         elif self.is_drawing_mode and self.draw_state == "ERASER" and (event.buttons() & Qt.MouseButton.LeftButton):
             self.execute_erase_path(pos)
-        self.update()
+        if self.is_drawing_mode and self.draw_state in ("PEN", "MARKER") and not self.aids:
+            self.repaint_ink(self.all_segments[first_new_segment:], previous_mouse)
+        else:
+            self.update()
 
     def execute_erase(self, pos):
         r_sq = (self.eraser_size / 2) ** 2
@@ -8069,7 +8122,7 @@ class DrawingCanvas(QMainWindow):
         self.move_originals = None
         self.last_point = None
         self.last_erase_point = None
-        if self.whiteboard_mode and self.draw_state in {"PEN", "MARKER", "ERASER", "SELECT", "TEXT"}:
+        if self.whiteboard_mode and self.draw_state in {"ERASER", "SELECT", "TEXT"}:
             self.save_current_page()
         if self.panel: self.panel.heartbeat_refresh()
 
@@ -8148,8 +8201,8 @@ class DrawingCanvas(QMainWindow):
             # 不挡掉的话第一根手指会被画两次——一次走触控、一次走鼠标，凭空多出一笔。
             if not self._touch_owns_input:
                 self._discard_mouse_path_stroke(points)
+                self.update()  # Once-only takeover may remove already visible synthetic ink.
             self._touch_owns_input = True
-            self.update()
             if self.panel:
                 self.panel.heartbeat_refresh()
         return touched
@@ -8184,6 +8237,7 @@ class DrawingCanvas(QMainWindow):
         self.current_stroke_id = None
         self.current_stroke_points = []
         self.current_stroke_widths = []
+        self.current_stroke_segments = []
         self.last_point = None
         self.last_erase_point = None
         self._stroke_uses_delta = False
@@ -8262,6 +8316,8 @@ class DrawingCanvas(QMainWindow):
             # 没收到 Pressed 就来了 Updated（抢到事件流中段）：就地补一次落笔
             self._pointer_press(key, pos, pressure)
             return
+        first_new_segment = len(self.all_segments)
+        previous_mouse = self.mouse_pos
         with self._pointer_scope(key):
             self.current_pressure = max(0.05, float(pressure) or 1.0)
             if self.last_point is None:
@@ -8273,6 +8329,7 @@ class DrawingCanvas(QMainWindow):
                 self.add_smooth_segments(pos)
                 self._track_smart_hold(pos)
         self.mouse_pos = pos
+        self.repaint_ink(self.all_segments[first_new_segment:], previous_mouse)
 
     def _pointer_release(self, key, pos):
         if key not in self._pointer_slots:
@@ -8284,8 +8341,6 @@ class DrawingCanvas(QMainWindow):
             self._cancel_smart_recognition(drop_pending=True)
             self._finish_pointer_stroke()
         self._drop_pointer(key)
-        if self.whiteboard_mode:
-            self.save_current_page()
 
     def _drop_pointer(self, key):
         timer = self._pointer_timers.pop(key, None)
