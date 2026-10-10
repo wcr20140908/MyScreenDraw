@@ -22,9 +22,17 @@ from .targets import TargetRegistry
 from .transport import TeachingConnection
 
 # Grow this manifest only alongside a real, verified business adapter/target.
-APPLICATION_TARGETS = frozenset({'canvas.ink', 'toolbar.pen', 'toolbar.file', 'toolbar.tools',
-                                 'file.save', 'file.open', 'pages.add'})
-APPLICATION_EVENTS = frozenset({'ink.committed', 'project.saved'})
+APPLICATION_TARGETS = frozenset({
+    'canvas.ink', 'toolbar.mode', 'toolbar.pen', 'toolbar.eraser', 'toolbar.select',
+    'toolbar.undo', 'toolbar.redo', 'toolbar.whiteboard', 'toolbar.file', 'toolbar.tools',
+    'pen.palette', 'pen.width', 'file.save', 'file.open', 'pages.add', 'pages.previous', 'pages.next',
+})
+APPLICATION_EVENTS = frozenset({
+    'ink.committed', 'ink.erased', 'project.saved', 'mode.changed', 'tool.changed',
+    'pen.color_changed', 'pen.width_changed', 'history.undone', 'history.redone',
+    'selection.changed', 'selection.transformed', 'whiteboard.entered', 'whiteboard.exited',
+    'page.created', 'page.changed',
+})
 
 
 def application_catalog(module: ModuleType, resource_dir: Path):
@@ -233,20 +241,32 @@ class ApplicationTeachingHost(QObject):
         self.registry = TargetRegistry()
         bindings = {
             'canvas.ink': lambda: self.panel.canvas,
+            'toolbar.mode': lambda: self.panel.icon_buttons.get('mode'),
             'toolbar.pen': lambda: self.panel.icon_buttons.get('pen'),
-            'toolbar.file': lambda: self.panel.icon_buttons.get('file'),
+            'toolbar.eraser': lambda: self.panel.icon_buttons.get('eraser'),
+            'toolbar.select': lambda: self.panel.icon_buttons.get('select'),
+            'toolbar.undo': lambda: self.panel.icon_buttons.get('undo'),
+            'toolbar.redo': lambda: self.panel.icon_buttons.get('redo'),
+            'toolbar.whiteboard': lambda: self.panel.icon_buttons.get('whiteboard'),
+            'toolbar.file': lambda: self.panel.icon_buttons.get('folder'),
             'toolbar.tools': lambda: self.panel.icon_buttons.get('tools'),
+            'pen.palette': lambda: self.panel.pen_palette,
+            'pen.width': lambda: self.panel.pen_width_row,
             'file.save': lambda: self.panel.btn_save_project,
             'file.open': lambda: self.panel.btn_open_project,
             'pages.add': lambda: self.panel.rail_new,
+            'pages.previous': lambda: self.panel.rail_prev,
+            'pages.next': lambda: self.panel.rail_next,
         }
         for target_id, resolver in bindings.items():
-            self.registry.register(target_id, resolver)
+            reveal = self._reveal_pen if target_id in {'pen.palette', 'pen.width'} else None
+            self.registry.register(target_id, resolver, reveal=reveal)
         self.presenter = TeachingPresenter(
             self.catalog, session_id=request.paths.session_id, registry=self.registry,
             owns=self.panel.lifecycle._owns_window, canvas=lambda: self.panel.canvas, translate=module.tr,
             prepare_fixture=self._prepare_fixture,
-            reveal_actions={'open_file_panel': self._reveal_file}, on_progress=self._record_progress,
+            reveal_actions={'open_file_panel': self._reveal_file, 'open_pen_panel': self._reveal_pen},
+            on_progress=self._record_progress,
             pause_action=self.pause_requested.emit,
             manage_window=self.panel.lifecycle.register_tool_window,
             unmanage_window=self.panel.lifecycle.unregister_tool_window)
@@ -256,6 +276,10 @@ class ApplicationTeachingHost(QObject):
         self.presenter.failed.connect(self.failed)
         self.panel.exit_requested.disconnect(module.QApplication.quit)
         self.panel.exit_requested.connect(self.exit_requested)
+
+    def _reveal_pen(self):
+        # Revealing settings cannot select a tool or satisfy a business wait.
+        self.panel.show_only_sub(self.panel.draw_sub)
 
     def _reveal_file(self):
         if not self.panel.file_sub.isVisible():

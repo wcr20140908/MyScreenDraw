@@ -145,6 +145,13 @@ class TutorialEngine:
         self._issued[context.operation_id] = context
         return context
 
+    def discard_operation(self, context: OperationContext | None) -> bool:
+        """Retire one abandoned result without dispatching or invalidating its peers."""
+        if not isinstance(context, OperationContext) or self._issued.get(context.operation_id) != context:
+            return False
+        self._issued.pop(context.operation_id)
+        return True
+
     def consume(self, event: TutorialEvent) -> bool:
         if self.phase != 'running' or self._presenting or not isinstance(event, TutorialEvent):
             return False

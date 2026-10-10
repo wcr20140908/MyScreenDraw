@@ -3249,6 +3249,7 @@ class DrawingCanvas(QMainWindow):
                             | Qt.WindowType.Tool | Qt.WindowType.WindowDoesNotAcceptFocus)
         self._teaching_stroke_operation = None
         self._teaching_stroke_tool = None
+        self._teaching_edit = None
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setWindowIcon(QIcon())
         self.is_drawing_mode = True
@@ -3830,6 +3831,7 @@ class DrawingCanvas(QMainWindow):
                 (last.x2(), last.y2()) if last is not None else None)
 
     def load_page(self, page):
+        self._discard_teaching_edit()
         self._ink_page_pending = False
         # 整页替换会让「正在编辑的那一框」失去意义（它可能属于上一页）。放在这里而不是
         # 各个调用点：new_page / switch_page / apply_snapshot / 打开项目全都经过 load_page，
@@ -3988,34 +3990,115 @@ class DrawingCanvas(QMainWindow):
                          repaint=repaint, strokes_changed=strokes_changed)
         return True
 
+    def _begin_teaching_operation(self, name):
+        events = getattr(self.panel, "teaching_events", None)
+        return events.begin_operation(name) if events is not None else None
+
+    def _emit_teaching_result(self, operation, name, details, *, outcome="success"):
+        events = getattr(self.panel, "teaching_events", None)
+        if operation is not None and events is not None:
+            events.emit_result(operation, name, outcome, details)
+
+    def _discard_teaching_operation(self, operation):
+        if operation is None:
+            return
+        events = getattr(self.panel, "teaching_events", None)
+        if events is not None:
+            events.discard_operation(operation)
+
+    def _discard_teaching_edit(self):
+        edit, self._teaching_edit = self._teaching_edit, None
+        if edit is not None:
+            self._discard_teaching_operation(edit[0])
+
+    def _begin_teaching_edit(self):
+        if self.draw_state == "SELECT":
+            name = "selection.changed"
+            operation = self._begin_teaching_operation(name)
+            if operation is None:
+                name = "selection.transformed"
+                operation = self._begin_teaching_operation(name)
+            before = frozenset(self.selected_ids) if operation is not None else None
+        elif self.draw_state == "ERASER":
+            name = "ink.erased"
+            operation = self._begin_teaching_operation(name)
+            before = (len(self.all_segments), len(self.shape_items), len(self.text_items),
+                      len(self.image_items), self.eraser_type) if operation is not None else None
+        else:
+            return None
+        return (operation, name, before) if operation is not None else None
+
+    def _finish_teaching_edit(self, edit, content_changed, action, selection_method):
+        if edit is None:
+            return
+        operation, name, before = edit
+        try:
+            if name == "selection.changed":
+                if not self.selected_ids or before == self.selected_ids:
+                    return
+                details = {"count": len(self.selected_ids), "method": selection_method}
+            elif name == "selection.transformed":
+                if not content_changed or action not in ("move", "scale", "rotate") or not self.selected_ids:
+                    return
+                details = {"count": len(self.selected_ids), "action": action}
+            else:
+                if not content_changed:
+                    return
+                removed_segments = before[0] - len(self.all_segments)
+                removed_objects = sum(before[1:4]) - len(self.shape_items) - len(self.text_items) - len(self.image_items)
+                if removed_segments + removed_objects <= 0:
+                    return
+                details = {"removed_segments": removed_segments, "removed_objects": removed_objects,
+                           "eraser_type": before[4]}
+            self._emit_teaching_result(operation, name, details)
+        finally:
+            self._discard_teaching_operation(operation)
+
     def undo(self):
         if not self.undo_stack:
             return False
-        entry = self.undo_stack.pop()
-        if self._is_delta(entry):
-            self.redo_stack.append(entry)      # 增量条目可反向重放，无需整页快照
-            self._revert_delta(entry)
-        else:
-            self.redo_stack.append(self.capture_page())
-            self.apply_snapshot(entry)
-        track_event("undo", depth=len(self.undo_stack))
-        return True
+        operation = self._begin_teaching_operation("history.undone")
+        try:
+            before = page_signature(self.live_page()) if operation is not None else None
+            entry = self.undo_stack.pop()
+            if self._is_delta(entry):
+                self.redo_stack.append(entry)      # 增量条目可反向重放，无需整页快照
+                self._revert_delta(entry)
+            else:
+                self.redo_stack.append(self.capture_page())
+                self.apply_snapshot(entry)
+            track_event("undo", depth=len(self.undo_stack))
+            if operation is not None and before != page_signature(self.live_page()):
+                self._emit_teaching_result(operation, "history.undone",
+                                           {"undo_depth": len(self.undo_stack), "redo_depth": len(self.redo_stack)})
+            return True
+        finally:
+            self._discard_teaching_operation(operation)
 
     def redo(self):
         if not self.redo_stack:
             return False
-        entry = self.redo_stack.pop()
-        if self._is_delta(entry):
-            self.undo_stack.append(entry)
-            self._reapply_delta(entry)
-        else:
-            self.undo_stack.append(self.capture_page())
-            self.apply_snapshot(entry)
-        track_event("redo", depth=len(self.redo_stack))
-        return True
+        operation = self._begin_teaching_operation("history.redone")
+        try:
+            before = page_signature(self.live_page()) if operation is not None else None
+            entry = self.redo_stack.pop()
+            if self._is_delta(entry):
+                self.undo_stack.append(entry)
+                self._reapply_delta(entry)
+            else:
+                self.undo_stack.append(self.capture_page())
+                self.apply_snapshot(entry)
+            track_event("redo", depth=len(self.redo_stack))
+            if operation is not None and before != page_signature(self.live_page()):
+                self._emit_teaching_result(operation, "history.redone",
+                                           {"undo_depth": len(self.undo_stack), "redo_depth": len(self.redo_stack)})
+            return True
+        finally:
+            self._discard_teaching_operation(operation)
 
     def reset_history(self):
         """切页/进出白板时调用：历史属于当前页面，跨页回退没有意义。"""
+        self._discard_teaching_edit()
         self.undo_stack.clear()
         self.redo_stack.clear()
         self.pending_undo = None
@@ -4026,6 +4109,7 @@ class DrawingCanvas(QMainWindow):
     def enter_whiteboard(self):
         if self.whiteboard_mode:
             return
+        operation = self._begin_teaching_operation("whiteboard.entered")
         self._cancel_smart_recognition(drop_pending=True)  # 进白板：放弃当前页未触发的延迟识别
         self.whiteboard_mode = True
         self.setUpdatesEnabled(False)
@@ -4043,10 +4127,13 @@ class DrawingCanvas(QMainWindow):
         self.setUpdatesEnabled(True)
         track_event("whiteboard_entered", board_style=self.board_style, pages=len(self.pages))
         self.update()
+        self._emit_teaching_result(operation, "whiteboard.entered",
+                                   {"whiteboard_mode": True, "pages": len(self.pages)})
 
     def exit_whiteboard(self):
         if not self.whiteboard_mode:
             return
+        operation = self._begin_teaching_operation("whiteboard.exited")
         self._cancel_smart_recognition(drop_pending=True)  # 退白板：放弃未触发的延迟识别
         self.save_current_page()
         self.whiteboard_mode = False
@@ -4057,6 +4144,8 @@ class DrawingCanvas(QMainWindow):
         self.setUpdatesEnabled(True)
         track_event("whiteboard_exited", pages=len(self.pages))
         self.update()
+        self._emit_teaching_result(operation, "whiteboard.exited",
+                                   {"whiteboard_mode": False, "pages": len(self.pages)})
 
     def cancel_page_pen_return(self):
         if self._page_return_pending:
@@ -4082,15 +4171,18 @@ class DrawingCanvas(QMainWindow):
             if panel:
                 panel.sync_canvas_input_mode()
             return
-        panel.set_tool(panel.last_annotate_tool, panel.btn_pen)
-        panel.update_annotate_buttons()
-        panel.sync_settings_ui()
+        events = getattr(panel, "teaching_events", None)
+        with events.suppress() if events is not None else contextlib.nullcontext():
+            panel.set_tool(panel.last_annotate_tool, panel.btn_pen)
+            panel.update_annotate_buttons()
+            panel.sync_settings_ui()
 
     def new_page(self):
         if len(self.pages) >= MAX_PAGES:
             if self.panel:
                 notify_user(self.panel, tr("page_list"), trf("page_limit", count=MAX_PAGES), level="warning")
             return False
+        operation = self._begin_teaching_operation("page.created")
         self.enter_whiteboard()
         self._cancel_smart_recognition(drop_pending=True)  # 新页：放弃上一页未触发的延迟识别
         self.save_current_page()
@@ -4101,6 +4193,9 @@ class DrawingCanvas(QMainWindow):
         self.arm_page_pen_return()
         self.mark_content_changed()
         track_event("whiteboard_page_new", page=self.current_page + 1)
+        self._emit_teaching_result(operation, "page.created",
+                                   {"page": self.current_page + 1, "pages": len(self.pages),
+                                    "page_id": self._page_id})
 
     def delete_page(self, index=None):
         """Delete a whiteboard page, retaining live ink on every surviving page."""
@@ -4193,6 +4288,8 @@ class DrawingCanvas(QMainWindow):
         target = max(0, min(len(self.pages) - 1, self.current_page + offset))
         if target == self.current_page:
             return
+        operation = self._begin_teaching_operation("page.changed")
+        previous_page = self.current_page + 1
         self._cancel_smart_recognition(drop_pending=True)  # 翻页：放弃当前页未触发的延迟识别
         self.save_current_page()
         self.current_page = target
@@ -4200,6 +4297,9 @@ class DrawingCanvas(QMainWindow):
         self.reset_history()
         self.arm_page_pen_return()
         track_event("whiteboard_page_changed", page=self.current_page + 1)
+        self._emit_teaching_result(operation, "page.changed",
+                                   {"previous_page": previous_page, "page": self.current_page + 1,
+                                    "pages": len(self.pages), "page_id": self._page_id})
 
     def toggle_board_style(self):
         self.board_style = "BLACK" if self.board_style == "WHITE" else "WHITE"
@@ -5275,6 +5375,7 @@ class DrawingCanvas(QMainWindow):
         """
         self.last_point = pos
         self.current_stroke_id = uuid.uuid4()
+        self._discard_teaching_operation(self._teaching_stroke_operation)
         events = getattr(self.panel, "teaching_events", None)
         self._teaching_stroke_operation = events.begin_operation("ink.committed") if events else None
         self._teaching_stroke_tool = self.draw_state
@@ -5297,6 +5398,7 @@ class DrawingCanvas(QMainWindow):
 
     def finish_active_ink(self):
         """切工具前提交仍按着的鼠标/触笔，收笔特效与撤销都归到旧笔形。"""
+        self._discard_teaching_edit()
         self._cancel_all_pointers()
         self._cancel_smart_recognition(drop_pending=True)
         self._finish_pointer_stroke()
@@ -5312,34 +5414,37 @@ class DrawingCanvas(QMainWindow):
         """
         if not self._stroke_uses_delta:
             return False
-        stroke_id = self.current_stroke_id
-        self._stroke_uses_delta = False
-        self.pending_undo = None       # 落笔前的整页快照作废，改由增量条目描述这一笔
-        if stroke_id is None:
-            return True                # 已被停笔定形收束，撤销条目在那时就入栈了
-        segments = self.current_stroke_segments
-        if not segments or segments[0]["id"] != stroke_id:
-            segments = [s for s in self.all_segments if s["id"] == stroke_id]
-        dirty = self.ink_dirty_rect(segments)
-        self._finish_stroke_style(stroke_id)
-        # Taper edits pen widths in place; all other finishes are append-only.
-        changed_widths = self._stroke_style in ("fountain", "brush")
-        committed = self.commit_stroke_delta(stroke_id, segments, repaint=False, strokes_changed=changed_widths)
-        if committed:
-            self._ink_page_pending = self.whiteboard_mode
-            dirty = dirty.united(self.ink_dirty_rect(segments))
-            self.update(dirty.toAlignedRect())
-        # 这一笔到此结束。留着旧 id 会让「接管时丢弃合成鼠标笔」误判到已画完的笔迹上。
-        self.current_stroke_id = None
-        self.current_stroke_segments = []
-        self._mouse_stroke_since = None
         operation, self._teaching_stroke_operation = self._teaching_stroke_operation, None
-        events = getattr(self.panel, "teaching_events", None)
-        if committed and events is not None and segments:
-            events.emit_result(operation, "ink.committed", "success",
-                               {"tool": self._teaching_stroke_tool, "style": self._stroke_style,
-                                "segments": len(segments)})
-        return True
+        try:
+            stroke_id = self.current_stroke_id
+            self._stroke_uses_delta = False
+            self.pending_undo = None       # 落笔前的整页快照作废，改由增量条目描述这一笔
+            if stroke_id is None:
+                return True                # 已被停笔定形收束，撤销条目在那时就入栈了
+            segments = self.current_stroke_segments
+            if not segments or segments[0]["id"] != stroke_id:
+                segments = [s for s in self.all_segments if s["id"] == stroke_id]
+            dirty = self.ink_dirty_rect(segments)
+            self._finish_stroke_style(stroke_id)
+            # Taper edits pen widths in place; all other finishes are append-only.
+            changed_widths = self._stroke_style in ("fountain", "brush")
+            committed = self.commit_stroke_delta(stroke_id, segments, repaint=False, strokes_changed=changed_widths)
+            if committed:
+                self._ink_page_pending = self.whiteboard_mode
+                dirty = dirty.united(self.ink_dirty_rect(segments))
+                self.update(dirty.toAlignedRect())
+            # 这一笔到此结束。留着旧 id 会让「接管时丢弃合成鼠标笔」误判到已画完的笔迹上。
+            self.current_stroke_id = None
+            self.current_stroke_segments = []
+            self._mouse_stroke_since = None
+            events = getattr(self.panel, "teaching_events", None)
+            if committed and events is not None and segments:
+                events.emit_result(operation, "ink.committed", "success",
+                                   {"tool": self._teaching_stroke_tool, "style": self._stroke_style,
+                                    "segments": len(segments)})
+            return True
+        finally:
+            self._discard_teaching_operation(operation)
 
     def draw_hold_ring(self, painter, center=None, progress=None):
         """笔尖停留进度环：转满一圈这一笔就定形。
@@ -7895,6 +8000,7 @@ class DrawingCanvas(QMainWindow):
             return
         self.current_pressure = self.event_pressure(event)
         self.drag_moved = False    # 本次按下是否真的拖动过（纯点选不触发吸附/变换埋点）
+        self._discard_teaching_edit()
         # 辅助工具优先：任意绘图态下都能拖动已放置的教具
         aid, mode = self.aid_hit(pos)
         if aid is not None and mode == "close" and self.draw_state != "MAGNIFIER":
@@ -7925,6 +8031,8 @@ class DrawingCanvas(QMainWindow):
             self.draw_state = "AID"
             self.update()
             return
+        # Capture the teaching context at press, never at a later release/step.
+        self._teaching_edit = self._begin_teaching_edit()
         # Ink already has per-stroke delta undo. Cloning the whole page here
         # is discarded on release and makes pen-down cost grow with old ink.
         self.pending_undo = None if self.draw_state in ("PEN", "MARKER", "LASER") else self.capture_page()
@@ -8160,63 +8268,73 @@ class DrawingCanvas(QMainWindow):
         # 与 mousePressEvent 对称：右键/中键释放不能结束仍按着的左键笔画、清掉停笔计时。
         if event.button() != Qt.MouseButton.LeftButton:
             return
-        if self.aid_drag is not None:
-            # 先把暂存的绘图工具恢复回去，否则 draw_state 停在 "AID"，
-            # 后续输入匹配不到任何工具分支，导致画布「点不动」直到重选工具。
-            prev = self.aid_drag.get("prev_draw_state")
-            if prev is not None and prev != "AID" and self.draw_state == "AID":
-                self.draw_state = prev
-            self.aid_drag = None
-            self.update()
-            if self.panel:
-                self.panel.heartbeat_refresh()
-            return
-        if self.draw_state == "LASER":
-            # 轨迹自然淡出，不写页面；按下时存的整页快照在这里作废，
-            # 否则它会一直挂在 pending_undo 上白占一份页面内存。
+        edit, self._teaching_edit = self._teaching_edit, None
+        try:
+            action = self.drag_action
+            selection_method = "rectangle" if self.selection_rect is not None else "click"
+            if self.aid_drag is not None:
+                # 先把暂存的绘图工具恢复回去，否则 draw_state 停在 "AID"，
+                # 后续输入匹配不到任何工具分支，导致画布「点不动」直到重选工具。
+                prev = self.aid_drag.get("prev_draw_state")
+                if prev is not None and prev != "AID" and self.draw_state == "AID":
+                    self.draw_state = prev
+                self.aid_drag = None
+                self.update()
+                if self.panel:
+                    self.panel.heartbeat_refresh()
+                return
+            if self.draw_state == "LASER":
+                # 轨迹自然淡出，不写页面；按下时存的整页快照在这里作废，
+                # 否则它会一直挂在 pending_undo 上白占一份页面内存。
+                self.pending_undo = None
+                self.update()
+                if self.panel:
+                    self.panel.heartbeat_refresh()
+                return
+            if self.draw_state == "SELECT" and self.selection_rect:
+                self.select_objects_in_rect(self.selection_rect)
+                self.selection_rect = None
+                self.selection_start = None
+            if self.draw_action_changed() and getattr(self, "drag_moved", False):
+                track_event("selection_transformed", action=self.drag_action, count=len(self.selected_ids))
+                if self.drag_action == "move":
+                    self.snap_moved_line()       # 真的拖动过单条直线才做端点吸附，纯点选不动它
+            if self.draw_state == "SHAPE" and self.preview_shape:
+                self.finish_shape_item(self.preview_shape["rect"])
+                self.preview_shape = None
+                self.shape_start = None
+            if self.draw_state == "TEXT" and self.text_drag_start is not None:
+                self.finish_text_box(self.text_drag_rect)
+                self.text_drag_start = None
+                self.text_drag_rect = None
+            # 抬笔＝明确表示「就要这条手绘」，此处不做任何识别，只把停笔计时收掉。
+            # 想要标准图形的话，画完最后一点后把笔停在原地别抬即可（见 _tick_smart_hold）。
+            self._cancel_smart_recognition(drop_pending=True)
+            # 笔画按「完成时间」入栈；其余操作（擦除/选择变换/图形/文字）仍走整页快照
+            handled = self._finish_pointer_stroke()
+            self.current_stroke_points = []
+            content_changed = (not handled and self.pending_undo is not None
+                               and self.snapshot_differs(self.pending_undo))
+            if content_changed:
+                self.commit_undo(self.pending_undo)
             self.pending_undo = None
-            self.update()
             if self.panel:
-                self.panel.heartbeat_refresh()
-            return
-        if self.draw_state == "SELECT" and self.selection_rect:
-            self.select_objects_in_rect(self.selection_rect)
-            self.selection_rect = None
-            self.selection_start = None
-        if self.draw_action_changed() and getattr(self, "drag_moved", False):
-            track_event("selection_transformed", action=self.drag_action, count=len(self.selected_ids))
-            if self.drag_action == "move":
-                self.snap_moved_line()       # 真的拖动过单条直线才做端点吸附，纯点选不动它
-        if self.draw_state == "SHAPE" and self.preview_shape:
-            self.finish_shape_item(self.preview_shape["rect"])
-            self.preview_shape = None
-            self.shape_start = None
-        if self.draw_state == "TEXT" and self.text_drag_start is not None:
-            self.finish_text_box(self.text_drag_rect)
-            self.text_drag_start = None
-            self.text_drag_rect = None
-        # 抬笔＝明确表示「就要这条手绘」，此处不做任何识别，只把停笔计时收掉。
-        # 想要标准图形的话，画完最后一点后把笔停在原地别抬即可（见 _tick_smart_hold）。
-        self._cancel_smart_recognition(drop_pending=True)
-        # 笔画按「完成时间」入栈；其余操作（擦除/选择变换/图形/文字）仍走整页快照
-        handled = self._finish_pointer_stroke()
-        self.current_stroke_points = []
-        if not handled and self.pending_undo is not None and self.snapshot_differs(self.pending_undo):
-            self.commit_undo(self.pending_undo)
-        self.pending_undo = None
-        if self.panel:
-            self.panel.position_selection_panel(self.selection_bounds())
-        self.drag_start = None
-        self.drag_action = None
-        self.transform_center = None
-        self.transform_start_distance = None
-        self.transform_start_angle = None
-        self.move_originals = None
-        self.last_point = None
-        self.last_erase_point = None
-        if self.whiteboard_mode and self.draw_state in {"ERASER", "SELECT", "TEXT"}:
-            self.save_current_page()
-        if self.panel: self.panel.heartbeat_refresh()
+                self.panel.position_selection_panel(self.selection_bounds())
+            self.drag_start = None
+            self.drag_action = None
+            self.transform_center = None
+            self.transform_start_distance = None
+            self.transform_start_angle = None
+            self.move_originals = None
+            self.last_point = None
+            self.last_erase_point = None
+            if self.whiteboard_mode and self.draw_state in {"ERASER", "SELECT", "TEXT"}:
+                self.save_current_page()
+            if self.panel: self.panel.heartbeat_refresh()
+            self._finish_teaching_edit(edit, content_changed, action, selection_method)
+        finally:
+            if edit is not None:
+                self._discard_teaching_operation(edit[0])
 
     # --- 多指书写 ---
     # 只有批注笔/荧光笔接管多指：两根手指同时写字是真实的课堂场景。
@@ -8239,6 +8357,7 @@ class DrawingCanvas(QMainWindow):
                 return True
             return False        # 不接受 → Qt 用主接触点合成鼠标事件，单指路径照旧
         if kind == QEvent.Type.TouchCancel:
+            self._discard_teaching_edit()
             if self._pointer_slots:
                 self._cancel_all_pointers()
                 ev.accept()
@@ -10025,7 +10144,9 @@ class ControlPanel(QWidget):
             self.lifecycle.hide_to_background()
 
     def setup_draw_sub(self):
-        grid = QGridLayout(); grid.setSpacing(4)
+        self.pen_palette = QWidget()
+        grid = QGridLayout(self.pen_palette); grid.setSpacing(4)
+        grid.setContentsMargins(0, 0, 0, 0)
         colors = ["#ff4757", "#1e90ff", "#2ed573", "#ffa502", "#ffffff", "#a29bfe", "#00cec9", "#000000", "#ff7f50"]
         for i, hex_c in enumerate(colors):
             btn = QPushButton(); btn.setFixedSize(TOUCH_SWATCH, TOUCH_SWATCH); btn.setProperty("color_val", hex_c)
@@ -10033,7 +10154,7 @@ class ControlPanel(QWidget):
             btn.clicked.connect(self.on_color_clicked); grid.addWidget(btn, i // 5, i % 5); self.color_buttons.append(btn)
         rainbow = QPushButton("🌈"); rainbow.setFixedSize(TOUCH_SWATCH, TOUCH_SWATCH); rainbow.setStyleSheet("background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 red, stop:1 blue); border: 1px solid #777;")
         rainbow.clicked.connect(self.open_custom_color); grid.addWidget(rainbow, 1, 4); self.color_buttons.append(rainbow)
-        self.draw_sub_layout.addLayout(grid)
+        self.draw_sub_layout.addWidget(self.pen_palette)
         self.color_preview = QWidget(); self.color_preview.setFixedHeight(6); self.draw_sub_layout.addWidget(self.color_preview)
 
         # 粗细调节 (滑轨+箭头回归)
@@ -10041,12 +10162,14 @@ class ControlPanel(QWidget):
         # 颜色交给 apply_theme() 统一下发，这里不写死——写死成白色时亮色主题下白字白底
         self.label_w.setStyleSheet(f"color: {self.theme['label']}; font-weight: bold;")
         self.draw_sub_layout.addWidget(self.label_w)
-        s_row = QHBoxLayout(); s_row.setSpacing(2)
+        self.pen_width_row = QWidget()
+        s_row = QHBoxLayout(self.pen_width_row); s_row.setSpacing(2)
+        s_row.setContentsMargins(0, 0, 0, 0)
         btn_d = QPushButton("▼"); btn_d.setObjectName("ArrowBtn"); btn_d.clicked.connect(lambda: self.pen_slider.setValue(self.pen_slider.value()-1))
         self.pen_slider = QSlider(Qt.Orientation.Horizontal); self.pen_slider.setRange(1, 40); self.pen_slider.setValue(4); self.pen_slider.setFixedWidth(80)
         self.pen_slider.valueChanged.connect(self.on_pen_slider_changed)
         btn_u = QPushButton("▲"); btn_u.setObjectName("ArrowBtn"); btn_u.clicked.connect(lambda: self.pen_slider.setValue(self.pen_slider.value()+1))
-        s_row.addWidget(btn_d); s_row.addWidget(self.pen_slider); s_row.addWidget(btn_u); self.draw_sub_layout.addLayout(s_row)
+        s_row.addWidget(btn_d); s_row.addWidget(self.pen_slider); s_row.addWidget(btn_u); self.draw_sub_layout.addWidget(self.pen_width_row)
 
         # 书法笔专属：笔尖角度。其余笔形下整行隐藏，不占面板高度。
         self.nib_label = QLabel(trf("nib_angle_value", value=45))
@@ -10872,7 +10995,35 @@ class ControlPanel(QWidget):
         x, y = self._floating_anchor(panel_width, panel_height, gap=gap, anchor=anchor)
         return x, y, int(panel_height)
 
+    @contextlib.contextmanager
+    def _teaching_tool_action(self):
+        """Deliver one toolbar operation only after its tool and menus are settled."""
+        events = self.teaching_events
+        if events is None:
+            yield
+            return
+        before_drawing, before_tool = self.canvas.is_drawing_mode, self.canvas.draw_state
+        mode_operation = events.begin_operation("mode.changed")
+        tool_operation = events.begin_operation("tool.changed")
+        try:
+            with events.suppress():
+                yield
+            # Snapshot both results before either callback can reveal the next step.
+            drawing, tool = self.canvas.is_drawing_mode, self.canvas.draw_state
+            events.emit_result(mode_operation, "mode.changed",
+                               "success" if drawing != before_drawing else "cancelled",
+                               {"drawing_mode": drawing})
+            events.emit_result(tool_operation, "tool.changed",
+                               "success" if tool != before_tool or drawing != before_drawing else "cancelled",
+                               {"tool": tool, "drawing_mode": drawing})
+        finally:
+            events.discard_operation(mode_operation)
+            events.discard_operation(tool_operation)
+
     def set_tool(self, state, button):
+        was_drawing, previous_tool = self.canvas.is_drawing_mode, self.canvas.draw_state
+        operation = (self.canvas._begin_teaching_operation("tool.changed")
+                     if not was_drawing or previous_tool != state else None)
         self.canvas.cancel_page_pen_return()
         if state in ("PEN", "MARKER", "LASER"):
             self.last_annotate_tool = state
@@ -10882,6 +11033,8 @@ class ControlPanel(QWidget):
             # 已是该工具则只刷新高亮，不重置状态、不取消正在进行的延迟智能识别
             # （否则 PEN→PEN 再次点击打开设置时会误取消刚画那一笔的延迟识别）
             self.set_active_tool(button)
+            self.canvas._emit_teaching_result(operation, "tool.changed",
+                                              {"tool": state, "drawing_mode": self.canvas.is_drawing_mode})
             return
         self.canvas.finish_active_ink()
         self.canvas._cancel_smart_recognition(drop_pending=True)  # 切工具：取消上一笔的延迟识别
@@ -10925,6 +11078,8 @@ class ControlPanel(QWidget):
         else:
             self._laser_fade.stop()
         # 调用方各自 track_event("tool_changed")，此处不再重复记录
+        self.canvas._emit_teaching_result(operation, "tool.changed",
+                                          {"tool": state, "drawing_mode": self.canvas.is_drawing_mode})
 
     def _tick_laser_fade(self):
         if self.canvas and self.canvas.draw_state == "LASER":
@@ -10959,57 +11114,59 @@ class ControlPanel(QWidget):
         - 正在看某工具设置面板 → 回到三选一（方便切换荧光笔/激光笔）
         - 其它情况 → 打开三选一
         """
-        self.set_drawing_mode(True)
-        self.sync_icon_buttons()
-        # 这里必须真正把工具切回批注笔，而不是只把高亮挪到「批注」。
-        # 只挪高亮会让画布停在上一个工具（典型是橡皮）：高亮说在批注、鼠标却还拖着橡皮
-        # 光标圈、点画布是擦除；而且 draw_state 仍是 ERASER，用户再点「橡皮」时
-        # handle_eraser_click 只会开关设置面板、不再重置高亮，界面就永久停在错位状态。
-        if self.canvas.draw_state not in ("PEN", "MARKER", "LASER"):
-            self.set_tool(self.last_annotate_tool, self.btn_pen)
-            self.canvas.selected_ids.clear()
-        self.set_active_tool(self.btn_pen)
-        # 若正开着笔/荧/激光设置，回到三选一，别把另外两个藏死
-        if self.draw_sub.isVisible() or self.marker_sub.isVisible() or self.laser_sub.isVisible():
-            self.update_annotate_buttons()
-            self.show_only_sub(self.annotate_sub)
-        elif self.annotate_sub.isVisible():
-            self.show_only_sub(None)
-        else:
-            self.update_annotate_buttons()
-            self.show_only_sub(self.annotate_sub)
-        self.refresh_ui()
-        track_event("annotate_menu")
+        with self._teaching_tool_action():
+            self.set_drawing_mode(True)
+            self.sync_icon_buttons()
+            # 这里必须真正把工具切回批注笔，而不是只把高亮挪到「批注」。
+            # 只挪高亮会让画布停在上一个工具（典型是橡皮）：高亮说在批注、鼠标却还拖着橡皮
+            # 光标圈、点画布是擦除；而且 draw_state 仍是 ERASER，用户再点「橡皮」时
+            # handle_eraser_click 只会开关设置面板、不再重置高亮，界面就永久停在错位状态。
+            if self.canvas.draw_state not in ("PEN", "MARKER", "LASER"):
+                self.set_tool(self.last_annotate_tool, self.btn_pen)
+                self.canvas.selected_ids.clear()
+            self.set_active_tool(self.btn_pen)
+            # 若正开着笔/荧/激光设置，回到三选一，别把另外两个藏死
+            if self.draw_sub.isVisible() or self.marker_sub.isVisible() or self.laser_sub.isVisible():
+                self.update_annotate_buttons()
+                self.show_only_sub(self.annotate_sub)
+            elif self.annotate_sub.isVisible():
+                self.show_only_sub(None)
+            else:
+                self.update_annotate_buttons()
+                self.show_only_sub(self.annotate_sub)
+            self.refresh_ui()
+            track_event("annotate_menu")
 
     def choose_pen_tool(self):
         self.choose_pen_style(self.canvas.pen_style if self.canvas.pen_style in PEN_STYLES else "pen")
 
     def choose_pen_style(self, style):
         """选中笔形并打开它的设置；不因是否已选中而改变点击结果。"""
-        if style not in PEN_STYLES:
-            style = "pen"
-        was_same = self.canvas.draw_state == "PEN" and self.canvas.pen_style == style
-        if self.canvas.draw_state == "PEN" and not was_same:
-            self.canvas.finish_active_ink()
-            self.canvas.dash_chain = None
-        self.canvas.pen_style = style
-        if not was_same and self.canvas.draw_state == "PEN":
-            self.apply_current_pen_default()
-        self.pen_slider.blockSignals(True)
-        self.pen_slider.setValue(self.canvas.pen_width)
-        self.pen_slider.blockSignals(False)
-        self.label_w.setText(trf("width_value", value=self.canvas.pen_width))
-        self.update_button_highlight(self.highlight_color_for(self.color_buttons, self.canvas.pen_color.name()))
-        self.color_preview.setStyleSheet(f"background-color: {self.canvas.pen_color.name()}; border: 1px solid white;")
-        self._schedule_split_save()
-        self.last_annotate_tool = "PEN"
-        self.set_tool("PEN", self.btn_pen)
-        self.canvas.selected_ids.clear()
-        self.update_annotate_buttons()
-        self.update_pen_style_controls()
-        self.show_only_sub(self.draw_sub)
-        self.refresh_ui()
-        track_event("tool_changed", tool="PEN", pen_style=style)
+        with self._teaching_tool_action():
+            if style not in PEN_STYLES:
+                style = "pen"
+            was_same = self.canvas.draw_state == "PEN" and self.canvas.pen_style == style
+            if self.canvas.draw_state == "PEN" and not was_same:
+                self.canvas.finish_active_ink()
+                self.canvas.dash_chain = None
+            self.canvas.pen_style = style
+            if not was_same and self.canvas.draw_state == "PEN":
+                self.apply_current_pen_default()
+            self.pen_slider.blockSignals(True)
+            self.pen_slider.setValue(self.canvas.pen_width)
+            self.pen_slider.blockSignals(False)
+            self.label_w.setText(trf("width_value", value=self.canvas.pen_width))
+            self.update_button_highlight(self.highlight_color_for(self.color_buttons, self.canvas.pen_color.name()))
+            self.color_preview.setStyleSheet(f"background-color: {self.canvas.pen_color.name()}; border: 1px solid white;")
+            self._schedule_split_save()
+            self.last_annotate_tool = "PEN"
+            self.set_tool("PEN", self.btn_pen)
+            self.canvas.selected_ids.clear()
+            self.update_annotate_buttons()
+            self.update_pen_style_controls()
+            self.show_only_sub(self.draw_sub)
+            self.refresh_ui()
+            track_event("tool_changed", tool="PEN", pen_style=style)
 
     def update_pen_style_controls(self):
         """笔形专属设置只在对应笔形下出现，别的笔形不占面板高度。"""
@@ -11048,23 +11205,25 @@ class ControlPanel(QWidget):
         self._schedule_split_save()
 
     def choose_marker_tool(self):
-        self.last_annotate_tool = "MARKER"
-        self.set_tool("MARKER", self.btn_pen)
-        self.canvas.selected_ids.clear()
-        self.update_annotate_buttons()
-        self.show_only_sub(self.marker_sub)
-        self.refresh_ui()
-        track_event("tool_changed", tool="MARKER")
+        with self._teaching_tool_action():
+            self.last_annotate_tool = "MARKER"
+            self.set_tool("MARKER", self.btn_pen)
+            self.canvas.selected_ids.clear()
+            self.update_annotate_buttons()
+            self.show_only_sub(self.marker_sub)
+            self.refresh_ui()
+            track_event("tool_changed", tool="MARKER")
 
     def choose_laser_tool(self):
-        self.last_annotate_tool = "LASER"
-        self.set_tool("LASER", self.btn_pen)
-        self.canvas.selected_ids.clear()
-        self.canvas.laser_trail = []
-        self.update_annotate_buttons()
-        self.show_only_sub(self.laser_sub)
-        self.refresh_ui()
-        track_event("tool_changed", tool="LASER")
+        with self._teaching_tool_action():
+            self.last_annotate_tool = "LASER"
+            self.set_tool("LASER", self.btn_pen)
+            self.canvas.selected_ids.clear()
+            self.canvas.laser_trail = []
+            self.update_annotate_buttons()
+            self.show_only_sub(self.laser_sub)
+            self.refresh_ui()
+            track_event("tool_changed", tool="LASER")
 
     def handle_pen_click(self):
         self.choose_pen_tool()
@@ -11187,15 +11346,16 @@ class ControlPanel(QWidget):
         self.canvas.update()
 
     def handle_eraser_click(self):
-        self.canvas.cancel_page_pen_return()
-        self.set_drawing_mode(True)
-        if self.canvas.draw_state != "ERASER":
-            self.set_tool("ERASER", self.btn_eraser)
-            self.canvas.selected_ids.clear()
-            self.show_only_sub(None)
-        else:
-            self.show_only_sub(None if self.eraser_sub.isVisible() else self.eraser_sub)
-        self.refresh_ui()
+        with self._teaching_tool_action():
+            self.canvas.cancel_page_pen_return()
+            self.set_drawing_mode(True)
+            if self.canvas.draw_state != "ERASER":
+                self.set_tool("ERASER", self.btn_eraser)
+                self.canvas.selected_ids.clear()
+                self.show_only_sub(None)
+            else:
+                self.show_only_sub(None if self.eraser_sub.isVisible() else self.eraser_sub)
+            self.refresh_ui()
 
     def handle_magnifier_click(self):
         self.canvas.cancel_page_pen_return()
@@ -11231,30 +11391,33 @@ class ControlPanel(QWidget):
         self.refresh_ui()
 
     def handle_select_click(self):
-        self.canvas.cancel_page_pen_return()
-        self.set_drawing_mode(True)
-        if self.canvas.draw_state != "SELECT":
-            self.set_tool("SELECT", self.btn_select)
-            self.show_only_sub(None)
-        self.position_selection_panel(self.canvas.selection_bounds())
-        self.refresh_ui()
-        track_event("tool_changed", tool="SELECT")
+        with self._teaching_tool_action():
+            self.canvas.cancel_page_pen_return()
+            self.set_drawing_mode(True)
+            if self.canvas.draw_state != "SELECT":
+                self.set_tool("SELECT", self.btn_select)
+                self.show_only_sub(None)
+            self.position_selection_panel(self.canvas.selection_bounds())
+            self.refresh_ui()
+            track_event("tool_changed", tool="SELECT")
 
     def handle_text_click(self):
-        self.set_drawing_mode(True)
-        self.set_tool("TEXT", self.btn_text)
-        self.show_only_sub(None)
-        self.position_selection_panel(self.canvas.selection_bounds())
-        self.refresh_ui()
-        track_event("tool_changed", tool="TEXT")
+        with self._teaching_tool_action():
+            self.set_drawing_mode(True)
+            self.set_tool("TEXT", self.btn_text)
+            self.show_only_sub(None)
+            self.position_selection_panel(self.canvas.selection_bounds())
+            self.refresh_ui()
+            track_event("tool_changed", tool="TEXT")
 
     def handle_shape_click(self):
-        self.set_drawing_mode(True)
-        self.set_tool("SHAPE", self.btn_shape)
-        self.show_only_sub(None if self.shape_sub.isVisible() else self.shape_sub)
-        self.update_shape_buttons()
-        self.refresh_ui()
-        track_event("tool_changed", tool="SHAPE")
+        with self._teaching_tool_action():
+            self.set_drawing_mode(True)
+            self.set_tool("SHAPE", self.btn_shape)
+            self.show_only_sub(None if self.shape_sub.isVisible() else self.shape_sub)
+            self.update_shape_buttons()
+            self.refresh_ui()
+            track_event("tool_changed", tool="SHAPE")
 
     def tool_buttons(self):
         return (self.btn_pen, self.btn_eraser, self.btn_select, self.btn_text, self.btn_shape, self.btn_tools)
@@ -11482,6 +11645,7 @@ class ControlPanel(QWidget):
             self.sync_canvas_input_mode()
             self.sync_icon_buttons()
             return
+        operation = cv._begin_teaching_operation("mode.changed")
         if not enabled:
             cv.finish_active_ink()
             if cv.editing_text_id is not None:
@@ -11523,6 +11687,7 @@ class ControlPanel(QWidget):
             # 不会再走 _laser_fade.start() 那条路径，激光笔的定时重绘就被永久跳过了）。
             cv.laser_trail = []
             self._laser_fade.start()
+        cv._emit_teaching_result(operation, "mode.changed", {"drawing_mode": cv.is_drawing_mode})
 
     def toggle_mode(self):
         self.set_drawing_mode(not self.canvas.is_drawing_mode)
@@ -11680,18 +11845,30 @@ class ControlPanel(QWidget):
         self.heartbeat_refresh()
 
     def on_color_clicked(self):
-        btn = self.sender(); self.canvas.pen_color = QColor(btn.property("color_val"))
+        btn = self.sender()
+        color = QColor(btn.property("color_val"))
+        operation = (self.canvas._begin_teaching_operation("pen.color_changed")
+                     if color != self.canvas.pen_color else None)
+        self.canvas.pen_color = color
         self.canvas.apply_selection_color(self.canvas.pen_color)
         self.update_button_highlight(btn); self.color_preview.setStyleSheet(f"background-color: {self.canvas.pen_color.name()}; border: 1px solid white;")
         self.refresh_annotate_badge()
         track_event("color_changed", color=self.canvas.pen_color.name())
+        self.canvas._emit_teaching_result(operation, "pen.color_changed", {"color": self.canvas.pen_color.name()})
 
     def on_nib_angle_changed(self, v):
         self.canvas.calligraphy_angle = int(v)
         self.nib_label.setText(trf("nib_angle_value", value=int(v)))
         track_event("nib_angle_changed", angle=int(v))
 
-    def on_pen_slider_changed(self, v): self.canvas.pen_width = v; self.canvas.apply_selection_width(v); self.label_w.setText(trf("width_value", value=v)); track_event("pen_width_changed", width=v)
+    def on_pen_slider_changed(self, v):
+        operation = (self.canvas._begin_teaching_operation("pen.width_changed")
+                     if v != self.canvas.pen_width else None)
+        self.canvas.pen_width = v
+        self.canvas.apply_selection_width(v)
+        self.label_w.setText(trf("width_value", value=v))
+        track_event("pen_width_changed", width=v)
+        self.canvas._emit_teaching_result(operation, "pen.width_changed", {"width": self.canvas.pen_width})
     def on_eraser_slider_changed(self, v): self.canvas.eraser_size = v; self.e_label.setText(trf("sensitivity_value", value=v)); track_event("eraser_size_changed", size=v)
     def set_eraser_type(self, t):
         self.canvas.eraser_type = t
@@ -11705,6 +11882,9 @@ class ControlPanel(QWidget):
             btn.setStyleSheet(c + (f"border: 2px solid {self.theme['accent']};" if btn == active_btn else "border: 1px solid #777;"))
 
     def open_custom_color(self):
+        operation = self.canvas._begin_teaching_operation("pen.color_changed")
+        before = QColor(self.canvas.pen_color)
+        outcome = "cancelled"
         self.timer.stop()
         try:
             d = QColorDialog(self.canvas.pen_color, self)
@@ -11718,8 +11898,12 @@ class ControlPanel(QWidget):
                 self.color_preview.setStyleSheet(f"background-color: {self.canvas.pen_color.name()}; border: 1px solid white;")
                 self.refresh_annotate_badge()
                 track_event("custom_color_changed", color=self.canvas.pen_color.name())
+                if self.canvas.pen_color != before:
+                    outcome = "success"
         finally:
             self.timer.start(self.HEARTBEAT_MS)
+        self.canvas._emit_teaching_result(operation, "pen.color_changed",
+                                          {"color": self.canvas.pen_color.name()}, outcome=outcome)
 
     def undo(self):
         self.canvas.undo()

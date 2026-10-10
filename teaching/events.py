@@ -20,6 +20,12 @@ class TeachingEventBus:
             return None
         return self._engine.begin_operation(name)
 
+    def discard_operation(self, context: OperationContext | None) -> bool:
+        # Suppressed setup may abandon an older edit; retirement is not a result.
+        if self._closed or self._engine is None:
+            return False
+        return self._engine.discard_operation(context)
+
     def emit_result(self, context: OperationContext | None, name: str,
                     outcome: Outcome, details: Mapping[str, Scalar]) -> bool:
         if context is None or self._closed or self._suppressed or self._engine is None:
