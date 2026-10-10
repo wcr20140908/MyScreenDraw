@@ -192,7 +192,8 @@ class FloatingLifecycleTests(unittest.TestCase):
     def tearDownClass(cls):
         cls.panel.pause_callbacks()
         cls.panel.update_check_timer.stop()
-        cls.panel.listener.stop()
+        if cls.panel.listener is not None:
+            cls.panel.listener.stop()
         for widget in cls.app.topLevelWidgets():
             widget.hide()
         cls.updates.stop()

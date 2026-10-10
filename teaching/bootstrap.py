@@ -28,7 +28,9 @@ class PracticeRequest:
 
 def parse_practice_request(argv: Sequence[str], *, app_dir: Path, resource_dir: Path,
                            environ: Mapping[str, str] | None = None) -> PracticeRequest | None:
-    if not any(isinstance(argument, str) and argument.startswith(_MODE) for argument in argv):
+    reserved = _ARGUMENTS | {_MODE}
+    if not any(isinstance(argument, str) and argument.split('=', 1)[0] in reserved
+               or isinstance(argument, str) and argument.startswith(_MODE) for argument in argv):
         return None
     if any(not isinstance(argument, str) for argument in argv) or len(argv) != 11:
         raise ValueError('invalid practice argument set')

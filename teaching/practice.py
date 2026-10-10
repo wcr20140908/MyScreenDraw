@@ -168,7 +168,16 @@ class PracticeSession(QObject):
         elif kind == 'activated' and self.phase == 'activating' and not payload:
             self._cancel('activation')
             self._set_phase('running')
-        elif kind == 'chapter_state' and self.phase == 'running':
+        elif (kind == 'control' and self.phase in ('running', 'paused')
+              and set(payload) == {'action'} and payload['action'] in ('pause', 'resume')):
+            # Child controller requests; the parent's response remains authoritative.
+            if payload['action'] == 'pause':
+                self.request_pause()
+            elif self.phase == 'paused':
+                self.request_resume()
+            else:
+                self._send('control', {'action': 'resume'})
+        elif kind == 'chapter_state' and self.phase in ('running', 'paused'):
             self._record_progress(message)
         elif kind in ('stopping', 'stopped') and not payload:
             self.request_stop('child_stop')
@@ -201,6 +210,26 @@ class PracticeSession(QObject):
             return False
         self._arm('activation', self.activation_timeout_ms, self._activation_timeout)
         return self._send('control', {'action': 'activate'})
+
+    def request_pause(self, hidden: bool = False) -> bool:
+        if type(hidden) is not bool:
+            raise ValueError('hidden pause must be a boolean')
+        if self.phase not in ('running', 'paused'):
+            return False
+        generation = self._generation
+        self._set_phase('paused')
+        if generation != self._generation or self.phase != 'paused':
+            return False
+        return self._send('control', {'action': 'pause', 'hidden': hidden})
+
+    def request_resume(self) -> bool:
+        if self.phase != 'paused':
+            return False
+        generation = self._generation
+        self._set_phase('running')
+        if generation != self._generation or self.phase != 'running':
+            return False
+        return self._send('control', {'action': 'resume'})
 
     def _record_progress(self, message: dict) -> None:
         payload = message['payload']

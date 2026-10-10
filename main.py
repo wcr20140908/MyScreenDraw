@@ -249,6 +249,23 @@
 
 import sys
 import os
+from pathlib import Path
+from runtime_paths import RuntimeContext, RuntimePaths
+from teaching.bootstrap import parse_practice_request
+
+# Private arguments must be validated before importing Qt, configuring logs or
+# creating ordinary directories. A malformed internal launch must never fall back.
+APP_DIR = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
+RESOURCE_DIR = getattr(sys, "_MEIPASS", APP_DIR)
+try:
+    PRACTICE_REQUEST = parse_practice_request(sys.argv[1:], app_dir=Path(APP_DIR),
+                                              resource_dir=Path(RESOURCE_DIR))
+except (ValueError, OSError):
+    sys.stderr.write("MyScreenDraw: invalid teaching practice request\n")
+    raise SystemExit(2)
+RUNTIME_CONTEXT = RuntimeContext(PRACTICE_REQUEST.paths if PRACTICE_REQUEST is not None
+                                 else RuntimePaths.for_normal(Path(APP_DIR), Path(RESOURCE_DIR)))
+globals().update(RUNTIME_CONTEXT.paths.module_aliases())
 import errno
 import ctypes
 import ctypes.wintypes
@@ -315,13 +332,6 @@ from PyQt6.QtGui import (QPainter, QPen, QColor, QFont, QPainterPath, QFontMetri
                          QEventPoint, QInputDevice, QPaintEngine, QBrush, QConicalGradient)
 from pynput import keyboard
 
-APP_DIR = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(APP_DIR, "data")
-EXPORT_DIR = os.path.join(APP_DIR, "exports")
-AUTOSAVE_DIR = os.path.join(DATA_DIR, "autosave")
-CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
-ROSTER_FILE = os.path.join(DATA_DIR, "roster.json")
-TELEMETRY_FILE = os.path.join(DATA_DIR, "events.jsonl")
 TELEMETRY_MAX_BYTES = 1024 * 1024   # 单个日志文件上限：1MB
 TELEMETRY_BACKUPS = 2               # 额外保留的历史日志份数，总占用上限约 3MB
 AUTOSAVE_INTERVAL = 30              # 自动保存间隔（秒）
@@ -342,7 +352,60 @@ TOUCH_HIT_SLOP = 8        # 画布上手柄/端点等命中判定的额外容差
 ICON_GLYPH = 20           # 图标图形边长
 
 LOGGER = logging.getLogger("myscreendraw")
-LOG_FILE = os.path.join(DATA_DIR, "app.log")
+
+
+def application_runtime(runtime=None):
+    context = RUNTIME_CONTEXT if runtime is None else runtime
+    if not isinstance(context, RuntimeContext):
+        raise ValueError("invalid application runtime")
+    if context.paths.practice and context.paths != RUNTIME_CONTEXT.paths:
+        raise ValueError("practice paths must be bound before constructing widgets")
+    return context
+
+
+def teaching_blocks_updates(panel):
+    coordinator = getattr(panel, "teaching_coordinator", None)
+    return (getattr(panel, "_teaching_suspended", False)
+            or coordinator is not None and coordinator.active)
+
+
+def update_work_is_blocked(panel):
+    lifecycle = getattr(panel, "lifecycle", None)
+    return (teaching_blocks_updates(panel) or lifecycle is not None
+            and (lifecycle.is_exiting() or lifecycle._quit_dialog_showing))
+
+
+class PracticePathRejected(ValueError):
+    """A private-boundary failure, distinct from malformed private documents."""
+
+
+def runtime_file_path(path, *, write=False):
+    """Enforce private boundaries at the real reader/writer, not only choosers."""
+    if not RUNTIME_CONTEXT.paths.practice:
+        return os.fspath(path)
+    guard = RUNTIME_CONTEXT.paths.require_write_path if write else RUNTIME_CONTEXT.paths.require_read_path
+    try:
+        return str(guard(path))
+    except ValueError:
+        raise PracticePathRejected(tr("teaching_private_path_rejected")) from None
+
+
+def runtime_directory_path(path):
+    if not RUNTIME_CONTEXT.paths.practice:
+        return os.fspath(path)
+    try:
+        return str(RUNTIME_CONTEXT.paths.require_directory_path(path))
+    except ValueError:
+        raise PracticePathRejected(tr("teaching_private_path_rejected")) from None
+
+def runtime_io_message(exc, path):
+    return str(exc) if isinstance(exc, PracticePathRejected) else map_io_exception(exc, path)
+
+
+def write_runtime_autosave(path, data):
+    # Validate again in the worker, not just when the GUI queued its snapshot.
+    return atomic_write_autosave(runtime_file_path(path, write=True), data)
+
 
 def setup_logging():
     """File + stderr logging; safe to call more than once."""
@@ -351,8 +414,8 @@ def setup_logging():
     # Drop NullHandler / stale handlers so reloads don't duplicate lines.
     LOGGER.handlers.clear()
     try:
-        os.makedirs(DATA_DIR, exist_ok=True)
-        file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
+        os.makedirs(runtime_directory_path(DATA_DIR), exist_ok=True)
+        file_handler = logging.FileHandler(runtime_file_path(LOG_FILE, write=True), encoding="utf-8")
         file_handler.setFormatter(formatter)
         LOGGER.addHandler(file_handler)
     except OSError as exc:
@@ -420,7 +483,7 @@ def ensure_directories():
     """启动时确保所有必需的目录都已创建。"""
     for directory in [DATA_DIR, EXPORT_DIR, AUTOSAVE_DIR]:
         try:
-            os.makedirs(directory, exist_ok=True)
+            os.makedirs(runtime_directory_path(directory), exist_ok=True)
         except Exception as e:
             LOGGER.warning("无法创建目录 %s: %s", directory, e)
 
@@ -464,6 +527,8 @@ def _json_safe(value):
 
 def track_event(name, **payload):
     """Append one JSON line to data/events.jsonl (local product telemetry)."""
+    if not RUNTIME_CONTEXT.usage_tracking:
+        return
     try:
         os.makedirs(DATA_DIR, exist_ok=True)
         rotate_telemetry()
@@ -1411,6 +1476,8 @@ def autostart_command():
 
 def autostart_enabled():
     """读注册表判断自启是否开着。读不到（非 Windows / 键不存在）都算关。"""
+    if not RUNTIME_CONTEXT.autostart:
+        return False
     try:
         import winreg
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_ROOT) as key:
@@ -1426,6 +1493,8 @@ def autostart_enabled():
 
 def autostart_stored_command():
     """读回注册表里那条命令，用于判断它是否还指向当前这份程序。"""
+    if not RUNTIME_CONTEXT.autostart:
+        return ""
     try:
         import winreg
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_ROOT) as key:
@@ -1441,6 +1510,8 @@ def set_autostart(enabled):
     失败不抛异常：注册表可能被组策略锁定（教室机器很常见），那种情况下应当告诉用户
     「没设上」，而不是让程序崩在一个开关上。
     """
+    if not RUNTIME_CONTEXT.autostart:
+        return False
     try:
         import winreg
         if enabled:
@@ -1467,6 +1538,8 @@ def heal_autostart():
     还指着旧路径——开机时那条命令找不到文件，静默失败，用户只知道「自启不管用了」。
     程序每次启动都在运行，正是发现这件事的最好时机。
     """
+    if not RUNTIME_CONTEXT.autostart:
+        return False
     if not autostart_enabled():
         return False
     want = autostart_command()
@@ -3162,14 +3235,20 @@ class DrawingCanvas(QMainWindow):
                   "TRAPEZOID", "DIAMOND", "CIRCLE", "ELLIPSE", "ANGLE"}
     LINE_SNAP_RADIUS = 18.0   # 直线端点吸附半径（像素，按触控落点精度放宽）
 
-    def __init__(self, panel_ref=None):
+    def __init__(self, panel_ref=None, *, runtime=None):
+        panel_runtime = getattr(panel_ref, "runtime_context", None)
+        context = application_runtime(runtime if runtime is not None else
+                                      panel_runtime if isinstance(panel_runtime, RuntimeContext) else None)
         super().__init__()
         self.panel = panel_ref
+        self.runtime_context = context
         # WindowDoesNotAcceptFocus(=WS_EX_NOACTIVATE)：点击画布绘图不触发窗口激活，
         # 画布就永远不会因为被点击而抬升到面板之上——面板被压住的根源之一
         # 注意：画布不需要WindowStaysOnTopHint，LOGO和工具栏才需要置顶
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint
                             | Qt.WindowType.Tool | Qt.WindowType.WindowDoesNotAcceptFocus)
+        self._teaching_stroke_operation = None
+        self._teaching_stroke_tool = None
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setWindowIcon(QIcon())
         self.is_drawing_mode = True
@@ -3311,7 +3390,8 @@ class DrawingCanvas(QMainWindow):
         # 不用 showFullScreen()：它在 show 后还会 activateWindow()，而画布是
         # WindowDoesNotAcceptFocus，Qt 会打一条 requestActivate() 警告；效果上也不需要激活。
         self.setWindowState(self.windowState() | Qt.WindowState.WindowFullScreen)
-        self.show()
+        if self.runtime_context.ui_active:
+            self.show()
 
     @staticmethod
     def point_to_segment_distance_sq(pos, line):
@@ -4992,6 +5072,8 @@ class DrawingCanvas(QMainWindow):
         # 这一笔是否走「按笔入栈」的增量撤销。_begin_stroke 置 True；
         # 直接摆状态的旧式调用（测试里有）保持 False，走原来的整页快照分支。
         "_stroke_uses_delta": False,
+        "_teaching_stroke_operation": None,
+        "_teaching_stroke_tool": None,
         # 速度→宽度：每指一份，否则两根手指的速度会互相污染。
         "_speed_mm_s": None,      # 平滑后的笔速（mm/s）；None 表示这一笔还没测到
         "_speed_at": None,        # 上一次测速的时刻
@@ -5193,6 +5275,9 @@ class DrawingCanvas(QMainWindow):
         """
         self.last_point = pos
         self.current_stroke_id = uuid.uuid4()
+        events = getattr(self.panel, "teaching_events", None)
+        self._teaching_stroke_operation = events.begin_operation("ink.committed") if events else None
+        self._teaching_stroke_tool = self.draw_state
         self.current_stroke_widths = []
         self.current_stroke_segments = []
         self.current_stroke_points = [QPointF(pos)]
@@ -5239,7 +5324,8 @@ class DrawingCanvas(QMainWindow):
         self._finish_stroke_style(stroke_id)
         # Taper edits pen widths in place; all other finishes are append-only.
         changed_widths = self._stroke_style in ("fountain", "brush")
-        if self.commit_stroke_delta(stroke_id, segments, repaint=False, strokes_changed=changed_widths):
+        committed = self.commit_stroke_delta(stroke_id, segments, repaint=False, strokes_changed=changed_widths)
+        if committed:
             self._ink_page_pending = self.whiteboard_mode
             dirty = dirty.united(self.ink_dirty_rect(segments))
             self.update(dirty.toAlignedRect())
@@ -5247,6 +5333,12 @@ class DrawingCanvas(QMainWindow):
         self.current_stroke_id = None
         self.current_stroke_segments = []
         self._mouse_stroke_since = None
+        operation, self._teaching_stroke_operation = self._teaching_stroke_operation, None
+        events = getattr(self.panel, "teaching_events", None)
+        if committed and events is not None and segments:
+            events.emit_result(operation, "ink.committed", "success",
+                               {"tool": self._teaching_stroke_tool, "style": self._stroke_style,
+                                "segments": len(segments)})
         return True
 
     def draw_hold_ring(self, painter, center=None, progress=None):
@@ -8679,8 +8771,18 @@ class ControlPanel(QWidget):
         },
     }
 
-    def __init__(self):
+    def __init__(self, *, runtime=None):
+        context = application_runtime(runtime)
         super().__init__()
+        self.runtime_context = context
+        self._teaching_suspended = False
+        self.teaching_events = None
+        self.teaching_presenter = None
+        self.teaching_coordinator = None
+        self._teaching_restore_finished = False
+        self._teaching_deferred_update_download = None
+        self._teaching_deferred_update_result = None
+        self._update_install_handoff = False
         self.canvas = None
         self.project_path = None
         self.project_dirty = False
@@ -9014,14 +9116,20 @@ class ControlPanel(QWidget):
         self._keyboard_watch = QTimer(self)
         self._keyboard_watch.timeout.connect(self._keyboard_watch_tick)
         self._resize_to_content()
-        self.timer = QTimer(self); self.timer.timeout.connect(self.heartbeat_refresh); self.timer.start(self.HEARTBEAT_MS)
+        self.timer = QTimer(self); self.timer.timeout.connect(self.heartbeat_refresh)
+        if self.runtime_context.ui_active:
+            self.timer.start(self.HEARTBEAT_MS)
 
         # 自动保存定时器：每30秒保存一次画布内容
         self.autosave_timer = QTimer(self)
         self.autosave_timer.timeout.connect(self.auto_save)
-        self.autosave_timer.start(self.autosave_interval_seconds * 1000)  # 转换为毫秒
+        if self.runtime_context.ui_active:
+            self.autosave_timer.start(self.autosave_interval_seconds * 1000)
 
-        self.listener = keyboard.Listener(on_press=self.on_global_key_press); self.listener.start()
+        self.listener = None
+        if self.runtime_context.global_keyboard and os.environ.get("MYSCREENDRAW_NO_KEYBOARD") != "1":
+            self.listener = keyboard.Listener(on_press=self.on_global_key_press)
+            self.listener.start()
         track_event("app_started", theme=self.theme_name)
 
         # 初始化生命周期管理器（托盘、后台、退出/重启）
@@ -9492,7 +9600,9 @@ class ControlPanel(QWidget):
         self.ui_mode = "icon"
         self.main_frame.setVisible(False)
         # 显示分体窗口
-        if hasattr(self, 'logo_window') and hasattr(self, 'toolbar_window'):
+        if (self.runtime_context.ui_active and not self._teaching_suspended
+                and hasattr(self, 'logo_window')
+                and hasattr(self, 'toolbar_window')):
             self.logo_window.show()
             self.toolbar_window.show()
             # 只有没有保存过位置（首次启动）才落到左上角；否则 load_settings 刚恢复的
@@ -9894,12 +10004,23 @@ class ControlPanel(QWidget):
         track_event("theme_changed", theme=self.theme_name)
 
     def on_global_key_press(self, key):
+        if not self.runtime_context.global_keyboard:
+            return
+        if self._teaching_suspended:
+            if key == keyboard.Key.f12 and self.teaching_coordinator is not None:
+                self.background_requested.emit()
+            return
         if key == keyboard.Key.f12:
             self.background_requested.emit()
             return False
 
     def close_to_background(self):
         """关闭软件按钮和 F12：收起主界面，程序留在托盘里。真正退出走托盘菜单。"""
+        if self.runtime_context.paths.practice:
+            self.exit_requested.emit()
+            return
+        if self.teaching_coordinator is not None and self.teaching_coordinator.hide_to_background():
+            return
         if hasattr(self, 'lifecycle'):
             self.lifecycle.hide_to_background()
 
@@ -10096,6 +10217,34 @@ class ControlPanel(QWidget):
             btn = QPushButton(label)
             btn.clicked.connect(handler)
             self.tools_sub_layout.addWidget(btn)
+        self.btn_teaching = QPushButton(tr("teaching_entry"))
+        self.btn_teaching.setEnabled(not self.runtime_context.paths.practice)
+        self.btn_teaching.clicked.connect(self.open_teaching_center)
+        self.tools_sub_layout.addWidget(self.btn_teaching)
+
+    def _ensure_teaching_coordinator(self):
+        if self.runtime_context.paths.practice:
+            return None
+        if self.teaching_coordinator is None:
+            from teaching.application import TeachingCoordinator
+            try:
+                self.teaching_coordinator = TeachingCoordinator(sys.modules[__name__], self)
+            except (ValueError, OSError, KeyError):
+                LOGGER.warning("Offline teaching resources are unavailable")
+                return None
+        return self.teaching_coordinator
+
+    def open_teaching_center(self):
+        self.show_only_sub(None)
+        coordinator = self._ensure_teaching_coordinator()
+        if coordinator is not None:
+            return coordinator.open_center()
+        notify_user(self, tr("teaching_entry"), tr("teaching_unavailable"), level="information")
+        return False
+
+    def maybe_show_teaching_welcome(self):
+        coordinator = self._ensure_teaching_coordinator()
+        return coordinator.request_startup_welcome() if coordinator is not None else False
 
     def setup_file_sub(self):
         """Build one flat file panel; project/import/export remain distinct groups."""
@@ -11674,6 +11823,8 @@ class ControlPanel(QWidget):
     # --- 设置页 ---
     def begin_usage_session(self):
         """Called exactly once by normal startup; smoke and construction do not count."""
+        if not self.runtime_context.usage_tracking:
+            return
         if self._notice_session_started:
             return
         self._notice_session_started = True
@@ -12077,7 +12228,7 @@ class ControlPanel(QWidget):
 
     def toggle_update_check(self):
         self.update_check_enabled = not self.update_check_enabled
-        if self.update_check_enabled:
+        if self.update_check_enabled and self.runtime_context.updates:
             self.update_check_timer.start()
         else:
             self.update_check_timer.stop()
@@ -12098,6 +12249,11 @@ class ControlPanel(QWidget):
 
     def check_for_updates(self):
         """检查版本；自动检查仅提示新版，下载与安装仍须用户确认。"""
+        if not application_runtime(getattr(self, "runtime_context", None)).updates:
+            self.update_check_timer.stop()
+            return
+        if teaching_blocks_updates(self):
+            return
         if (not self.update_check_enabled or getattr(self, "_updates_stopping", False)
                 or getattr(self, "_update_flow_busy", False) or getattr(self, "_update_download_active", False)):
             return
@@ -12115,6 +12271,11 @@ class ControlPanel(QWidget):
         track_event("update_check_started")
 
     def _on_update_result(self, release, error):
+        if not application_runtime(getattr(self, "runtime_context", None)).updates:
+            return
+        if update_work_is_blocked(self):
+            self._teaching_deferred_update_result = (release, error)
+            return
         self._set_update_check_enabled(bool(self.update_check_enabled))
         if error == "rate_limited":
             self._set_update_status(tr("update_rate_limited"))
@@ -12184,6 +12345,9 @@ class ControlPanel(QWidget):
 
     def download_pending_update(self):
         """用户主动点击下载；自动检查本身不会启动下载。"""
+        if (not application_runtime(getattr(self, "runtime_context", None)).updates
+                or teaching_blocks_updates(self)):
+            return
         release = self._pending_update_release
         if not release:
             return
@@ -12191,6 +12355,9 @@ class ControlPanel(QWidget):
 
     def _offer_update_page(self, release):
         """Ask before downloading; the download stays inside the application."""
+        if (not application_runtime(getattr(self, "runtime_context", None)).updates
+                or teaching_blocks_updates(self)):
+            return
         if (getattr(self, "_update_flow_busy", False) or getattr(self, "_updates_stopping", False)
                 or getattr(self, "_update_download_active", False)):
             return
@@ -12261,7 +12428,39 @@ class ControlPanel(QWidget):
             if button is not None:
                 button.setEnabled(False)
 
+    def _resume_teaching_updates(self):
+        """Replay bounded update metadata only after practice/original recovery."""
+        lifecycle = self.lifecycle
+        if (not self.runtime_context.updates or teaching_blocks_updates(self)
+                or lifecycle.is_exiting() or lifecycle._quit_dialog_showing
+                or getattr(self, "_updates_stopping", False)
+                or getattr(self, "_update_flow_busy", False)):
+            return
+        for field, callback in (
+                ("_teaching_deferred_update_result", self._on_update_result),
+                ("_teaching_deferred_update_download", self._on_update_downloaded)):
+            pending = getattr(self, field, None)
+            if pending is not None:
+                setattr(self, field, None)
+                QTimer.singleShot(0, lambda field=field, pending=pending, callback=callback:
+                    self._deliver_teaching_update(field, pending, callback))
+
+    def _deliver_teaching_update(self, field, pending, callback):
+        # Scheduling is not authority to run inside a later confirmation or lesson.
+        if (not self.runtime_context.updates or update_work_is_blocked(self)
+                or getattr(self, "_updates_stopping", False)
+                or getattr(self, "_update_flow_busy", False)):
+            if getattr(self, field, None) is None:
+                setattr(self, field, pending)
+            return
+        callback(*pending)
+
     def _on_update_downloaded(self, path, error):
+        if not application_runtime(getattr(self, "runtime_context", None)).updates:
+            return
+        if update_work_is_blocked(self):
+            self._teaching_deferred_update_download = (path, error)
+            return
         handed_off = False
         script = None
         if getattr(self, "_update_flow_busy", False):
@@ -12487,6 +12686,8 @@ class ControlPanel(QWidget):
 
     def resume_callbacks(self):
         """恢复所有心跳和定时器（从后台恢复时调用）"""
+        if not self.runtime_context.ui_active or self._teaching_suspended:
+            return
         if hasattr(self, 'lifecycle') and self.lifecycle.state in (LifecycleState.HIDDEN, LifecycleState.QUITTING):
             return
         if hasattr(self, 'timer'):
@@ -12497,8 +12698,13 @@ class ControlPanel(QWidget):
 
     def heartbeat_refresh(self):
         # 后台隐藏时不执行任何会显示窗口的操作
+        if not self.runtime_context.ui_active or self._teaching_suspended:
+            return
         if hasattr(self, 'lifecycle') and self.lifecycle.state in (LifecycleState.HIDDEN, LifecycleState.QUITTING):
             return
+        if (self._teaching_deferred_update_download is not None
+                or self._teaching_deferred_update_result is not None):
+            self._resume_teaching_updates()
         self.bind_topmost_stack()
         # 图标树的状态投影在这里兜底：显式调用点覆盖了所有已知的状态变化路径，但
         # 兜一次底的代价只是每 500ms 读十几个 isEnabled/objectName，换来的是「以后
@@ -12714,6 +12920,11 @@ class ControlPanel(QWidget):
 
     def save_settings(self):
         """写入 data/config.json；原子替换，避免写到一半崩掉把配置写坏。"""
+        try:
+            runtime_file_path(CONFIG_FILE, write=True)
+        except (ValueError, OSError) as exc:
+            LOGGER.warning("Practice settings write rejected: %s", exc)
+            return
         settings = self.collect_settings()
         if not settings:
             return
@@ -12848,7 +13059,7 @@ class ControlPanel(QWidget):
 
         try:
             if os.path.exists(CONFIG_FILE):
-                with open(CONFIG_FILE, encoding="utf-8") as f:
+                with open(runtime_file_path(CONFIG_FILE), encoding="utf-8") as f:
                     loaded = json.load(f)
                     if isinstance(loaded, dict):
                         settings.update(loaded)
@@ -13042,7 +13253,7 @@ class ControlPanel(QWidget):
             update_channel = settings.get("update_channel")
             if update_channel in ("stable", "preview"):
                 self.update_channel = update_channel
-            if self.update_check_enabled:
+            if self.update_check_enabled and self.runtime_context.updates:
                 self.update_check_timer.start()
             else:
                 self.update_check_timer.stop()
@@ -13066,6 +13277,7 @@ class ControlPanel(QWidget):
             return  # One in-flight snapshot, never an unbounded queue of pages.
         self.save_settings()
         try:
+            runtime_directory_path(AUTOSAVE_DIR)
             signature = (self._document_generation, self.canvas.document_signature())
             if signature == getattr(self, "_last_autosave_signature", None):
                 return
@@ -13091,7 +13303,8 @@ class ControlPanel(QWidget):
             self._autosave_job = (signature, filepath, len(pages))
             # data contains only detached primitives. Neither Qt widgets nor live
             # dicts/formula trees are accessed from the worker.
-            self._autosave_future = self._autosave_executor.submit(atomic_write_autosave, filepath, data)
+            filepath = runtime_file_path(filepath, write=True)
+            self._autosave_future = self._autosave_executor.submit(write_runtime_autosave, filepath, data)
             self._autosave_poll_timer.start()
         except Exception as exc:
             self._autosave_error = str(exc)
@@ -13149,11 +13362,11 @@ class ControlPanel(QWidget):
         """
         files = []
         try:
-            for filename in os.listdir(AUTOSAVE_DIR):
+            for filename in os.listdir(runtime_directory_path(AUTOSAVE_DIR)):
                 if filename.startswith("autosave_") and filename.endswith((".json", ".json.gz")):
-                    filepath = os.path.join(AUTOSAVE_DIR, filename)
+                    filepath = runtime_file_path(os.path.join(AUTOSAVE_DIR, filename))
                     files.append((self._autosave_created_at(filepath), filepath))
-        except OSError:
+        except (OSError, ValueError):
             return []
         files.sort(key=lambda item: item[0], reverse=True)
         return files
@@ -13207,6 +13420,8 @@ class ControlPanel(QWidget):
 
     def offer_autosave_restore(self):
         """Recommend the latest valid autosave, with lazy older-version previews."""
+        if not self.runtime_context.ordinary_recovery:
+            return False
         if not self.canvas or self._document_transition_active:
             return False
         candidates = [path for _, path in self._list_autosave_files()]
@@ -13308,7 +13523,7 @@ class ControlPanel(QWidget):
                 if not (too_old or too_many):
                     continue
                 try:
-                    os.remove(filepath)
+                    os.remove(runtime_file_path(filepath))
                     removed += 1
                 except OSError as exc:
                     # 原来这里的 handler 引用了未定义的 e，删除失败会抛 NameError
@@ -13349,6 +13564,8 @@ class ControlPanel(QWidget):
 
     def grab_screen(self):
         """抓取当前画布所在屏幕（含已画好的批注），抓取前把面板/浮窗藏起来避免入镜。"""
+        if not self.runtime_context.desktop_capture:
+            return self.canvas.render_page_pixmap(self.canvas.capture_page(), self.canvas.size())
         select_visible = self.select_panel.isVisible()
         menu_visible = self.menu_panel.isVisible()
         mini_visible = self.mini_timer.isVisible()
@@ -13470,15 +13687,28 @@ class ControlPanel(QWidget):
                     self.raise_floating(restored)
 
     def save_project(self, path=None):
+        presenter = self.teaching_presenter
+        if presenter is not None:
+            with presenter.native_dialog():
+                return self._save_project_operation(path)
+        return self._save_project_operation(path)
+
+    def _save_project_operation(self, path=None):
+        events = self.teaching_events
+        operation = events.begin_operation("project.saved") if events else None
         if not self.canvas:
             return False
         if path is None:
             path = self.project_path
         if not path:
-            path, _ = QFileDialog.getSaveFileName(self, tr("save_project"), "", tr("project_filter_save"))
+            default = str(self.runtime_context.paths.data_dir) if self.runtime_context.paths.practice else ""
+            path, _ = QFileDialog.getSaveFileName(self, tr("save_project"), default, tr("project_filter_save"))
         if not path:
+            if events is not None:
+                events.emit_result(operation, "project.saved", "cancelled", {})
             return False
         try:
+            path = runtime_file_path(path, write=True)
             pages = self.canvas.serialized_document_pages()
             data = make_project_data(pages=pages, current_page=self.canvas.current_page, whiteboard_mode=self.canvas.whiteboard_mode, board_style=self.canvas.board_style, app_version=APP_VERSION, metadata={"title": os.path.basename(path)})
             atomic_write_project(path, data)
@@ -13487,9 +13717,13 @@ class ControlPanel(QWidget):
             self._saved_document_signature = self.canvas.document_signature()
             self.setWindowTitle(f"{tr('app')} - {os.path.basename(path)}")
             track_event("project_saved", path=os.path.basename(path), pages=len(pages))
+            if events is not None:
+                events.emit_result(operation, "project.saved", "success", {"pages": len(pages)})
             return True
         except (OSError, ValueError, TypeError) as exc:
-            notify_user(self, tr("save_failed"), map_io_exception(exc, path), level="warning", exc=exc)
+            if events is not None:
+                events.emit_result(operation, "project.saved", "failed", {})
+            notify_user(self, tr("save_failed"), runtime_io_message(exc, path), level="warning", exc=exc)
             return False
 
     def open_project_from_file_panel(self):
@@ -13570,6 +13804,7 @@ class ControlPanel(QWidget):
             return False
         self._document_transition_active = True
         try:
+            path = runtime_file_path(path)
             data = normalize_project_data(read_json_maybe_gz(path), kind=PROJECT_KIND)
             pages = [deserialize_page(page) for page in data["pages"]]
             if not self.confirm_unsaved_changes(tr("open_project")):
@@ -13596,7 +13831,7 @@ class ControlPanel(QWidget):
             track_event("project_opened", path=os.path.basename(path), pages=len(pages))
             return True
         except (OSError, ValueError, TypeError, KeyError) as exc:
-            notify_user(self, tr("open_failed"), map_io_exception(exc, path), level="warning", exc=exc)
+            notify_user(self, tr("open_failed"), runtime_io_message(exc, path), level="warning", exc=exc)
             return False
         finally:
             self._document_transition_active = False
@@ -13607,7 +13842,7 @@ class ControlPanel(QWidget):
         临时文件不是用户的项目：接回后必须清掉 project_path，否则之后「保存」会默默写回
         temp 目录；工作也仍算未保存。仅在成功接回后删除，失败时保留文件供手动恢复。
         """
-        if not path or not os.path.isfile(path):
+        if not self.runtime_context.ordinary_recovery or not path or not os.path.isfile(path):
             return False
         ok = self.open_project_from_path(path)
         if not ok:
@@ -13829,9 +14064,9 @@ class ControlPanel(QWidget):
             if size.width() < 2 or size.height() < 2:
                 screen = self.target_screen()
                 size = screen.geometry().size() if screen is not None else QSize(1920, 1080)
-            os.makedirs(EXPORT_DIR, exist_ok=True)
+            os.makedirs(runtime_directory_path(EXPORT_DIR), exist_ok=True)
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-            path = os.path.join(EXPORT_DIR, f"Export_{stamp}.{fmt.lower()}")
+            path = runtime_file_path(os.path.join(EXPORT_DIR, f"Export_{stamp}.{fmt.lower()}"), write=True)
             progress = self._create_document_progress(tr("export"), len(pages))
 
             def update(index, total, phase):
@@ -13859,7 +14094,9 @@ class ControlPanel(QWidget):
                 result = self._export_vector_pages(fmt, path, pages, size, update, progress.wasCanceled)
             else:
                 result = export_document(fmt, path, pages, render,
-                                                progress=update, cancelled=progress.wasCanceled)
+                                                progress=update, cancelled=progress.wasCanceled,
+                                                validate_path=(lambda value: runtime_file_path(value, write=True))
+                                                    if self.runtime_context.paths.practice else None)
             progress.close()
             track_event("export" if result.success else "export_incomplete", fmt=fmt,
                         pages=len(result.exported_indices), requested=result.total,
@@ -13870,7 +14107,7 @@ class ControlPanel(QWidget):
             if progress is not None:
                 progress.close()
             result = ExportResult(len(locals().get("pages", [])), (), (),
-                                  (ExportFailure(0, map_io_exception(exc, path)),), False, False)
+                                  (ExportFailure(0, runtime_io_message(exc, path)),), False, False)
             track_event("export_failed", fmt=fmt, error=str(exc))
             self._show_export_result(result, fmt)
             return result
@@ -13897,14 +14134,16 @@ class ControlPanel(QWidget):
             try:
                 stem, extension = os.path.splitext(destination)
                 target = f"{stem}_p{index}{extension}" if total > 1 else destination
+                target = runtime_file_path(target, write=True)
+                directory = runtime_directory_path(os.path.dirname(destination))
                 fd, temporary = tempfile.mkstemp(prefix=".msd-export-", suffix=extension,
-                                                 dir=os.path.dirname(destination))
+                                                 dir=directory)
                 os.close(fd)
                 data = serialize_page(page)
                 if fmt == "SVG":
                     from PyQt6.QtSvg import QSvgRenderer
-                    self.canvas.write_svg_page(temporary, data, size)
-                    if not QSvgRenderer(temporary).isValid():
+                    self.canvas.write_svg_page(runtime_file_path(temporary, write=True), data, size)
+                    if not QSvgRenderer(runtime_file_path(temporary)).isValid():
                         raise OSError("SVG read-back validation failed")
                 else:
                     decoded = {}
@@ -13913,15 +14152,15 @@ class ControlPanel(QWidget):
                         if pixels is None:
                             raise ValueError("EPS image decode failed")
                         decoded[image.get("id")] = pixels
-                    eps_export.write_eps(temporary, data, size.width(), size.height(),
+                    eps_export.write_eps(runtime_file_path(temporary, write=True), data, size.width(), size.height(),
                                          board_style=self.canvas.board_style, decoded_images=decoded)
-                    with open(temporary, "rb") as handle:
+                    with open(runtime_file_path(temporary), "rb") as handle:
                         if not handle.read(16).startswith(b"%!PS-Adobe"):
                             raise OSError("EPS read-back validation failed")
                 if cancelled():
                     stopped = True
                     break
-                os.replace(temporary, target)
+                os.replace(runtime_file_path(temporary, write=True), runtime_file_path(target, write=True))
                 temporary = None
                 indices.append(index)
                 paths.append(target)
@@ -13929,8 +14168,8 @@ class ControlPanel(QWidget):
                 failures.append(ExportFailure(index, str(exc)[:2000]))
             finally:
                 if temporary is not None:
-                    with contextlib.suppress(OSError):
-                        os.remove(temporary)
+                    with contextlib.suppress(OSError, ValueError):
+                        os.remove(runtime_file_path(temporary, write=True))
             processed = index
             progress(index, total, "after")
             if cancelled():
@@ -14475,7 +14714,7 @@ class ControlPanel(QWidget):
         self.roster_drawn = set()
         try:
             if os.path.exists(ROSTER_FILE):
-                with open(ROSTER_FILE, encoding="utf-8") as f:
+                with open(runtime_file_path(ROSTER_FILE), encoding="utf-8") as f:
                     data = json.load(f)
                 if isinstance(data, dict):
                     names = data.get("names", [])
@@ -14491,9 +14730,10 @@ class ControlPanel(QWidget):
 
     def save_roster(self):
         try:
-            os.makedirs(DATA_DIR, exist_ok=True)
+            runtime_file_path(ROSTER_FILE, write=True)
+            os.makedirs(runtime_directory_path(DATA_DIR), exist_ok=True)
             payload = {"names": self.roster, "drawn": sorted(self.roster_drawn)}
-            tmp = ROSTER_FILE + ".tmp"
+            tmp = runtime_file_path(ROSTER_FILE + ".tmp", write=True)
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, indent=2)
             os.replace(tmp, ROSTER_FILE)
@@ -14676,6 +14916,7 @@ class ControlPanel(QWidget):
             return
         names = []
         try:
+            path = runtime_file_path(path)
             if os.path.getsize(path) > self.MAX_IMPORT_BYTES:
                 raise ValueError(trf("err_file_too_large", path=path, limit="64 MiB"))
             if path.lower().endswith(".csv"):
@@ -14764,6 +15005,11 @@ class ControlPanel(QWidget):
 
     def import_image_file(self, path):
         """有界解码一张图片并插入画布；返回新 image item 或 None。"""
+        try:
+            path = runtime_file_path(path)
+        except (ValueError, OSError) as exc:
+            notify_user(self, tr("import_failed"), runtime_io_message(exc, path), level="information")
+            return None
         reader = QImageReader(path)
         reader.setAutoTransform(True)     # 尊重 EXIF 旋转方向
         source_size = reader.size()
@@ -14835,6 +15081,11 @@ class ControlPanel(QWidget):
         rendered successfully. Cancellation and errors discard the whole batch.
         """
         if not self.canvas or self._document_transition_active:
+            return 0
+        try:
+            path = runtime_file_path(path)
+        except (ValueError, OSError) as exc:
+            notify_user(self, tr("import_failed"), runtime_io_message(exc, path), level="information")
             return 0
         try:
             from PyQt6.QtPdf import QPdfDocument
@@ -14930,6 +15181,9 @@ class ControlPanel(QWidget):
             self.resume_callbacks()
 
 if __name__ == "__main__":
+    if PRACTICE_REQUEST is not None:
+        from teaching.application import run_practice_application
+        sys.exit(run_practice_application(PRACTICE_REQUEST, sys.modules[__name__]))
     ensure_directories()
     setup_logging()
 
@@ -15020,4 +15274,6 @@ if __name__ == "__main__":
             restart_file = argv[idx + 1]
     if not (restart_file and pnl.restore_from_restart(restart_file)):
         pnl.offer_autosave_restore()
+    pnl._teaching_restore_finished = True
+    QTimer.singleShot(0, pnl.maybe_show_teaching_welcome)
     sys.exit(app.exec())

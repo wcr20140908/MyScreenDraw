@@ -79,6 +79,8 @@ def export_document(
     render_page: Callable[[Any, int, int], QPixmap],
     progress: Callable[[int, int, str], None] | None = None,
     cancelled: Callable[[], bool] | None = None,
+    *,
+    validate_path: Callable[[str], str] | None = None,
 ) -> ExportResult:
     """Export snapshot pages in order, without pre-rendering or retaining bitmaps.
 
@@ -87,6 +89,8 @@ def export_document(
     for stamping the original page number. ``progress(index, total, phase)`` gets
     ``before`` and ``after`` events and may call QApplication.processEvents().
     ``cancelled()`` is checked before and after each page (and after progress).
+    An optional trusted ``validate_path`` guard rechecks temporary/derived paths
+    immediately before file I/O and commit, because callbacks can yield to Qt.
 
     For multiple PNGs, ``destination`` is a stem: ``foo.png`` yields
     ``foo_p1.png``, ``foo_p2.png`` etc.; a single page uses ``foo.png``.
@@ -116,7 +120,20 @@ def export_document(
     if not total:
         return ExportResult(0, (), (), (_failure(0, "no pages to export"),), False, True)
 
+    def output_path(path: str) -> str:
+        return os.fspath(validate_path(path)) if validate_path is not None else path
+
+    def cleanup(path: str, page: int = 0) -> None:
+        try:
+            os.unlink(output_path(path))
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError) as exc:
+            # A revoked private root must not cause cleanup to unlink elsewhere.
+            failures.append(_failure(page, f"export cleanup blocked: {exc}"))
+
     try:
+        destination = output_path(destination)
         for index, page in enumerate(pages, 1):
             try:
                 if cancelled is not None and cancelled():
@@ -143,10 +160,11 @@ def export_document(
                 if fmt == "PNG":
                     stem, ext = os.path.splitext(destination)
                     target = f"{stem}_p{index}{ext}" if total > 1 else destination
+                    target = output_path(target)
                     temporary = _temporary_path(target, ".png")
-                    if not pix.save(temporary, "PNG"):
+                    if not pix.save(output_path(temporary), "PNG"):
                         raise OSError("QPixmap.save returned false")
-                    image = QImageReader(temporary).read()
+                    image = QImageReader(output_path(temporary)).read()
                     if image.isNull() or image.size() != pix.size():
                         raise OSError("PNG read-back validation failed")
                     del image
@@ -154,14 +172,14 @@ def export_document(
                     if cancelled is not None and cancelled():
                         stopped = True
                         break
-                    os.replace(temporary, target)
+                    os.replace(output_path(temporary), output_path(target))
                     temporary = None
                     committed_indices.append(index)
                     committed_paths.append(target)
                 else:
                     if painter is None:
-                        temporary = _temporary_path(destination, ".pdf")
-                        writer = QPdfWriter(temporary)
+                        temporary = _temporary_path(output_path(destination), ".pdf")
+                        writer = QPdfWriter(output_path(temporary))
                         writer.setResolution(96)
                         writer.setCreator("MyScreenDraw")
                         size = QSizeF(max(1, pix.width()) * 25.4 / 96,
@@ -171,8 +189,10 @@ def export_document(
                         painter = QPainter()
                         if not painter.begin(writer):
                             raise _WriterError("QPainter.begin(QPdfWriter) returned false")
-                    elif not writer.newPage():
-                        raise _WriterError("QPdfWriter.newPage returned false")
+                    else:
+                        output_path(temporary)
+                        if not writer.newPage():
+                            raise _WriterError("QPdfWriter.newPage returned false")
                     painter.drawPixmap(painter.viewport(), pix, pix.rect())
                     pdf_pages += 1
                     pdf_written.append(index)
@@ -190,10 +210,7 @@ def export_document(
             finally:
                 del pix
                 if fmt == "PNG" and temporary is not None:
-                    try:
-                        os.unlink(temporary)
-                    except FileNotFoundError:
-                        pass
+                    cleanup(temporary, index)
                     temporary = None
 
             processed += 1
@@ -215,27 +232,24 @@ def export_document(
             painter = None
             writer = None
         if fmt == "PDF" and not stopped and processed == total and partial_allowed and pdf_pages:
-            if not _valid_pdf(temporary, pdf_pages):
+            if not _valid_pdf(output_path(temporary), pdf_pages):
                 failures.append(_failure(0, "PDF page-count or read-back validation failed"))
             else:
-                target = destination
+                target = output_path(destination)
                 if failures:
                     stem = os.path.splitext(os.path.basename(destination))[0]
                     fd, target = tempfile.mkstemp(
                         prefix=f"{stem}_partial_", suffix=".pdf",
-                        dir=os.path.dirname(os.path.abspath(destination)))
+                        dir=os.path.dirname(os.path.abspath(output_path(destination))))
                     os.close(fd)
                 try:
-                    os.replace(temporary, target)
+                    os.replace(output_path(temporary), output_path(target))
                     temporary = None
                     committed_indices.extend(pdf_written)
                     committed_paths.append(target)
-                except OSError as exc:
+                except (OSError, ValueError) as exc:
                     if failures:
-                        try:
-                            os.unlink(target)
-                        except OSError:
-                            pass
+                        cleanup(target)
                     failures.append(_failure(0, f"PDF commit failed: {exc}"))
     except Exception as exc:
         failures.append(_failure(0, f"export output failed: {exc}"))
@@ -246,10 +260,7 @@ def export_document(
         painter = None
         writer = None
         if temporary is not None:
-            try:
-                os.unlink(temporary)
-            except FileNotFoundError:
-                pass
+            cleanup(temporary)
     return ExportResult(total, tuple(committed_indices), tuple(committed_paths),
                         tuple(failures), stopped, processed == total)
 

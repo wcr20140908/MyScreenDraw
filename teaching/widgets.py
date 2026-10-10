@@ -29,15 +29,19 @@ _CHAPTER_ROLE = Qt.ItemDataRole.UserRole
 class TeachingCenter(QDialog):
     """Read-only catalog/progress browser; all launches are requests to the host.
 
+    search_edit matches localized titles and stable IDs; filter_combo carries
+    all/completed/unfinished, independent of its translated labels.
     start_requested carries (course_id, chapter_id), also for replay/resume.
-    Resume selects last_started only if that pair still exists in this catalog.
-    refresh() re-reads status without synchronizing or writing the state store.
+    Resume reveals last_started only if that pair still exists in this catalog.
+    refresh() preserves filters/visible selection without writing the store.
     """
 
     start_requested = pyqtSignal(str, str)
 
     def __init__(self, catalog: TutorialCatalog, state_store: TutorialStateStore,
                  translate: Translate, parent: QWidget | None = None) -> None:
+        from PyQt6.QtWidgets import QLineEdit
+
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.setWindowTitle(translate('teaching_center_title'))
@@ -45,9 +49,23 @@ class TeachingCenter(QDialog):
         self._store = state_store
         self._translate = translate
         self._items: dict[tuple[str, str], QTreeWidgetItem] = {}
+        self._course_items: dict[str, QTreeWidgetItem] = {}
+        self._completed: set[tuple[str, str]] = set()
+        self.search_edit = QLineEdit(self)
+        self.search_edit.setPlaceholderText(translate('teaching_search'))
+        self.search_edit.setClearButtonEnabled(True)
+        self.filter_combo = QComboBox(self)
+        for status in ('all', 'completed', 'unfinished'):
+            self.filter_combo.addItem(translate(f'teaching_filter_{status}'), status)
+        filters = QHBoxLayout()
+        filters.addWidget(self.search_edit, 1)
+        filters.addWidget(self.filter_combo)
         self.tree = QTreeWidget(self)
         self.tree.setColumnCount(2)
         self.tree.setHeaderLabels([translate('teaching_catalog'), translate('teaching_status')])
+        self.warning_label = QLabel(translate('teaching_progress_save_failed'), self)
+        self.warning_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.warning_label.setWordWrap(True)
         self.start_button = QPushButton(translate('teaching_start'), self)
         self.replay_button = QPushButton(translate('teaching_replay'), self)
         self.resume_button = QPushButton(translate('teaching_resume'), self)
@@ -57,8 +75,12 @@ class TeachingCenter(QDialog):
             button.setAutoDefault(False)
             buttons.addWidget(button)
         layout = QVBoxLayout(self)
+        layout.addLayout(filters)
+        layout.addWidget(self.warning_label)
         layout.addWidget(self.tree)
         layout.addLayout(buttons)
+        self.search_edit.textChanged.connect(self._apply_filters)
+        self.filter_combo.currentIndexChanged.connect(self._apply_filters)
         self.tree.currentItemChanged.connect(self._update_actions)
         self.tree.itemActivated.connect(self._request_selected)
         self.start_button.clicked.connect(self._request_selected)
@@ -67,17 +89,39 @@ class TeachingCenter(QDialog):
         self.close_button.clicked.connect(self.reject)
         self.resize(640, 480)
         self.refresh()
+        pair = self._last_started()
+        if pair is not None:
+            self.select_chapter(*pair)
+
+    @staticmethod
+    def _item_visible(item: QTreeWidgetItem | None) -> bool:
+        if item is None:
+            return False
+        while item is not None:
+            if item.isHidden():
+                return False
+            item = item.parent()
+        return True
 
     @property
     def selected_chapter(self) -> tuple[str, str] | None:
         item = self.tree.currentItem()
-        value = item.data(0, _CHAPTER_ROLE) if item is not None else None
+        if not self._item_visible(item):
+            return None
+        value = item.data(0, _CHAPTER_ROLE)
         return tuple(value) if value is not None else None
 
     def select_chapter(self, course_id: str, chapter_id: str) -> bool:
         item = self._items.get((course_id, chapter_id))
+        if not self._item_visible(item):
+            item = None
+            self.tree.clearSelection()
         self.tree.setCurrentItem(item)
         if item is not None:
+            parent = item.parent()
+            while parent is not None:
+                parent.setExpanded(True)
+                parent = parent.parent()
             self.tree.scrollToItem(item)
         self._update_actions()
         return item is not None
@@ -90,9 +134,12 @@ class TeachingCenter(QDialog):
         return pair if pair in self._items else None
 
     def refresh(self) -> None:
+        self.warning_label.setVisible(self._store.read_only)
         selected = self.selected_chapter
         blocker = QSignalBlocker(self.tree)
         self._items.clear()
+        self._course_items.clear()
+        self._completed.clear()
         self.tree.clear()
         grouped: set[str] = set()
         courses = {course.id: course for course in self._catalog.courses}
@@ -105,24 +152,66 @@ class TeachingCenter(QDialog):
             if course.id not in grouped:
                 self._add_course(course, self.tree)
         self.tree.expandAll()
+        self._apply_filters()
         self.tree.resizeColumnToContents(0)
-        pair = selected or self._last_started()
-        if pair is not None:
-            self.tree.setCurrentItem(self._items.get(pair))
+        if selected is not None:
+            self.select_chapter(*selected)
         del blocker
         self._update_actions()
 
     def _add_course(self, course: TutorialCourse, parent: QTreeWidget | QTreeWidgetItem) -> None:
         course_item = QTreeWidgetItem(parent, [self._translate(course.title_key)])
+        self._course_items[course.id] = course_item
+        completed = 0
         for chapter in course.chapters:
             record = self._store.chapter_record(chapter.id)
+            needs_review = record['needs_review'] or (
+                record['completed_revision'] is not None
+                and record['completed_revision'] != course.compat_revision)
             status = self._translate(f"teaching_status_{record['status']}")
-            if record['needs_review']:
+            if needs_review:
                 status += ' · ' + self._translate('teaching_status_needs_review')
             item = QTreeWidgetItem(course_item, [self._translate(chapter.title_key), status])
             pair = (course.id, chapter.id)
             item.setData(0, _CHAPTER_ROLE, pair)
             self._items[pair] = item
+            if record['status'] == 'completed' and not needs_review:
+                self._completed.add(pair)
+                completed += 1
+        course_item.setText(1, self._translate('teaching_course_progress').format(
+            completed=completed, total=len(course.chapters)))
+
+    def _apply_filters(self, *_args: object) -> None:
+        current = self.tree.currentItem()
+        blocker = QSignalBlocker(self.tree)
+        query = self.search_edit.text().strip().casefold()
+        status = self.filter_combo.currentData()
+        for course in self._catalog.courses:
+            course_item = self._course_items[course.id]
+            course_match = query in course.id.casefold() or query in course_item.text(0).casefold()
+            visible = False
+            for chapter in course.chapters:
+                pair = (course.id, chapter.id)
+                item = self._items[pair]
+                matches = (course_match or query in chapter.id.casefold()
+                           or query in item.text(0).casefold())
+                completed = pair in self._completed
+                matches_status = (status == 'all' or status == 'completed' and completed
+                                  or status == 'unfinished' and not completed)
+                shown = matches and matches_status
+                item.setHidden(not shown)
+                visible = visible or shown
+            course_item.setHidden(not visible)
+        for index in range(len(self._catalog.groups)):
+            group_item = self.tree.topLevelItem(index)
+            group_item.setHidden(all(group_item.child(child).isHidden()
+                                     for child in range(group_item.childCount())))
+        if not self._item_visible(current):
+            self.tree.clearSelection()
+            current = None
+        self.tree.setCurrentItem(current)
+        del blocker
+        self._update_actions()
 
     def _update_actions(self, *_args: object) -> None:
         selected = self.selected_chapter is not None
@@ -131,14 +220,25 @@ class TeachingCenter(QDialog):
         self.resume_button.setEnabled(self._last_started() is not None)
 
     def _request_selected(self, *_args: object) -> None:
+        if (_args and isinstance(_args[0], QTreeWidgetItem)
+                and _args[0] is not self.tree.currentItem()):
+            return
         pair = self.selected_chapter
         if pair is not None:
             self.start_requested.emit(*pair)
 
     def _request_resume(self) -> None:
         pair = self._last_started()
-        if pair is not None:
-            self.select_chapter(*pair)
+        if pair is None:
+            return
+        if not self._item_visible(self._items[pair]):
+            search_blocker = QSignalBlocker(self.search_edit)
+            filter_blocker = QSignalBlocker(self.filter_combo)
+            self.search_edit.clear()
+            self.filter_combo.setCurrentIndex(self.filter_combo.findData('all'))
+            del search_blocker, filter_blocker
+            self._apply_filters()
+        if self.select_chapter(*pair):
             self.start_requested.emit(*pair)
 
 
@@ -184,13 +284,16 @@ class TutorialController(QWidget):
         self.setWindowTitle(translate('teaching_controller_title'))
         self._translate = translate
         self._step: TutorialStep | None = None
+        self._finished: str | None = None
         self._can_previous = self._can_next = False
         self._paused = self._missing = self._exit_emitted = False
         self.title_label = QLabel(self)
         self.body_label = QLabel(self)
         self.progress_label = QLabel(self)
         self.status_label = QLabel(self)
-        for label in (self.title_label, self.body_label, self.progress_label, self.status_label):
+        self.warning_label = QLabel(self)
+        self.warning_label.hide()
+        for label in (self.title_label, self.body_label, self.progress_label, self.status_label, self.warning_label):
             label.setTextFormat(Qt.TextFormat.PlainText)
             label.setWordWrap(True)
         self.body_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
@@ -214,6 +317,7 @@ class TutorialController(QWidget):
         layout.addWidget(self.progress_label)
         layout.addWidget(body_scroll, 1)
         layout.addWidget(self.status_label)
+        layout.addWidget(self.warning_label)
         layout.addLayout(actions)
         self.resize(420, 300)
         self._update_actions()
@@ -227,12 +331,31 @@ class TutorialController(QWidget):
         title = self._translate(step.title_key)
         body = self._translate(step.body_key)
         progress = self._translate('teaching_progress').format(current=index + 1, total=total)
-        self._step = step
+        self._step, self._finished = step, None
         self._can_previous, self._can_next = bool(can_previous), bool(can_next)
         self.title_label.setText(title)
         self.body_label.setText(body)
         self.progress_label.setText(progress)
         self._update_actions()
+
+    @property
+    def chapter_finished(self) -> bool:
+        return self._finished is not None
+
+    def set_finished(self, status: str) -> None:
+        if status not in ('completed', 'skipped'):
+            raise ValueError('invalid chapter summary status')
+        self._step, self._finished = None, status
+        self._paused = self._missing = False
+        self.title_label.setText(self._translate('teaching_status_' + status))
+        self.body_label.setText(self._translate('teaching_return_to_work'))
+        self.title_label.show()
+        self.body_scroll.show()
+        self._update_actions()
+
+    def set_persistence_warning(self) -> None:
+        self.warning_label.setText(self._translate('teaching_progress_save_failed'))
+        self.warning_label.show()
 
     def set_paused(self, paused: bool) -> None:
         self._paused = bool(paused)
@@ -253,7 +376,9 @@ class TutorialController(QWidget):
         self.skip_button.setEnabled(self._step is not None)
         self.retry_button.setEnabled(self._missing and not self._paused)
         self.exit_button.setEnabled(True)
-        if self._paused:
+        if self._finished is not None:
+            key = 'teaching_status_' + self._finished
+        elif self._paused:
             key = 'teaching_paused'
         elif self._missing:
             key = 'teaching_target_missing'

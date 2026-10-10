@@ -102,8 +102,9 @@ def rig(tmp_path, monkeypatch, app):
 
     yield SimpleNamespace(main=main, fresh=fresh, load=load, path=Path(main.CONFIG_FILE))
     for panel, canvas in pairs:
-        panel.listener.stop()
-        panel.listener.join(timeout=1)
+        if panel.listener is not None:
+            panel.listener.stop()
+            panel.listener.join(timeout=1)
         panel.stop_update_worker()
         for owner in (panel, canvas):
             if owner is not None:

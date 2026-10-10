@@ -55,6 +55,7 @@ class TeachingPresenter(QObject):
                  reveal_actions: Mapping[str, Callable[[], None]] | None = None,
                  on_progress: Callable[[str, str, int], object] | None = None,
                  condition_reader: Callable[[str, str | None], object] | None = None,
+                 pause_action: Callable[[], object] | None = None,
                  available_geometry: Callable[[QWidget | None], QRect] = _work_area,
                  manage_window: Callable[[QWidget], None] | None = None,
                  unmanage_window: Callable[[QWidget], None] | None = None,
@@ -62,6 +63,8 @@ class TeachingPresenter(QObject):
         super().__init__(parent)
         if type(missing_timeout_ms) is not int or not 1 <= missing_timeout_ms <= 2000:
             raise ValueError('target recovery deadline must be 1..2000 milliseconds')
+        if pause_action is not None and not callable(pause_action):
+            raise ValueError('pause action must be a trusted callable')
         actions = dict(reveal_actions or {})
         if actions.keys() - REVEAL_ACTIONS or any(not callable(value) for value in actions.values()):
             raise ValueError('trusted reveal hooks must use registered actions')
@@ -95,7 +98,7 @@ class TeachingPresenter(QObject):
         for signal, action in (
             (self.controller.previous_requested, self.engine.previous),
             (self.controller.next_requested, self.engine.next),
-            (self.controller.pause_requested, self._toggle_pause),
+            (self.controller.pause_requested, pause_action if pause_action is not None else self._toggle_pause),
             (self.controller.skip_requested, self.engine.skip_chapter),
             (self.controller.retry_requested, self.retry),
             (self.controller.exit_requested, self._exit),
@@ -349,7 +352,7 @@ class TeachingPresenter(QObject):
             self.barrier.resume()
             if not self._closed and not self._dialog_depth:
                 self._request(self._targets_changed)
-                if self.engine.phase == 'paused':
+                if self.engine.phase == 'paused' or self.controller.chapter_finished:
                     self._show_controller()
 
     def _exit(self) -> None:

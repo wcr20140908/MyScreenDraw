@@ -189,6 +189,9 @@ class RuntimePaths:
         }.items()}
 
     def _private_path(self, value: Path | str) -> Path:
+        # Ownership can be revoked after startup; recheck before actual I/O.
+        self.for_practice(self.app_dir, self.resource_dir, self.runtime_root,
+                          temp_root=self.temp_root, session_id=self.session_id, nonce=self.nonce)
         text = str(value)
         windows = PureWindowsPath(text)
         if windows.drive and not windows.is_absolute():
@@ -217,6 +220,12 @@ class RuntimePaths:
         value = self._private_path(path) if self.practice else Path(path).resolve()
         if value.exists() and not value.is_file():
             raise ValueError('output must be a file path')
+        return value
+
+    def require_directory_path(self, path: Path | str) -> Path:
+        value = self._private_path(path) if self.practice else Path(path).resolve()
+        if value.exists() and not value.is_dir():
+            raise ValueError('output must be a directory path')
         return value
 
     def resource_path(self, relative: str) -> Path:
@@ -255,6 +264,14 @@ class RuntimeContext:
 
     @property
     def usage_tracking(self) -> bool:
+        return not self.paths.practice
+
+    @property
+    def ordinary_recovery(self) -> bool:
+        return not self.paths.practice
+
+    @property
+    def desktop_capture(self) -> bool:
         return not self.paths.practice
 
     def activate(self) -> None:

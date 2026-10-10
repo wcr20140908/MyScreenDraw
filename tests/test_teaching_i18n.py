@@ -21,6 +21,11 @@ WIDGET_KEYS = frozenset({
     "teaching_center_title",
     "teaching_catalog",
     "teaching_status",
+    "teaching_search",
+    "teaching_filter_all",
+    "teaching_filter_completed",
+    "teaching_filter_unfinished",
+    "teaching_course_progress",
     "teaching_start",
     "teaching_replay",
     "teaching_resume",
@@ -31,6 +36,7 @@ WIDGET_KEYS = frozenset({
     "teaching_status_skipped",
     "teaching_status_needs_review",
     "teaching_controller_title",
+    "teaching_return_to_work",
     "teaching_previous",
     "teaching_next",
     "teaching_pause",
@@ -61,7 +67,7 @@ INTEGRATION_KEYS = frozenset({
 })
 
 FIXED_KEYS = WIDGET_KEYS | INTEGRATION_KEYS
-FORMAT_VALUES = {"current": 2, "total": 7}
+FORMAT_VALUES = {"current": 2, "completed": 3, "total": 7}
 
 
 class TeachingI18nTests(unittest.TestCase):
@@ -102,13 +108,18 @@ class TeachingI18nTests(unittest.TestCase):
                         field for _, field, _, _ in formatter.parse(STRINGS["en"][key])
                         if field is not None
                     }
-                    expected = {"current", "total"} if key == "teaching_progress" else set()
+                    expected = {
+                        "teaching_progress": {"current", "total"},
+                        "teaching_course_progress": {"completed", "total"},
+                    }.get(key, set())
                     self.assertEqual(fields, english_fields)
                     self.assertEqual(fields, expected)
                     rendered = template.format(**FORMAT_VALUES)
                     self.assertTrue(rendered.strip())
                     if key == "teaching_progress":
                         self.assertIn("2/7", rendered)
+                    elif key == "teaching_course_progress":
+                        self.assertIn("3/7", rendered)
 
     def test_tr_reads_current_language_for_every_fixed_key(self):
         for language in LANGUAGES:
@@ -140,17 +151,26 @@ class TeachingI18nTests(unittest.TestCase):
 
     def test_progress_missing_parameters_fall_back_to_template(self):
         for language in LANGUAGES:
-            with self.subTest(language=language), mock.patch.object(i18n, "CURRENT", language):
-                self.assertIn("teaching_progress", STRINGS[language])
-                template = STRINGS[language]["teaching_progress"]
-                self.assertEqual(i18n.trf("teaching_progress"), template)
-                self.assertEqual(i18n.trf("teaching_progress", current=2), template)
+            with mock.patch.object(i18n, "CURRENT", language):
+                for key, partial in (
+                    ("teaching_progress", {"current": 2}),
+                    ("teaching_course_progress", {"completed": 3}),
+                ):
+                    with self.subTest(language=language, key=key):
+                        self.assertIn(key, STRINGS[language])
+                        template = STRINGS[language][key]
+                        self.assertEqual(i18n.trf(key), template)
+                        self.assertEqual(i18n.trf(key, **partial), template)
 
     def test_localized_guidance_is_not_an_english_placeholder(self):
         for language in LANGUAGES:
             if language == "en":
                 continue
-            for key in ("teaching_entry", "teaching_welcome_body", "teaching_practice_notice"):
+            for key in (
+                "teaching_entry", "teaching_welcome_body", "teaching_practice_notice",
+                "teaching_search", "teaching_filter_all", "teaching_filter_completed",
+                "teaching_filter_unfinished", "teaching_course_progress",
+            ):
                 with self.subTest(language=language, key=key):
                     self.assertIn(key, STRINGS[language])
                     self.assertNotEqual(STRINGS[language][key], STRINGS["en"][key])
