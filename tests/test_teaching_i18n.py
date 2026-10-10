@@ -26,6 +26,12 @@ WIDGET_KEYS = frozenset({
     "teaching_filter_completed",
     "teaching_filter_unfinished",
     "teaching_course_progress",
+    "teaching_context_hints",
+    "teaching_reset_progress",
+    "teaching_reset_confirm",
+    "teaching_reset_welcome",
+    "teaching_reset_accept",
+    "teaching_cancel",
     "teaching_start",
     "teaching_replay",
     "teaching_resume",
@@ -72,12 +78,31 @@ FORMAT_VALUES = {"current": 2, "completed": 3, "total": 7}
 
 class TeachingI18nTests(unittest.TestCase):
     def test_all_fixed_keys_exist_in_all_eight_languages(self):
+        self.assertEqual(len(FIXED_KEYS), 49)
         self.assertEqual(i18n._LANGS, LANGUAGES)
         self.assertEqual(set(STRINGS), set(LANGUAGES))
         for language in LANGUAGES:
             with self.subTest(language=language):
                 missing = FIXED_KEYS.difference(STRINGS[language])
                 self.assertFalse(missing, f"{language}: missing {sorted(missing)}")
+
+    def test_settings_entries_keep_approved_chinese_copy(self):
+        expected = {
+            "teaching_context_hints": "首次使用功能时显示教学提示",
+            "teaching_reset_progress": "清除学习进度",
+            "teaching_reset_confirm": (
+                "清除所有章节进度和已显示的功能提示记录。"
+                "此操作不会修改你的板书、文件或软件设置。"
+            ),
+            "teaching_reset_welcome": "下次启动时再次显示欢迎教学",
+            "teaching_reset_accept": "确认清除",
+            "teaching_cancel": "取消",
+        }
+        for key, value in expected.items():
+            with self.subTest(key=key):
+                self.assertIn(key, WIDGET_KEYS)
+                self.assertIn(key, STRINGS["zh"])
+                self.assertEqual(STRINGS["zh"][key], value)
 
     def test_fixed_entries_keep_eight_tuple_order_and_non_empty_values(self):
         for key in sorted(FIXED_KEYS):
@@ -170,6 +195,9 @@ class TeachingI18nTests(unittest.TestCase):
                 "teaching_entry", "teaching_welcome_body", "teaching_practice_notice",
                 "teaching_search", "teaching_filter_all", "teaching_filter_completed",
                 "teaching_filter_unfinished", "teaching_course_progress",
+                "teaching_context_hints", "teaching_reset_progress",
+                "teaching_reset_confirm", "teaching_reset_welcome",
+                "teaching_reset_accept", "teaching_cancel",
             ):
                 with self.subTest(language=language, key=key):
                     self.assertIn(key, STRINGS[language])

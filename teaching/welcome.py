@@ -97,6 +97,8 @@ class WelcomeCoordinator(QObject):
         return True
 
     def _decide(self, decision: str) -> None:
+        if self._closed:
+            return
         try:
             self.policy.decide(decision, start_core=self._start_core)
         except Exception:
@@ -107,10 +109,14 @@ class WelcomeCoordinator(QObject):
         if self._dialog is dialog:
             self._dialog = None
 
-    def close(self) -> None:
+    def close(self, *, record_decision: bool = True) -> None:
         if self._closed:
             return
         dialog = self.dialog
+        if not record_decision:
+            # A successful explicit reset supersedes this startup's old dialog.
+            # Revoke before close emits a decision; later queued choices stay stale.
+            self._closed = True
         if dialog is not None:
-            dialog.close()  # A visible welcome is explicitly dismissed on close.
+            dialog.close()  # Normal shutdown still records explicit dismissal.
         self._closed = True

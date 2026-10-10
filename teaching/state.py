@@ -154,13 +154,14 @@ class TutorialStateStore:
                 self._persist()
             self.last_error = 'corrupt_state'
 
-    def _persist(self, candidate: dict | None = None) -> bool:
+    def _persist(self, candidate: dict | None = None, *,
+                 keep_in_memory_on_failure: bool = True) -> bool:
         candidate = self._data if candidate is None else candidate
         if self.read_only:
             # An actual disk write error retains valid session-only progress.
             # Unknown/future/corrupt input is different: never replace its safe
             # read-only view with newly asserted completion or welcome choices.
-            if self.last_error == 'save_failed':
+            if self.last_error == 'save_failed' and keep_in_memory_on_failure:
                 self._data = candidate
             return False
         temporary: str | None = None
@@ -180,7 +181,8 @@ class TutorialStateStore:
             self._data = candidate
             return True
         except (OSError, ValueError):
-            self._data = candidate
+            if keep_in_memory_on_failure:
+                self._data = candidate
             self.read_only, self.last_error = True, 'save_failed'
             return False
         finally:
@@ -275,17 +277,20 @@ class TutorialStateStore:
             candidate['context_seen'].sort()
         return self._persist(candidate)
 
-    def set_context_hints_enabled(self, enabled: bool) -> bool:
-        if type(enabled) is not bool:
-            raise ValueError('hint setting must be boolean')
+    def set_context_hints_enabled(self, enabled: bool, *,
+                                  require_persistence: bool = False) -> bool:
+        if type(enabled) is not bool or type(require_persistence) is not bool:
+            raise ValueError('hint settings must be boolean')
         candidate = copy.deepcopy(self._data)
         candidate['context_hints_enabled'] = enabled
-        return self._persist(candidate)
+        return self._persist(candidate, keep_in_memory_on_failure=not require_persistence)
 
-    def reset(self, *, show_welcome: bool = False) -> bool:
-        if type(show_welcome) is not bool:
-            raise ValueError('welcome option must be boolean')
+    def reset(self, *, show_welcome: bool = False, require_persistence: bool = False) -> bool:
+        if type(show_welcome) is not bool or type(require_persistence) is not bool:
+            raise ValueError('reset options must be boolean')
         hints = self.context_hints_enabled
         candidate = _empty('unseen' if show_welcome else 'dismissed')
         candidate['context_hints_enabled'] = hints
-        return self._persist(candidate)
+        # A UI reset must be durable before clearing proven in-memory history;
+        # ordinary progress retains its existing session-only failure semantics.
+        return self._persist(candidate, keep_in_memory_on_failure=not require_persistence)

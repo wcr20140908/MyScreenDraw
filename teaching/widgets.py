@@ -15,7 +15,7 @@ from PyQt6 import sip
 from PyQt6.QtCore import QEvent, QObject, QRect, QSize, QSignalBlocker, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QCloseEvent, QPaintEvent, QPainter, QPen
 from PyQt6.QtWidgets import (
-    QApplication, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLayout,
+    QApplication, QCheckBox, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLayout,
     QMenu, QPushButton, QScrollArea, QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -27,7 +27,7 @@ _CHAPTER_ROLE = Qt.ItemDataRole.UserRole
 
 
 class TeachingCenter(QDialog):
-    """Read-only catalog/progress browser; all launches are requests to the host.
+    """Catalog/progress browser; launches and settings are requests to the host.
 
     search_edit matches localized titles and stable IDs; filter_combo carries
     all/completed/unfinished, independent of its translated labels.
@@ -37,6 +37,8 @@ class TeachingCenter(QDialog):
     """
 
     start_requested = pyqtSignal(str, str)
+    context_hints_requested = pyqtSignal(bool)
+    reset_requested = pyqtSignal(bool)
 
     def __init__(self, catalog: TutorialCatalog, state_store: TutorialStateStore,
                  translate: Translate, parent: QWidget | None = None) -> None:
@@ -48,6 +50,7 @@ class TeachingCenter(QDialog):
         self._catalog = catalog
         self._store = state_store
         self._translate = translate
+        self._mutations_allowed = True
         self._items: dict[tuple[str, str], QTreeWidgetItem] = {}
         self._course_items: dict[str, QTreeWidgetItem] = {}
         self._completed: set[tuple[str, str]] = set()
@@ -66,6 +69,28 @@ class TeachingCenter(QDialog):
         self.warning_label = QLabel(translate('teaching_progress_save_failed'), self)
         self.warning_label.setTextFormat(Qt.TextFormat.PlainText)
         self.warning_label.setWordWrap(True)
+        self.context_hints_check = QCheckBox(translate('teaching_context_hints'), self)
+        self.reset_button = QPushButton(translate('teaching_reset_progress'), self)
+        self.reset_confirmation = QFrame(self)
+        self.reset_confirm_label = QLabel(translate('teaching_reset_confirm'), self.reset_confirmation)
+        self.reset_confirm_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.reset_confirm_label.setWordWrap(True)
+        self.reset_welcome_check = QCheckBox(translate('teaching_reset_welcome'), self.reset_confirmation)
+        self.reset_confirm_button = QPushButton(translate('teaching_reset_accept'), self.reset_confirmation)
+        self.reset_cancel_button = QPushButton(translate('teaching_cancel'), self.reset_confirmation)
+        confirm_buttons = QHBoxLayout()
+        confirm_buttons.addWidget(self.reset_confirm_button)
+        confirm_buttons.addWidget(self.reset_cancel_button)
+        confirm_layout = QVBoxLayout(self.reset_confirmation)
+        confirm_layout.addWidget(self.reset_confirm_label)
+        confirm_layout.addWidget(self.reset_welcome_check)
+        confirm_layout.addLayout(confirm_buttons)
+        self.reset_confirmation.hide()
+        settings = QVBoxLayout()
+        settings.addWidget(self.context_hints_check)
+        settings.addWidget(self.reset_button, 0, Qt.AlignmentFlag.AlignLeft)
+        for button in (self.reset_button, self.reset_confirm_button, self.reset_cancel_button):
+            button.setAutoDefault(False)
         self.start_button = QPushButton(translate('teaching_start'), self)
         self.replay_button = QPushButton(translate('teaching_replay'), self)
         self.resume_button = QPushButton(translate('teaching_resume'), self)
@@ -78,7 +103,13 @@ class TeachingCenter(QDialog):
         layout.addLayout(filters)
         layout.addWidget(self.warning_label)
         layout.addWidget(self.tree)
+        layout.addLayout(settings)
+        layout.addWidget(self.reset_confirmation)
         layout.addLayout(buttons)
+        self.context_hints_check.toggled.connect(self._request_context_hints)
+        self.reset_button.clicked.connect(self._request_reset)
+        self.reset_confirm_button.clicked.connect(self._confirm_reset)
+        self.reset_cancel_button.clicked.connect(self._cancel_reset)
         self.search_edit.textChanged.connect(self._apply_filters)
         self.filter_combo.currentIndexChanged.connect(self._apply_filters)
         self.tree.currentItemChanged.connect(self._update_actions)
@@ -135,6 +166,7 @@ class TeachingCenter(QDialog):
 
     def refresh(self) -> None:
         self.warning_label.setVisible(self._store.read_only)
+        self._refresh_preferences()
         selected = self.selected_chapter
         blocker = QSignalBlocker(self.tree)
         self._items.clear()
@@ -213,7 +245,63 @@ class TeachingCenter(QDialog):
         del blocker
         self._update_actions()
 
+    def set_mutations_allowed(self, allowed: bool) -> None:
+        self._mutations_allowed = bool(allowed)
+        self._update_actions()
+
+    def _can_change_settings(self) -> bool:
+        return self._mutations_allowed and not self._store.read_only
+
+    def _refresh_preferences(self) -> None:
+        blocker = QSignalBlocker(self.context_hints_check)
+        self.context_hints_check.setChecked(self._store.context_hints_enabled)
+        del blocker
+
+    def _request_context_hints(self, enabled: bool) -> None:
+        if sip.isdeleted(self) or not self.isVisible():
+            return
+        # Restore the last persisted value before emit: a host callback may
+        # synchronously destroy this view; its refresh acknowledges any change.
+        self._refresh_preferences()
+        if self._can_change_settings():
+            self.context_hints_requested.emit(enabled)
+
+    def _request_reset(self) -> None:
+        if not sip.isdeleted(self) and self.isVisible() and self._can_change_settings():
+            self.reset_welcome_check.setChecked(False)
+            self.reset_confirmation.show()
+
+    def _cancel_reset(self) -> None:
+        if sip.isdeleted(self):
+            return
+        self.reset_confirmation.hide()
+        self.reset_welcome_check.setChecked(False)
+
+    def hideEvent(self, event) -> None:
+        self._cancel_reset()
+        super().hideEvent(event)
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        self._cancel_reset()
+        super().closeEvent(event)
+
+    def _confirm_reset(self) -> None:
+        if (sip.isdeleted(self) or not self.isVisible() or not self._can_change_settings()
+                or not self.reset_confirmation.isVisible()):
+            return
+        show_welcome = self.reset_welcome_check.isChecked()
+        # Revoke consent before a synchronous host callback or queued double-click.
+        self._cancel_reset()
+        self.reset_requested.emit(show_welcome)
+
     def _update_actions(self, *_args: object) -> None:
+        allowed = self._can_change_settings()
+        self.context_hints_check.setEnabled(allowed)
+        self.reset_button.setEnabled(allowed)
+        self.reset_confirm_button.setEnabled(allowed)
+        self.reset_welcome_check.setEnabled(allowed)
+        if not allowed:
+            self._cancel_reset()
         selected = self.selected_chapter is not None
         self.start_button.setEnabled(selected)
         self.replay_button.setEnabled(selected)

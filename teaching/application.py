@@ -378,6 +378,7 @@ class TeachingCoordinator(QObject):
         self._background_after_stop = False
         self._practice_hidden = False
         self._pending_lifecycle_action = None
+        self._welcome_deferred_to_next_start = False
         self._action_timer = QTimer(self)
         self._action_timer.setSingleShot(True)
         self._action_timer.timeout.connect(self._run_lifecycle_action)
@@ -496,16 +497,56 @@ class TeachingCoordinator(QObject):
         if self.center is None or sip.isdeleted(self.center):
             self.center = TeachingCenter(self.catalog, self.state_store, self.module.tr, self.panel)
             self.center.start_requested.connect(self.start)
+            self.center.context_hints_requested.connect(self.set_context_hints_enabled)
+            self.center.reset_requested.connect(self.reset_progress)
             self.panel.lifecycle.register_tool_window(self.center)
-        self.center.refresh()
+        self._refresh_center()
         self.center.show()
         return True
 
+    def _can_change_learning_settings(self):
+        if self._closed:
+            self._refresh_center()
+            return False
+        if self.active or not self.readiness().safe:
+            self._notice('teaching_waiting_operation')
+            self._refresh_center()
+            return False
+        if self.state_store.read_only:
+            self._notice('teaching_progress_save_failed')
+            self._refresh_center()
+            return False
+        return True
+
+    def set_context_hints_enabled(self, enabled):
+        if not self._can_change_learning_settings():
+            return False
+        persisted = self.state_store.set_context_hints_enabled(enabled, require_persistence=True)
+        self._refresh_center()
+        if not persisted:
+            self._notice('teaching_progress_save_failed')
+        return persisted
+
+    def reset_progress(self, show_welcome=False):
+        if not self._can_change_learning_settings():
+            return False
+        persisted = self.state_store.reset(show_welcome=show_welcome, require_persistence=True)
+        if persisted:
+            self._welcome_timer.stop()
+            self._welcome_deferred_to_next_start = True
+            self.welcome.close(record_decision=False)
+        self._refresh_center()
+        if not persisted:
+            self._notice('teaching_progress_save_failed')
+        return persisted
+
     def maybe_show_welcome(self):
-        return False if self._closed else self.welcome.maybe_show(self.readiness())
+        return (False if self._closed or self._welcome_deferred_to_next_start
+                else self.welcome.maybe_show(self.readiness()))
 
     def request_startup_welcome(self):
-        if (self._closed or not self.policy.context.automatic_allowed or self.state_store.read_only
+        if (self._closed or self._welcome_deferred_to_next_start
+                or not self.policy.context.automatic_allowed or self.state_store.read_only
                 or self.state_store.welcome != 'unseen'):
             self._welcome_timer.stop()
             return False
@@ -574,9 +615,11 @@ class TeachingCoordinator(QObject):
 
     def _refresh_center(self, _=None):
         if self.center is not None and not sip.isdeleted(self.center):
+            self.center.set_mutations_allowed(not self._closed and not self.active)
             self.center.refresh()
 
     def _phase_changed(self, phase):
+        self._refresh_center()
         if phase != 'stopped':
             self._action_timer.stop()
             self._updates_timer.stop()
@@ -591,8 +634,6 @@ class TeachingCoordinator(QObject):
             if self._background_after_stop:
                 self._background_after_stop = False
                 self.panel.lifecycle.hide_to_background()
-            if self.center is not None and not sip.isdeleted(self.center):
-                self.center.refresh()
             if self._pending_lifecycle_action is not None:
                 self._pending_failure = None
                 self._action_timer.start(0)
