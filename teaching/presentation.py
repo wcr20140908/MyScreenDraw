@@ -332,24 +332,28 @@ class TeachingPresenter(QObject):
             self._resume_current()
 
     @contextmanager
-    def native_dialog(self) -> Iterator[None]:
+    def native_dialog(self, *, before_refresh: Callable[[], None] | None = None) -> Iterator[None]:
         """Cover the whole native-file operation, including its terminal result.
 
-        Consume success/cancel/failure inside the context, before target checks
-        resume: the chooser can close the menu that originally owned the action.
-        The native dialog itself and the rest of the real file operation belong
-        inside the same with block. This does not invent a successful operation.
+        A staged operation uses before_refresh to publish only after barrier
+        cleanup succeeds, but before a closed old menu is checked as a target.
+        The callback is not run when the body or cleanup fails. The native dialog
+        and the full real file operation belong inside this same scope.
         """
         self._dialog_depth += 1
         self.barrier.suspend()
         if not self._closed:
             self.controller.hide()
             self.highlight.hide()
+        completed = False
         try:
             yield
+            completed = True
         finally:
             self._dialog_depth -= 1
             self.barrier.resume()
+            if completed and before_refresh is not None:
+                before_refresh()
             if not self._closed and not self._dialog_depth:
                 self._request(self._targets_changed)
                 if self.engine.phase == 'paused' or self.controller.chapter_finished:

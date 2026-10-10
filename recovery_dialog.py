@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable, Sequence
 
-from PyQt6.QtCore import QSize, Qt
+from PyQt6.QtCore import QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import (QComboBox, QDialog, QHBoxLayout, QLabel, QListWidget,
                              QPushButton, QVBoxLayout, QWidget)
@@ -32,6 +32,8 @@ class RecoveryDialog(QDialog):
     applying either; rejecting the dialog also clears both attributes.
     """
 
+    preview_ready = pyqtSignal(str, int, int)
+
     def __init__(self, candidates: Sequence[str | Path],
                  load_data: Callable[[str | Path], dict],
                  render_preview: Callable[[dict, QSize], QPixmap], parent=None):
@@ -41,6 +43,7 @@ class RecoveryDialog(QDialog):
         self._render_preview = render_preview
         self.selected_data: dict | None = None
         self.selected_path: str | Path | None = None
+        self._preview_state: tuple[str, int, int] | None = None
         self.setWindowTitle(_label("recovery_title"))
 
         layout = QVBoxLayout(self)
@@ -95,7 +98,17 @@ class RecoveryDialog(QDialog):
         if self.selected_data is None:
             self.details.setText(_label("recovery_no_valid"))
 
+    @property
+    def preview_state(self) -> tuple[str, int, int] | None:
+        """The displayed preview's (path, one-based page, total), or None.
+
+        Read this after construction, then subscribe to ``preview_ready`` for
+        subsequent successful displays. Preview failure does not prevent recovery.
+        """
+        return self._preview_state
+
     def _clear_selection(self) -> None:
+        self._preview_state = None
         self.selected_data = None
         self.selected_path = None
         self.restore_button.setEnabled(False)
@@ -143,19 +156,27 @@ class RecoveryDialog(QDialog):
         return True
 
     def _show_preview(self, _index: int = -1) -> None:
+        self._preview_state = None
         self.preview.clear()
         self.preview.setText(_label("recovery_preview_unavailable"))
-        if self.selected_data is None:
+        if self.selected_data is None or self.selected_path is None:
             return
-        page = self.selected_data["pages"][self.page_selector.currentIndex()]
         try:
+            pages = self.selected_data["pages"]
+            index = self.page_selector.currentIndex()
+            if not 0 <= index < len(pages) or not isinstance(pages[index], dict):
+                return
+            page = pages[index]
             pixmap = self._render_preview(page, QSize(_PREVIEW_SIZE))
             if not isinstance(pixmap, QPixmap) or pixmap.isNull():
                 return
             bounded = pixmap.scaled(_PREVIEW_SIZE, Qt.AspectRatioMode.KeepAspectRatio,
                                     Qt.TransformationMode.SmoothTransformation)
-            if not bounded.isNull():
-                self.preview.setPixmap(bounded)
+            if bounded.isNull():
+                return
+            self.preview.setPixmap(bounded)
+            self._preview_state = (str(self.selected_path), index + 1, len(pages))
+            self.preview_ready.emit(*self._preview_state)
         except Exception:
             # A failed preview does not invalidate successfully loaded document data.
             pass

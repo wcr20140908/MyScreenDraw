@@ -25,13 +25,14 @@ from .transport import TeachingConnection
 APPLICATION_TARGETS = frozenset({
     'canvas.ink', 'toolbar.mode', 'toolbar.pen', 'toolbar.eraser', 'toolbar.select',
     'toolbar.undo', 'toolbar.redo', 'toolbar.whiteboard', 'toolbar.file', 'toolbar.tools',
-    'pen.palette', 'pen.width', 'file.save', 'file.open', 'pages.add', 'pages.previous', 'pages.next',
+    'pen.palette', 'pen.width', 'file.save', 'file.save_as', 'file.open', 'file.recovery', 'export.png',
+    'pages.add', 'pages.previous', 'pages.next',
 })
 APPLICATION_EVENTS = frozenset({
     'ink.committed', 'ink.erased', 'project.saved', 'mode.changed', 'tool.changed',
     'pen.color_changed', 'pen.width_changed', 'history.undone', 'history.redone',
     'selection.changed', 'selection.transformed', 'whiteboard.entered', 'whiteboard.exited',
-    'page.created', 'page.changed',
+    'page.created', 'page.changed', 'project.opened', 'recovery.previewed', 'recovery.applied', 'export.finished',
 })
 
 
@@ -253,7 +254,10 @@ class ApplicationTeachingHost(QObject):
             'pen.palette': lambda: self.panel.pen_palette,
             'pen.width': lambda: self.panel.pen_width_row,
             'file.save': lambda: self.panel.btn_save_project,
+            'file.save_as': lambda: self.panel.btn_save_project_as,
             'file.open': lambda: self.panel.btn_open_project,
+            'file.recovery': lambda: self.panel.btn_recovery,
+            'export.png': lambda: self.panel.btn_export_png,
             'pages.add': lambda: self.panel.rail_new,
             'pages.previous': lambda: self.panel.rail_prev,
             'pages.next': lambda: self.panel.rail_next,

@@ -369,6 +369,48 @@ def teaching_blocks_updates(panel):
             or coordinator is not None and coordinator.active)
 
 
+@contextlib.contextmanager
+def teaching_native_dialog(panel):
+    presenter = getattr(panel, "teaching_presenter", None)
+    scope = presenter.native_dialog() if presenter is not None else contextlib.nullcontext()
+    with scope:
+        yield
+
+
+@contextlib.contextmanager
+def teaching_document_action(panel, names):
+    """One outer menu/chooser action; nested adapters borrow its captured tokens."""
+    active = getattr(panel, "_teaching_document_batch", None)
+    if active is not None:
+        yield active
+        return
+    events = getattr(panel, "teaching_events", None)
+    if events is None:
+        with teaching_native_dialog(panel):
+            yield None
+        return
+    from teaching.events import TeachingOperationBatch
+    batch = TeachingOperationBatch(events, names)
+    panel._teaching_document_batch = batch
+    try:
+        presenter = getattr(panel, "teaching_presenter", None)
+        if presenter is None:
+            yield batch
+            batch.flush()
+        else:
+            with presenter.native_dialog(before_refresh=batch.flush):
+                yield batch
+    finally:
+        panel._teaching_document_batch = None
+        batch.close()
+
+
+@contextlib.contextmanager
+def teaching_document_operation(panel, name):
+    with teaching_document_action(panel, (name,)) as batch:
+        yield (batch, batch.operation(name)) if batch is not None else (None, None)
+
+
 def update_work_is_blocked(panel):
     lifecycle = getattr(panel, "lifecycle", None)
     return (teaching_blocks_updates(panel) or lifecycle is not None
@@ -10382,6 +10424,9 @@ class ControlPanel(QWidget):
         project_grid.addWidget(self.btn_open_project, 0, 0)
         project_grid.addWidget(self.btn_save_project, 0, 1)
         project_grid.addWidget(self.btn_save_project_as, 1, 0, 1, 2)
+        self.btn_recovery = QPushButton(tr("restore_autosave"))
+        self.btn_recovery.clicked.connect(self.open_recovery_from_file_panel)
+        project_grid.addWidget(self.btn_recovery, 2, 0, 1, 2)
         self.file_sub_layout.addLayout(project_grid)
 
         self.file_sub_layout.addWidget(QLabel(tr("import_group")))
@@ -10645,9 +10690,12 @@ class ControlPanel(QWidget):
         self.refresh_ui()
 
     def do_export(self, fmt):
-        self.show_only_sub(None)
-        self.refresh_ui()
-        self.export_pages(fmt)
+        if not self.canvas or self._document_transition_active:
+            return None
+        with teaching_document_operation(self, "export.finished") as (events, operation):
+            self.show_only_sub(None)
+            self.refresh_ui()
+            return self._export_pages_with_result(fmt, events, operation)
 
     def setup_marker_sub(self):
         grid = QGridLayout(); grid.setSpacing(4)
@@ -13603,20 +13651,51 @@ class ControlPanel(QWidget):
         return True
 
     def offer_autosave_restore(self):
-        """Recommend the latest valid autosave, with lazy older-version previews."""
+        """Ordinary startup recovery never runs in a practice process."""
         if not self.runtime_context.ordinary_recovery:
             return False
+        return self._restore_history_operation()
+
+
+    def open_recovery_from_file_panel(self):
+        """An explicit manual entry may preview only this practice's private history."""
+        if self.runtime_context.paths.practice and not self.runtime_context.ui_active:
+            return False
+        with teaching_document_action(self, ("recovery.previewed", "recovery.applied")):
+            self.show_only_sub(None)
+            return self._restore_history_operation(allow_private=True)
+
+
+    def _restore_history_operation(self, *, allow_private=False):
         if not self.canvas or self._document_transition_active:
             return False
+        with teaching_document_action(self, ("recovery.previewed", "recovery.applied")) as events:
+            preview_operation = events.operation("recovery.previewed") if events is not None else None
+            restore_operation = events.operation("recovery.applied") if events is not None else None
+            ok, outcome, details, preview = self._offer_autosave_restore_result(allow_private=allow_private)
+            if events is not None:
+                if preview is not None:
+                    events.emit_result(preview_operation, "recovery.previewed", "success", preview)
+                events.emit_result(restore_operation, "recovery.applied", outcome, details)
+            return ok
+
+
+    def _offer_autosave_restore_result(self, *, allow_private=False):
+        private_allowed = (allow_private and self.runtime_context.paths.practice
+                           and self.runtime_context.ui_active)
+        if not self.runtime_context.ordinary_recovery and not private_allowed:
+            return False, "failed", {}, None
         candidates = [path for _, path in self._list_autosave_files()]
         if not candidates:
-            return False
+            return False, "failed", {}, None
         self._document_transition_active = True
         self.pause_callbacks()
         dialog = None
         preview_style = ["WHITE"]
+        preview = [None]
         try:
             def load_data(path):
+                path = runtime_file_path(path)
                 data = normalize_project_data(read_json_maybe_gz(path), kind=AUTOSAVE_KIND)
                 if not any(page_has_content(page) for page in data["pages"]):
                     raise ValueError("empty autosave")
@@ -13624,32 +13703,38 @@ class ControlPanel(QWidget):
                 return data
 
             def render_preview(page, size):
-                # Explicit deserialization covers text-only documents as well.
-                # Only background color needs the saved board style; never apply
-                # a preview document or mode to the live canvas.
                 return self.canvas.render_page_pixmap(deserialize_page(page), size,
                                                       board_style=preview_style[0])
 
+            def record_preview(path, page, pages):
+                path = runtime_file_path(path)
+                preview[0] = {"version": os.path.basename(path), "page": page, "pages": pages}
+
             dialog = RecoveryDialog(candidates, load_data, render_preview, self)
+            dialog.preview_ready.connect(record_preview)
+            if dialog.preview_state is not None:
+                record_preview(*dialog.preview_state)
             if dialog.selected_data is None:
-                return False
+                return False, "failed", {}, preview[0]
             dialog.setWindowModality(Qt.WindowModality.ApplicationModal)
             dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
             self.raise_floating(dialog, bind_owner=False)
             if dialog.exec() != QDialog.DialogCode.Accepted or dialog.selected_data is None:
                 track_event("autosave_restore_declined")
-                return False
+                return False, "cancelled", {}, preview[0]
             if not self.confirm_unsaved_changes(tr("restore_autosave")):
-                return False
+                return False, "cancelled", {}, preview[0]
+            selected_path = runtime_file_path(dialog.selected_path)
             data = dialog.selected_data
             ok = self.apply_autosave_data(data)
             track_event("autosave_restored" if ok else "autosave_restore_empty",
-                        file=os.path.basename(dialog.selected_path), pages=len(data["pages"]))
-            return ok
+                        file=os.path.basename(selected_path), pages=len(data["pages"]))
+            details = {"version": os.path.basename(selected_path), "pages": len(data["pages"])} if ok else {}
+            return ok, "success" if ok else "failed", details, preview[0]
         except Exception as exc:
             track_event("autosave_restore_failed", error=str(exc))
             notify_user(self, tr("restore_failed"), str(exc), level="warning", exc=exc)
-            return False
+            return False, "failed", {}, preview[0]
         finally:
             if dialog is not None:
                 dialog.hide()
@@ -13871,15 +13956,10 @@ class ControlPanel(QWidget):
                     self.raise_floating(restored)
 
     def save_project(self, path=None):
-        presenter = self.teaching_presenter
-        if presenter is not None:
-            with presenter.native_dialog():
-                return self._save_project_operation(path)
-        return self._save_project_operation(path)
+        with teaching_document_operation(self, "project.saved") as (events, operation):
+            return self._save_project_operation(path, events, operation)
 
-    def _save_project_operation(self, path=None):
-        events = self.teaching_events
-        operation = events.begin_operation("project.saved") if events else None
+    def _save_project_operation(self, path=None, events=None, operation=None):
         if not self.canvas:
             return False
         if path is None:
@@ -13911,34 +13991,58 @@ class ControlPanel(QWidget):
             return False
 
     def open_project_from_file_panel(self):
-        self.show_only_sub(None)
-        return self.open_project()
+        with teaching_document_action(self, ("project.opened",)):
+            self.show_only_sub(None)
+            return self.open_project()
 
     def save_project_from_file_panel(self):
-        self.show_only_sub(None)
-        return self.save_project()
+        with teaching_document_action(self, ("project.saved",)):
+            self.show_only_sub(None)
+            return self.save_project()
 
     def save_project_as_from_file_panel(self):
-        self.show_only_sub(None)
-        return self.save_project_as()
+        with teaching_document_action(self, ("project.saved",)):
+            self.show_only_sub(None)
+            return self.save_project_as()
 
     def import_media_from_file_panel(self):
-        self.show_only_sub(None)
-        return self.import_media()
+        with teaching_native_dialog(self):
+            self.show_only_sub(None)
+            return self.import_media()
 
     def save_project_as(self):
-        """Always choose a new destination; cancellation preserves the current project path."""
-        path, _ = QFileDialog.getSaveFileName(
-            self, tr("save_project_as"), "", tr("project_filter_save"))
-        if not path:
-            return False
-        return self.save_project(path)
+        """Choose a new destination without letting the old chooser credit a new step."""
+        with teaching_document_operation(self, "project.saved") as (events, operation):
+            context = getattr(self, "runtime_context", RUNTIME_CONTEXT)
+            default = str(context.paths.data_dir) if context.paths.practice else ""
+            path, _ = QFileDialog.getSaveFileName(
+                self, tr("save_project_as"), default, tr("project_filter_save"))
+            if not path:
+                if events is not None:
+                    events.emit_result(operation, "project.saved", "cancelled", {})
+                return False
+            # This is one save-as operation, not a fresh save begun after the chooser.
+            with events.suppress() if events is not None else contextlib.nullcontext():
+                ok = self.save_project(path)
+            if events is not None:
+                details = {"pages": len(self.canvas.pages)} if ok else {}
+                events.emit_result(operation, "project.saved", "success" if ok else "failed", details)
+            return ok
 
     def open_project(self):
-        path, _ = QFileDialog.getOpenFileName(self, tr("open_project"), "", tr("project_filter_open"))
-        if not path:
+        if not self.canvas or self._document_transition_active:
             return False
-        return self.open_project_from_path(path)
+        with teaching_document_operation(self, "project.opened") as (events, operation):
+            default = str(self.runtime_context.paths.data_dir) if self.runtime_context.paths.practice else ""
+            path, _ = QFileDialog.getOpenFileName(self, tr("open_project"), default, tr("project_filter_open"))
+            if not path:
+                if events is not None:
+                    events.emit_result(operation, "project.opened", "cancelled", {})
+                return False
+            ok, outcome, details = self._open_project_from_path_result(path)
+            if events is not None:
+                events.emit_result(operation, "project.opened", outcome, details)
+            return ok
 
     def has_unsaved_changes(self):
         if not self.canvas:
@@ -13983,16 +14087,24 @@ class ControlPanel(QWidget):
             self.resume_callbacks()
 
     def open_project_from_path(self, path):
-        """Validate first; only replace live work after an explicit safe choice."""
-        if not path or self._document_transition_active:
+        """Validate and apply the document before delivering its captured result."""
+        if not path or not self.canvas or self._document_transition_active:
             return False
+        with teaching_document_operation(self, "project.opened") as (events, operation):
+            ok, outcome, details = self._open_project_from_path_result(path)
+            if events is not None:
+                events.emit_result(operation, "project.opened", outcome, details)
+            return ok
+
+
+    def _open_project_from_path_result(self, path):
         self._document_transition_active = True
         try:
             path = runtime_file_path(path)
             data = normalize_project_data(read_json_maybe_gz(path), kind=PROJECT_KIND)
             pages = [deserialize_page(page) for page in data["pages"]]
             if not self.confirm_unsaved_changes(tr("open_project")):
-                return False
+                return False, "cancelled", {}
             cv = self.canvas
             cv._cancel_all_pointers()
             cv._cancel_smart_recognition(drop_pending=True)
@@ -14013,10 +14125,10 @@ class ControlPanel(QWidget):
             self.update_whiteboard_ui()
             self.update_history_ui()
             track_event("project_opened", path=os.path.basename(path), pages=len(pages))
-            return True
+            return True, "success", {"pages": len(pages), "path": os.path.basename(path)}
         except (OSError, ValueError, TypeError, KeyError) as exc:
             notify_user(self, tr("open_failed"), runtime_io_message(exc, path), level="warning", exc=exc)
-            return False
+            return False, "failed", {}
         finally:
             self._document_transition_active = False
 
@@ -14226,6 +14338,22 @@ class ControlPanel(QWidget):
             box.deleteLater()
 
     def export_pages(self, fmt):
+        if not self.canvas or self._document_transition_active:
+            return None
+        with teaching_document_operation(self, "export.finished") as (events, operation):
+            return self._export_pages_with_result(fmt, events, operation)
+
+    def _export_pages_with_result(self, fmt, events, operation):
+        result = self._export_pages_operation(fmt)
+        if result is not None and events is not None:
+            outcome = "success" if result.success else "cancelled" if result.cancelled else "failed"
+            details = {"format": str(fmt).upper(), "pages": len(result.exported_indices),
+                       "total": result.total, "failed_pages": len(result.failures),
+                       "complete": result.complete, "cancelled": result.cancelled}
+            events.emit_result(operation, "export.finished", outcome, details)
+        return result
+
+    def _export_pages_operation(self, fmt):
         if not self.canvas or self._document_transition_active:
             return None
         fmt = str(fmt).upper()
