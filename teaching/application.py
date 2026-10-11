@@ -36,6 +36,7 @@ APPLICATION_TARGETS = frozenset({
     'eraser.type.stroke', 'eraser.size', 'toolbar.clear', 'file.save', 'file.save_as',
     'file.open', 'file.recovery', 'export.png',
     'pages.add', 'pages.previous', 'pages.next', 'tools.teaching',
+    'selection.duplicate', 'selection.delete',
 })
 APPLICATION_EVENTS = frozenset({
     'ink.committed', 'ink.erased', 'project.saved', 'mode.changed', 'tool.changed',
@@ -44,7 +45,7 @@ APPLICATION_EVENTS = frozenset({
     'page.created', 'page.changed', 'project.opened', 'recovery.previewed', 'recovery.applied', 'export.finished',
     'center.visited', 'practice.resumed', 'pen.style_changed', 'eraser.type_changed',
     'eraser.size_changed', 'history.cleared', 'laser.trace', 'pen.default_saved',
-    'pen.defaults_changed', 'pen.default_applied',
+    'pen.defaults_changed', 'pen.default_applied', 'selection.duplicated', 'selection.deleted',
 })
 
 
@@ -461,6 +462,8 @@ class ApplicationTeachingHost(QObject):
             'eraser.type.stroke': lambda: self.panel.btn_stroke,
             'eraser.size': lambda: self.panel.e_slider,
             'toolbar.clear': lambda: self.panel.icon_buttons.get('clear'),
+            'selection.duplicate': lambda: self.panel.btn_dup,
+            'selection.delete': lambda: self.panel.btn_del,
             'file.save': lambda: self.panel.btn_save_project,
             'file.save_as': lambda: self.panel.btn_save_project_as,
             'file.open': lambda: self.panel.btn_open_project,
@@ -481,6 +484,8 @@ class ApplicationTeachingHost(QObject):
                 reveal = self._reveal_laser
             elif target_id in {'pen.defaults', 'pen.defaults.capture'}:
                 reveal = self._reveal_settings
+            elif target_id in {'selection.duplicate', 'selection.delete'}:
+                reveal = self._reveal_selection
             elif target_id in {'eraser.type.circle', 'eraser.type.stroke', 'eraser.size'}:
                 reveal = self._reveal_eraser
             elif target_id in {'file.save', 'file.save_as', 'file.open', 'file.recovery', 'export.png'}:
@@ -537,6 +542,10 @@ class ApplicationTeachingHost(QObject):
 
     def _reveal_eraser(self):
         self.panel.show_only_sub(self.panel.eraser_sub)
+
+    def _reveal_selection(self):
+        self.panel.sync_selection_controls()
+        self.panel.position_selection_panel(self.panel.canvas.selection_bounds())
 
     def _reveal_settings(self):
         self.panel.open_settings_panel()
@@ -752,6 +761,8 @@ class ApplicationTeachingHost(QObject):
         prepare_core_fixture(self.panel, self.loader, fixture, self.request.paths)
         from .writing_fixtures import prepare_writing_fixture
         prepare_writing_fixture(self.panel, fixture, self.request.paths)
+        from .selection_fixtures import prepare_selection_fixture
+        prepare_selection_fixture(self.panel, fixture, self.request.paths)
 
     def activate(self):
         if self._closed or not self.context.ui_active:

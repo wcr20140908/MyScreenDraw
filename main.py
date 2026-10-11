@@ -5856,91 +5856,119 @@ class DrawingCanvas(QMainWindow):
     def duplicate_selection(self):
         if not self.selected_ids:
             return
-        self.push_undo()
-        bounds = self.selection_bounds()
-        dx, dy = bounds.width() + 14.0, 0.0
-        if bounds.right() + dx > self.width() - 4:    # 右边放不下→左边→下面→上面→原地错位
-            if bounds.left() - dx >= 4:
-                dx = -dx
-            else:
-                dx, dy = 0.0, bounds.height() + 14.0
-                if bounds.bottom() + dy > self.height() - 4:
-                    if bounds.top() - dy >= 4:
-                        dy = -dy
-                    else:
-                        dx, dy = 14.0, 14.0   # 大对象四面都放不下：错位叠放，保证副本可见
-        delta = QPointF(dx, dy)
-        new_ids = set()
-        stroke_map = {}
-        for seg in list(self.all_segments):
-            if seg["id"] in self.selected_ids:
-                if seg["id"] not in stroke_map:
-                    stroke_map[seg["id"]] = uuid.uuid4()
-                line = seg["line"]
-                self.all_segments.append(clone_segment(
-                    seg,
-                    line=QLine(round(line.p1().x() + dx), round(line.p1().y() + dy),
-                               round(line.p2().x() + dx), round(line.p2().y() + dy)),
-                    id=stroke_map[seg["id"]]))
-        new_ids.update(stroke_map.values())
-        for item in list(self.text_items):
-            if item["id"] in self.selected_ids:
-                # 必须走 clone_text_item：{**item} 是浅拷贝，公式树会被原件和副本共用，
-                # 之后编辑副本里的公式会就地改掉原件（撤销快照里的也一起变）。
-                clone = self.clone_text_item(item)
-                clone["id"] = uuid.uuid4()
-                clone["pos"] = QPointF(item["pos"].x() + dx, item["pos"].y() + dy)
-                self.text_items.append(clone)
-                new_ids.add(clone["id"])
-        for item in list(self.shape_items):
-            if item["id"] in self.selected_ids:
-                clone = self.clone_shape(item)
-                clone["id"] = uuid.uuid4()
-                kind = clone.get("kind", "rect")
-                if kind == "poly":
-                    clone["points"] = [QPointF(p.x() + dx, p.y() + dy) for p in clone["points"]]
-                elif kind == "angle":
-                    for key in ("vertex", "p1", "p2"):
-                        clone[key] = QPointF(clone[key].x() + dx, clone[key].y() + dy)
-                elif kind in ("circle", "ellipse"):
-                    clone["center"] = QPointF(clone["center"].x() + dx, clone["center"].y() + dy)
+        operation = self._begin_teaching_operation("selection.duplicated")
+        sources = frozenset(self.selected_ids) if operation is not None else None
+        try:
+            self.push_undo()
+            bounds = self.selection_bounds()
+            dx, dy = bounds.width() + 14.0, 0.0
+            if bounds.right() + dx > self.width() - 4:    # 右边放不下→左边→下面→上面→原地错位
+                if bounds.left() - dx >= 4:
+                    dx = -dx
                 else:
-                    clone["rect"] = clone["rect"].translated(delta)
-                self.shape_items.append(clone)
-                new_ids.add(clone["id"])
-        for item in list(self.image_items):
-            if item["id"] in self.selected_ids:
-                clone = self.clone_image(item)
-                clone["id"] = uuid.uuid4()
-                clone["pos"] = QPointF(clone["pos"].x() + dx, clone["pos"].y() + dy)
-                self.image_items.append(clone)
-                new_ids.add(clone["id"])
-        self.selected_ids = new_ids
-        if self.whiteboard_mode:
-            self.save_current_page()
-        if self.panel:
-            self.panel.sync_selection_controls()
-            self.panel.position_selection_panel(self.selection_bounds())
-        track_event("selection_duplicated", count=len(new_ids))
-        self.update()
+                    dx, dy = 0.0, bounds.height() + 14.0
+                    if bounds.bottom() + dy > self.height() - 4:
+                        if bounds.top() - dy >= 4:
+                            dy = -dy
+                        else:
+                            dx, dy = 14.0, 14.0   # 大对象四面都放不下：错位叠放，保证副本可见
+            delta = QPointF(dx, dy)
+            new_ids = set()
+            stroke_map = {}
+            for seg in list(self.all_segments):
+                if seg["id"] in self.selected_ids:
+                    if seg["id"] not in stroke_map:
+                        stroke_map[seg["id"]] = uuid.uuid4()
+                    line = seg["line"]
+                    self.all_segments.append(clone_segment(
+                        seg,
+                        line=QLine(round(line.p1().x() + dx), round(line.p1().y() + dy),
+                                   round(line.p2().x() + dx), round(line.p2().y() + dy)),
+                        id=stroke_map[seg["id"]]))
+            new_ids.update(stroke_map.values())
+            for item in list(self.text_items):
+                if item["id"] in self.selected_ids:
+                    # 必须走 clone_text_item：{**item} 是浅拷贝，公式树会被原件和副本共用，
+                    # 之后编辑副本里的公式会就地改掉原件（撤销快照里的也一起变）。
+                    clone = self.clone_text_item(item)
+                    clone["id"] = uuid.uuid4()
+                    clone["pos"] = QPointF(item["pos"].x() + dx, item["pos"].y() + dy)
+                    self.text_items.append(clone)
+                    new_ids.add(clone["id"])
+            for item in list(self.shape_items):
+                if item["id"] in self.selected_ids:
+                    clone = self.clone_shape(item)
+                    clone["id"] = uuid.uuid4()
+                    kind = clone.get("kind", "rect")
+                    if kind == "poly":
+                        clone["points"] = [QPointF(p.x() + dx, p.y() + dy) for p in clone["points"]]
+                    elif kind == "angle":
+                        for key in ("vertex", "p1", "p2"):
+                            clone[key] = QPointF(clone[key].x() + dx, clone[key].y() + dy)
+                    elif kind in ("circle", "ellipse"):
+                        clone["center"] = QPointF(clone["center"].x() + dx, clone["center"].y() + dy)
+                    else:
+                        clone["rect"] = clone["rect"].translated(delta)
+                    self.shape_items.append(clone)
+                    new_ids.add(clone["id"])
+            for item in list(self.image_items):
+                if item["id"] in self.selected_ids:
+                    clone = self.clone_image(item)
+                    clone["id"] = uuid.uuid4()
+                    clone["pos"] = QPointF(clone["pos"].x() + dx, clone["pos"].y() + dy)
+                    self.image_items.append(clone)
+                    new_ids.add(clone["id"])
+            self.selected_ids = new_ids
+            if self.whiteboard_mode:
+                self.save_current_page()
+            if self.panel:
+                self.panel.sync_selection_controls()
+                self.panel.position_selection_panel(self.selection_bounds())
+            track_event("selection_duplicated", count=len(new_ids))
+            self.update()
+            if operation is not None:
+                alive = {item["id"] for items in (self.all_segments, self.text_items,
+                         self.shape_items, self.image_items) for item in items}
+                created = new_ids & alive
+                if created:
+                    self._emit_teaching_result(operation, "selection.duplicated", {
+                        "count": len(created), "preserved": len(sources & alive),
+                        "selected_new": len(created & self.selected_ids)})
+        finally:
+            self._discard_teaching_operation(operation)
 
     def delete_selection(self):
         if not self.selected_ids:
             return
-        self.push_undo()
-        self.all_segments = [s for s in self.all_segments if s["id"] not in self.selected_ids]
-        self.text_items = [t for t in self.text_items if t["id"] not in self.selected_ids]
-        self.shape_items = [s for s in self.shape_items if s["id"] not in self.selected_ids]
-        self.image_items = [i for i in self.image_items if i["id"] not in self.selected_ids]
-        count = len(self.selected_ids)
-        self.selected_ids = set()
-        if self.whiteboard_mode:
-            self.save_current_page()
-        if self.panel:
-            self.panel.sync_selection_controls()
-            self.panel.position_selection_panel(QRectF())
-        track_event("selection_deleted", count=count)
-        self.update()
+        operation = self._begin_teaching_operation("selection.deleted")
+        targets = ({item["id"] for items in (self.all_segments, self.text_items,
+                    self.shape_items, self.image_items) for item in items} & self.selected_ids
+                   if operation is not None else None)
+        try:
+            self.push_undo()
+            self.all_segments = [s for s in self.all_segments if s["id"] not in self.selected_ids]
+            self.text_items = [t for t in self.text_items if t["id"] not in self.selected_ids]
+            self.shape_items = [s for s in self.shape_items if s["id"] not in self.selected_ids]
+            self.image_items = [i for i in self.image_items if i["id"] not in self.selected_ids]
+            count = len(self.selected_ids)
+            self.selected_ids = set()
+            if self.whiteboard_mode:
+                self.save_current_page()
+            if self.panel:
+                self.panel.sync_selection_controls()
+                self.panel.position_selection_panel(QRectF())
+            track_event("selection_deleted", count=count)
+            self.update()
+            if operation is not None:
+                alive = {item["id"] for items in (self.all_segments, self.text_items,
+                         self.shape_items, self.image_items) for item in items}
+                removed = targets - alive
+                if removed:
+                    self._emit_teaching_result(operation, "selection.deleted", {
+                        "count": len(removed),
+                        "remaining_ids": ",".join(sorted(map(str, alive))) if len(alive) <= 32 else None})
+        finally:
+            self._discard_teaching_operation(operation)
 
     def single_flat_shape(self):
         """「⋯」按钮可用条件：恰好选中一个平面图形。"""
