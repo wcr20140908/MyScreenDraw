@@ -47,7 +47,7 @@ APPLICATION_TARGETS = frozenset({
     'text.group.greek', 'text.group.structure', 'text.symbol.alpha', 'text.symbol.pm',
     'text.symbol.member', 'text.symbol.integral', 'text.structure.frac', 'text.structure.sup',
     'text.structure.sub', 'text.structure.sqrt', 'text.structure.sum', 'text.structure.int',
-    'selection.width', 'selection.color',
+    'selection.width', 'selection.color', 'settings.autosave_preset', 'settings.autosave_custom',
 })
 APPLICATION_EVENTS = frozenset({
     'ink.committed', 'ink.erased', 'project.saved', 'mode.changed', 'tool.changed',
@@ -63,7 +63,7 @@ APPLICATION_EVENTS = frozenset({
     'shape.recognized', 'shape.recognition_changed', 'shape.constructed',
     'text.box_created', 'text.edit_started', 'text.changed', 'text.edit_finished',
     'text.formatted', 'formula.inserted', 'formula.slot_changed', 'formula.cursor_moved',
-    'symbols.opened',
+    'symbols.opened', 'unsaved.decision', 'settings.autosave_changed', 'settings.autosave_custom_opened',
 })
 
 
@@ -497,6 +497,8 @@ class ApplicationTeachingHost(QObject):
             'pages.delete': lambda: self.panel.btn_delete_page,
             'pages.copy': lambda: self.panel.btn_copy_page,
             'pages.copy_position': lambda: getattr(getattr(self.panel, 'document_preferences', None), 'copy_combo', None),
+            'settings.autosave_preset': lambda: getattr(getattr(self.panel, 'document_preferences', None), 'interval_combo', None),
+            'settings.autosave_custom': lambda: getattr(getattr(self.panel, 'document_preferences', None), 'interval_custom', None),
             'file.save': lambda: self.panel.btn_save_project,
             'file.save_as': lambda: self.panel.btn_save_project_as,
             'file.open': lambda: self.panel.btn_open_project,
@@ -543,6 +545,9 @@ class ApplicationTeachingHost(QObject):
                 reveal = self._reveal_page_rail
             elif target_id in {'pages.thumbnail_list', 'pages.rename', 'pages.delete', 'pages.copy'}:
                 reveal = self._reveal_thumbnails
+            elif target_id.startswith('settings.autosave_'):
+                custom = target_id.endswith('custom')
+                reveal = lambda custom=custom: self._reveal_autosave_settings(custom)
             elif target_id == 'pages.copy_position':
                 reveal = self._reveal_page_settings
             elif target_id.startswith('text.symbol.'):
@@ -639,6 +644,15 @@ class ApplicationTeachingHost(QObject):
     def _reveal_page_settings(self):
         self.panel.close_thumbnail_panel()
         self.panel.open_settings_panel()
+
+    def _reveal_autosave_settings(self, custom=False):
+        self.panel.close_thumbnail_panel()
+        settings = getattr(self.panel, 'settings_panel', None)
+        if settings is None or sip.isdeleted(settings) or not settings.isVisible():
+            self.panel.open_settings_panel()
+        preferences = self.panel.document_preferences
+        widget = preferences.interval_custom if custom else preferences.interval_combo
+        self.panel.settings_scroll.ensureWidgetVisible(widget)
 
     def _symbol_target(self, entry):
         layout = getattr(self.panel, 'symbol_grid_layout', None)
@@ -896,6 +910,8 @@ class ApplicationTeachingHost(QObject):
         prepare_geometry_fixture(self.panel, fixture, self.request.paths)
         from .text_fixtures import prepare_text_fixture
         prepare_text_fixture(self.panel, fixture, self.request.paths)
+        from .file_fixtures import prepare_file_fixture
+        prepare_file_fixture(self.panel, self.loader, fixture, self.request.paths)
 
     def activate(self):
         if self._closed or not self.context.ui_active:

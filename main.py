@@ -252,6 +252,7 @@ import os
 from pathlib import Path
 from runtime_paths import RuntimeContext, RuntimePaths
 from teaching.bootstrap import parse_practice_request
+from teaching.file_actions import teaching_autosave_setting
 from teaching.text_actions import (teaching_text_change, teaching_input_change,
     teaching_text_input_action, teaching_text_panel_action, teaching_text_finish,
     teaching_formula_insert, teaching_cursor_move, teaching_symbol_group, teaching_text_format,
@@ -14768,6 +14769,8 @@ class ControlPanel(QWidget):
     def _save_project_operation(self, path=None, events=None, operation=None):
         if not self.canvas:
             return False
+        previous_path = self.project_path
+        modified_before = self.has_unsaved_changes() if operation is not None else False
         if path is None:
             path = self.project_path
         if not path:
@@ -14791,7 +14794,9 @@ class ControlPanel(QWidget):
             track_event("project_saved", path=os.path.basename(path), pages=len(pages))
             if events is not None:
                 events.emit_result(operation, "project.saved", "success",
-                                   {"pages": len(pages), "path": os.path.basename(path)})
+                                   {"pages": len(pages), "path": os.path.basename(path), "action": "save",
+                                    "reuse_path": previous_path is not None and Path(previous_path) == Path(path),
+                                    "modified_before": modified_before})
             return True
         except (OSError, ValueError, TypeError) as exc:
             if events is not None:
@@ -14800,7 +14805,7 @@ class ControlPanel(QWidget):
             return False
 
     def open_project_from_file_panel(self):
-        with teaching_document_action(self, ("project.opened",)):
+        with teaching_document_action(self, ("project.saved", "unsaved.decision", "project.opened")):
             self.show_only_sub(None)
             return self.open_project()
 
@@ -14823,6 +14828,7 @@ class ControlPanel(QWidget):
     def save_project_as(self):
         """Choose a new destination without letting the old chooser credit a new step."""
         with teaching_document_operation(self, "project.saved") as (events, operation):
+            previous_path = self.project_path
             context = getattr(self, "runtime_context", RUNTIME_CONTEXT)
             default = str(context.paths.data_dir) if context.paths.practice else ""
             path, _ = QFileDialog.getSaveFileName(
@@ -14835,14 +14841,16 @@ class ControlPanel(QWidget):
             with events.suppress() if events is not None else contextlib.nullcontext():
                 ok = self.save_project(path)
             if events is not None:
-                details = {"pages": len(self.canvas.pages)} if ok else {}
+                details = {"pages": len(self.canvas.pages), "action": "save_as",
+                           "changed_path": previous_path is None or Path(previous_path) != Path(self.project_path)} if ok else {}
                 events.emit_result(operation, "project.saved", "success" if ok else "failed", details)
             return ok
 
     def open_project(self):
         if not self.canvas or self._document_transition_active:
             return False
-        with teaching_document_operation(self, "project.opened") as (events, operation):
+        with teaching_document_action(self, ("project.saved", "unsaved.decision", "project.opened")) as events:
+            operation = events.operation("project.opened") if events is not None else None
             default = str(self.runtime_context.paths.data_dir) if self.runtime_context.paths.practice else ""
             path, _ = QFileDialog.getOpenFileName(self, tr("open_project"), default, tr("project_filter_open"))
             if not path:
@@ -14867,40 +14875,53 @@ class ControlPanel(QWidget):
                 page_has_content(self.canvas.live_page()))
 
     def confirm_unsaved_changes(self, action):
-        """One cancel-default modal guard for destructive document transitions."""
+        """One cancel-default guard; choices count after the prompt cleanup."""
         if self._unsaved_prompt_active:
             return False
         if not self.has_unsaved_changes():
             return True
-        self._unsaved_prompt_active = True
-        self.pause_callbacks()
-        box = QMessageBox(self)
-        box.setWindowTitle(action)
-        box.setText(tr("unsaved_changes_prompt"))
-        box.setIcon(QMessageBox.Icon.Question)
-        box.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
-        box.setStandardButtons(QMessageBox.StandardButton.Save |
-                               QMessageBox.StandardButton.Discard |
-                               QMessageBox.StandardButton.Cancel)
-        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
-        box.setEscapeButton(QMessageBox.StandardButton.Cancel)
-        try:
-            self.raise_floating(box, bind_owner=False)
-            choice = box.exec()
-            if choice == QMessageBox.StandardButton.Save:
-                return bool(self.save_project())
-            return choice == QMessageBox.StandardButton.Discard
-        finally:
-            box.hide()
-            box.deleteLater()
-            self._unsaved_prompt_active = False
-            self.resume_callbacks()
+        with teaching_document_operation(self, "unsaved.decision") as (events, operation):
+            self._unsaved_prompt_active = True
+            self.pause_callbacks()
+            box = QMessageBox(self)
+            box.setWindowTitle(action)
+            box.setText(tr("unsaved_changes_prompt"))
+            box.setIcon(QMessageBox.Icon.Question)
+            box.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+            box.setStandardButtons(QMessageBox.StandardButton.Save |
+                                   QMessageBox.StandardButton.Discard |
+                                   QMessageBox.StandardButton.Cancel)
+            box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+            box.setEscapeButton(QMessageBox.StandardButton.Cancel)
+            try:
+                self.raise_floating(box, bind_owner=False)
+                choice = box.exec()
+                decision = "cancel"
+                proceeded = False
+                if choice == QMessageBox.StandardButton.Save:
+                    decision = "save"
+                    proceeded = bool(self.save_project())
+                elif choice == QMessageBox.StandardButton.Discard:
+                    decision = "discard"
+                    proceeded = True
+            finally:
+                box.hide()
+                box.deleteLater()
+                self._unsaved_prompt_active = False
+                self.resume_callbacks()
+            if events is not None:
+                self._teaching_unsaved_choice = {"decision": decision, "saved": decision == "save" and proceeded}
+                outcome = "failed" if decision == "save" and not proceeded else "success"
+                events.emit_result(operation, "unsaved.decision", outcome,
+                                   {"decision": decision, "proceeded": proceeded})
+            return proceeded
 
     def open_project_from_path(self, path):
         """Validate and apply the document before delivering its captured result."""
         if not path or not self.canvas or self._document_transition_active:
             return False
-        with teaching_document_operation(self, "project.opened") as (events, operation):
+        with teaching_document_action(self, ("project.saved", "unsaved.decision", "project.opened")) as events:
+            operation = events.operation("project.opened") if events is not None else None
             ok, outcome, details = self._open_project_from_path_result(path)
             if events is not None:
                 events.emit_result(operation, "project.opened", outcome, details)
@@ -14913,8 +14934,16 @@ class ControlPanel(QWidget):
             path = runtime_file_path(path)
             data = normalize_project_data(read_json_maybe_gz(path), kind=PROJECT_KIND)
             pages = [deserialize_page(page) for page in data["pages"]]
+            if getattr(self, "teaching_events", None) is not None:
+                self._teaching_unsaved_choice = None
             if confirm_unsaved and not self.confirm_unsaved_changes(tr("open_project")):
                 return False, "cancelled", {}
+            # The unsaved prompt may have just written this selected project.
+            # Apply that committed version rather than the pre-prompt snapshot.
+            if confirm_unsaved and self.project_path is not None and Path(path) == Path(self.project_path):
+                path = runtime_file_path(path)
+                data = normalize_project_data(read_json_maybe_gz(path), kind=PROJECT_KIND)
+                pages = [deserialize_page(page) for page in data["pages"]]
             saved = getattr(self, "_teaching_last_saved_project", None)
             reopened_saved = saved is not None and Path(path) == Path(saved)
             cv = self.canvas
@@ -14937,8 +14966,13 @@ class ControlPanel(QWidget):
             self.update_whiteboard_ui()
             self.update_history_ui()
             track_event("project_opened", path=os.path.basename(path), pages=len(pages))
+            choice = getattr(self, "_teaching_unsaved_choice", None) if getattr(self, "teaching_events", None) is not None else None
             return True, "success", {"pages": len(pages), "path": os.path.basename(path),
-                                     "reopened_saved": reopened_saved}
+                                     "reopened_saved": reopened_saved,
+                                     "unsaved_choice": choice["decision"] if choice is not None else None,
+                                     "saved_before_open": bool(choice and choice["saved"]),
+                                     "opened_sample": getattr(self, "_teaching_file_open_path", None) is not None
+                                         and Path(path) == Path(self._teaching_file_open_path)}
         except (OSError, ValueError, TypeError, KeyError) as exc:
             notify_user(self, tr("open_failed"), runtime_io_message(exc, path), level="warning", exc=exc)
             return False, "failed", {}
@@ -15042,6 +15076,7 @@ class ControlPanel(QWidget):
         if preferences is not None:
             preferences.sync_from_panel()
 
+    @teaching_autosave_setting
     def set_autosave_interval(self, seconds, persist=True, sync=True):
         self.autosave_interval_seconds = bounded_int(seconds, AUTOSAVE_INTERVAL, 5, 86400)
         timer = getattr(self, "autosave_timer", None)

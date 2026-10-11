@@ -1,0 +1,413 @@
+{
+  "schema_version": 1,
+  "id": "c08",
+  "revision": 1,
+  "compat_revision": 1,
+  "title_key": "teaching_c08_title",
+  "chapters": [
+    {
+      "id": "c08.save",
+      "title_key": "teaching_c08_save_title",
+      "fixture": "files.c08.save",
+      "steps": [
+        {
+          "id": "intro",
+          "kind": "information",
+          "title_key": "teaching_c08_save_intro_title",
+          "body_key": "teaching_c08_save_intro_body",
+          "next": "save_first"
+        },
+        {
+          "id": "save_first",
+          "target": "file.save",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "project.saved",
+            "outcome": "success",
+            "equals": {
+              "action": "save",
+              "reuse_path": false
+            },
+            "min_count": {
+              "pages": 2
+            }
+          },
+          "title_key": "teaching_c08_save_save_first_title",
+          "body_key": "teaching_c08_save_save_first_body",
+          "next": "edit"
+        },
+        {
+          "id": "edit",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "ink.committed",
+            "outcome": "success",
+            "equals": {
+              "tool": "PEN"
+            },
+            "min_count": {
+              "segments": 1
+            }
+          },
+          "title_key": "teaching_c08_save_edit_title",
+          "body_key": "teaching_c08_save_edit_body",
+          "next": "save_again"
+        },
+        {
+          "id": "save_again",
+          "target": "file.save",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "project.saved",
+            "outcome": "success",
+            "equals": {
+              "action": "save",
+              "reuse_path": true,
+              "modified_before": true
+            },
+            "min_count": {
+              "pages": 2
+            }
+          },
+          "title_key": "teaching_c08_save_save_again_title",
+          "body_key": "teaching_c08_save_save_again_body",
+          "next": "save_as"
+        },
+        {
+          "id": "save_as",
+          "target": "file.save_as",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "project.saved",
+            "outcome": "success",
+            "equals": {
+              "action": "save_as",
+              "changed_path": true
+            },
+            "min_count": {
+              "pages": 2
+            }
+          },
+          "title_key": "teaching_c08_save_save_as_title",
+          "body_key": "teaching_c08_save_save_as_body",
+          "next": "reopen"
+        },
+        {
+          "id": "reopen",
+          "target": "file.open",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "project.opened",
+            "outcome": "success",
+            "equals": {
+              "reopened_saved": true
+            },
+            "min_count": {
+              "pages": 2
+            }
+          },
+          "title_key": "teaching_c08_save_reopen_title",
+          "body_key": "teaching_c08_save_reopen_body",
+          "next": "done"
+        },
+        {
+          "id": "done",
+          "kind": "information",
+          "title_key": "teaching_c08_save_done_title",
+          "body_key": "teaching_c08_save_done_body",
+          "next": "end_chapter"
+        }
+      ]
+    },
+    {
+      "id": "c08.open_guard",
+      "title_key": "teaching_c08_open_guard_title",
+      "fixture": "files.c08.open_guard",
+      "steps": [
+        {
+          "id": "intro",
+          "kind": "information",
+          "title_key": "teaching_c08_open_guard_intro_title",
+          "body_key": "teaching_c08_open_guard_intro_body",
+          "next": "make_dirty"
+        },
+        {
+          "id": "make_dirty",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "ink.committed",
+            "outcome": "success",
+            "equals": {
+              "tool": "PEN"
+            },
+            "min_count": {
+              "segments": 1
+            }
+          },
+          "title_key": "teaching_c08_open_guard_make_dirty_title",
+          "body_key": "teaching_c08_open_guard_make_dirty_body",
+          "next": "cancel_open"
+        },
+        {
+          "id": "cancel_open",
+          "target": "file.open",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "unsaved.decision",
+            "outcome": "success",
+            "equals": {
+              "decision": "cancel",
+              "proceeded": false
+            }
+          },
+          "title_key": "teaching_c08_open_guard_cancel_open_title",
+          "body_key": "teaching_c08_open_guard_cancel_open_body",
+          "next": "discard_open"
+        },
+        {
+          "id": "discard_open",
+          "target": "file.open",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "project.opened",
+            "outcome": "success",
+            "equals": {
+              "unsaved_choice": "discard",
+              "saved_before_open": false,
+              "opened_sample": true
+            },
+            "min_count": {
+              "pages": 2
+            }
+          },
+          "title_key": "teaching_c08_open_guard_discard_open_title",
+          "body_key": "teaching_c08_open_guard_discard_open_body",
+          "next": "make_dirty_again"
+        },
+        {
+          "id": "make_dirty_again",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "ink.committed",
+            "outcome": "success",
+            "equals": {
+              "tool": "PEN"
+            },
+            "min_count": {
+              "segments": 1
+            }
+          },
+          "title_key": "teaching_c08_open_guard_make_dirty_again_title",
+          "body_key": "teaching_c08_open_guard_make_dirty_again_body",
+          "next": "save_then_open"
+        },
+        {
+          "id": "save_then_open",
+          "target": "file.open",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "project.opened",
+            "outcome": "success",
+            "equals": {
+              "unsaved_choice": "save",
+              "saved_before_open": true,
+              "opened_sample": true
+            },
+            "min_count": {
+              "pages": 2
+            }
+          },
+          "title_key": "teaching_c08_open_guard_save_then_open_title",
+          "body_key": "teaching_c08_open_guard_save_then_open_body",
+          "next": "guard_info"
+        },
+        {
+          "id": "guard_info",
+          "kind": "information",
+          "title_key": "teaching_c08_open_guard_guard_info_title",
+          "body_key": "teaching_c08_open_guard_guard_info_body",
+          "next": "done"
+        },
+        {
+          "id": "done",
+          "kind": "information",
+          "title_key": "teaching_c08_open_guard_done_title",
+          "body_key": "teaching_c08_open_guard_done_body",
+          "next": "end_chapter"
+        }
+      ]
+    },
+    {
+      "id": "c08.recovery",
+      "title_key": "teaching_c08_recovery_title",
+      "fixture": "files.c08.recovery",
+      "steps": [
+        {
+          "id": "intro",
+          "kind": "information",
+          "title_key": "teaching_c08_recovery_intro_title",
+          "body_key": "teaching_c08_recovery_intro_body",
+          "next": "preview"
+        },
+        {
+          "id": "preview",
+          "target": "file.recovery",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "recovery.previewed",
+            "outcome": "success",
+            "equals": {
+              "returned_without_restore": true
+            },
+            "min_count": {
+              "pages": 2
+            }
+          },
+          "title_key": "teaching_c08_recovery_preview_title",
+          "body_key": "teaching_c08_recovery_preview_body",
+          "next": "restore"
+        },
+        {
+          "id": "restore",
+          "target": "file.recovery",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "recovery.applied",
+            "outcome": "success",
+            "min_count": {
+              "pages": 2
+            }
+          },
+          "title_key": "teaching_c08_recovery_restore_title",
+          "body_key": "teaching_c08_recovery_restore_body",
+          "next": "inspect_info"
+        },
+        {
+          "id": "inspect_info",
+          "kind": "information",
+          "title_key": "teaching_c08_recovery_inspect_info_title",
+          "body_key": "teaching_c08_recovery_inspect_info_body",
+          "next": "save_restored"
+        },
+        {
+          "id": "save_restored",
+          "target": "file.save",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "project.saved",
+            "outcome": "success",
+            "equals": {
+              "action": "save",
+              "reuse_path": false,
+              "modified_before": true
+            },
+            "min_count": {
+              "pages": 2
+            }
+          },
+          "title_key": "teaching_c08_recovery_save_restored_title",
+          "body_key": "teaching_c08_recovery_save_restored_body",
+          "next": "done"
+        },
+        {
+          "id": "done",
+          "kind": "information",
+          "title_key": "teaching_c08_recovery_done_title",
+          "body_key": "teaching_c08_recovery_done_body",
+          "next": "end_chapter"
+        }
+      ]
+    },
+    {
+      "id": "c08.interval",
+      "title_key": "teaching_c08_interval_title",
+      "fixture": "files.c08.interval",
+      "steps": [
+        {
+          "id": "intro",
+          "kind": "information",
+          "title_key": "teaching_c08_interval_intro_title",
+          "body_key": "teaching_c08_interval_intro_body",
+          "next": "preset_60"
+        },
+        {
+          "id": "preset_60",
+          "target": "settings.autosave_preset",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "settings.autosave_changed",
+            "outcome": "success",
+            "equals": {
+              "seconds": 60
+            }
+          },
+          "title_key": "teaching_c08_interval_preset_60_title",
+          "body_key": "teaching_c08_interval_preset_60_body",
+          "next": "custom"
+        },
+        {
+          "id": "custom",
+          "target": "settings.autosave_preset",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "settings.autosave_custom_opened",
+            "outcome": "success",
+            "equals": {
+              "custom": true
+            }
+          },
+          "title_key": "teaching_c08_interval_custom_title",
+          "body_key": "teaching_c08_interval_custom_body",
+          "next": "custom_75"
+        },
+        {
+          "id": "custom_75",
+          "target": "settings.autosave_custom",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "settings.autosave_changed",
+            "outcome": "success",
+            "equals": {
+              "seconds": 75
+            }
+          },
+          "title_key": "teaching_c08_interval_custom_75_title",
+          "body_key": "teaching_c08_interval_custom_75_body",
+          "next": "preset_30"
+        },
+        {
+          "id": "preset_30",
+          "target": "settings.autosave_preset",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "settings.autosave_changed",
+            "outcome": "success",
+            "equals": {
+              "seconds": 30
+            }
+          },
+          "title_key": "teaching_c08_interval_preset_30_title",
+          "body_key": "teaching_c08_interval_preset_30_body",
+          "next": "cost_info"
+        },
+        {
+          "id": "cost_info",
+          "kind": "information",
+          "title_key": "teaching_c08_interval_cost_info_title",
+          "body_key": "teaching_c08_interval_cost_info_body",
+          "next": "done"
+        },
+        {
+          "id": "done",
+          "kind": "information",
+          "title_key": "teaching_c08_interval_done_title",
+          "body_key": "teaching_c08_interval_done_body",
+          "next": "end_chapter"
+        }
+      ]
+    }
+  ]
+}

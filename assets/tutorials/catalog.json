@@ -7,7 +7,8 @@
     "courses/c04.json",
     "courses/c05.json",
     "courses/c06.json",
-    "courses/c07.json"
+    "courses/c07.json",
+    "courses/c08.json"
   ],
   "fixtures": {
     "core.interface": "fixtures/core.interface.msd",
@@ -35,7 +36,11 @@
     "geometry.c06.recognition_snap": "fixtures/geometry.c06.recognition_snap.msd",
     "text.c07.edit": "fixtures/text.c07.edit.msd",
     "text.c07.format": "fixtures/text.c07.format.msd",
-    "text.c07.formula": "fixtures/text.c07.formula.msd"
+    "text.c07.formula": "fixtures/text.c07.formula.msd",
+    "files.c08.save": "fixtures/files.c08.save.msd",
+    "files.c08.open_guard": "fixtures/files.c08.open_guard.msd",
+    "files.c08.recovery": "fixtures/files.c08.recovery.msd",
+    "files.c08.interval": "fixtures/files.c08.interval.msd"
   },
   "groups": [
     {
@@ -61,6 +66,13 @@
         "c04",
         "c05",
         "c07"
+      ]
+    },
+    {
+      "id": "files",
+      "title_key": "teaching_group_files",
+      "courses": [
+        "c08"
       ]
     }
   ]

@@ -781,6 +781,8 @@ from teaching.geometry_copy import GEOMETRY_COPY
 _BASE.update(GEOMETRY_COPY)
 from teaching.text_copy import TEXT_COPY
 _BASE.update(TEXT_COPY)
+from teaching.file_copy import FILE_COPY
+_BASE.update(FILE_COPY)
 
 # 每个条目都必须给全 8 种语言：漏一个就在导入时炸掉，而不是在课堂上显示成英文 key。
 for _key, _values in _BASE.items():
