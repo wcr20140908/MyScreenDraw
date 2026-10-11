@@ -87,6 +87,7 @@ class MediaImportTests(unittest.TestCase):
             HEARTBEAT_MS=500,
             heartbeat_refresh=lambda: None,
         )
+        panel._import_media_operation = types.MethodType(self.main.ControlPanel._import_media_operation, panel)
         seen = {}
 
         def fake_dialog(*args, **kwargs):

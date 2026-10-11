@@ -4150,7 +4150,10 @@ class DrawingCanvas(QMainWindow):
             elif name == "selection.transformed":
                 if not content_changed or action not in ("move", "scale", "rotate") or not self.selected_ids:
                     return
-                details = {"count": len(self.selected_ids), "action": action}
+                image_ids = {item["id"] for item in self.image_items}
+                details = {"count": len(self.selected_ids), "action": action,
+                           "image_only": self.selected_ids <= image_ids,
+                           "same_imported_image": self.selected_ids == {getattr(self.panel, "_teaching_media_original_id", None)}}
             elif name in ("text.box_created", "text.edit_started", "formula.slot_changed"):
                 item = self.editing_text_item()
                 panel = getattr(self.panel, "text_panel", None)
@@ -14821,7 +14824,7 @@ class ControlPanel(QWidget):
 
     def import_media_from_file_panel(self):
         self.maybe_show_teaching_context_hint("file.import")
-        with teaching_native_dialog(self):
+        with teaching_document_action(self, ("media.imported",)):
             self.show_only_sub(None)
             return self.import_media()
 
@@ -16159,40 +16162,82 @@ class ControlPanel(QWidget):
     MAX_ROSTER_NAMES = 5000               # 点名名单行数上限
 
     def import_media(self):
+        with teaching_document_operation(self, "media.imported") as (events, operation):
+            return self._import_media_operation(events, operation)
+
+    def _import_media_operation(self, events=None, operation=None):
         self.timer.stop()
+        outcome, details = "failed", {}
         try:
             options = QFileDialog.Option.DontUseNativeDialog
+            context = getattr(self, "runtime_context", RUNTIME_CONTEXT)
+            default = str(context.paths.data_dir) if context.paths.practice else ""
             path, _ = QFileDialog.getOpenFileName(
-                self, tr("import_media"), "", tr("import_media_filter"), options=options)
+                self, tr("import_media"), default, tr("import_media_filter"), options=options)
             if not path:
-                return
+                outcome, details = "cancelled", {}
+                return False
+            path = runtime_file_path(path)
+            sample = (getattr(self, "_teaching_media_source_path", None) is not None
+                      and Path(path) == Path(self._teaching_media_source_path))
             self.canvas._cancel_smart_recognition(drop_pending=True)  # 导入前放弃未触发的延迟识别
             size = os.path.getsize(path)
             if size > self.MAX_IMPORT_BYTES:
                 raise ValueError(trf("err_file_too_large", path=path, limit="64 MiB"))
             if path.lower().endswith(".pdf"):
+                before_ids = tuple(page["page_id"] for page in self.canvas.document_pages()) if operation is not None else None
+                if operation is not None:
+                    self._teaching_pdf_cancelled = False
                 count = self.import_pdf(path)
                 if count:
                     track_event("pdf_imported", pages=count, file=os.path.basename(path))
                     notify_user(self, tr("import_done"),
                                 trf("import_pdf_summary", count=count, name=os.path.basename(path)),
                                 level="information")
+                    outcome = "success"
+                    if operation is not None:
+                        pages = self.canvas.pages
+                        separate = (tuple(page["page_id"] for page in pages[:len(before_ids)]) == before_ids
+                                    and len(pages) - len(before_ids) == count
+                                    and len({page["page_id"] for page in pages}) == len(pages)
+                                    and all(len(page.get("images", [])) == 1 for page in pages[len(before_ids):])
+                                    and self.canvas.current_page == len(before_ids) and self.canvas.whiteboard_mode)
+                        outcome = "success" if separate else "failed"
+                        details = {"kind": "pdf", "pages_added": len(pages) - len(before_ids), "pages": len(pages),
+                                   "separate_pages": separate, "source_sample": sample}
+                    return True
+                if operation is not None and self._teaching_pdf_cancelled:
+                    outcome = "cancelled"
+                return False
             else:
+                before_ids = frozenset(item["id"] for item in self.canvas.image_items) if operation is not None else None
                 item = self.import_image_file(path)
                 if item is None:
                     notify_user(self, tr("import_failed"),
                                 trf("err_unsupported_image", path=path), level="warning")
-                    return
+                    return False
                 track_event("image_imported", file=os.path.basename(path))
                 notify_user(self, tr("import_done"),
                             trf("import_image_summary", name=os.path.basename(path)),
                             level="information")
+                outcome = "success"
+                if operation is not None:
+                    added = [row for row in self.canvas.image_items if row["id"] not in before_ids]
+                    valid = len(added) == 1 and added[0]["id"] == item["id"] and not item["pixmap"].isNull()
+                    outcome = "success" if valid else "failed"
+                    details = {"kind": "image", "images": len(added), "source_sample": sample}
+                    if valid:
+                        self._teaching_media_original_id = item["id"]
+                return True
         except (OSError, ValueError, RuntimeError, MemoryError) as exc:
             notify_user(self, tr("import_failed"), map_io_exception(exc, locals().get("path", "")),
                         level="warning", exc=exc)
+            return False
         finally:
             self.timer.start(self.HEARTBEAT_MS)
             self.heartbeat_refresh()
+            if events is not None:
+                events.emit_result(operation, "media.imported", outcome, details)
 
     def import_image_file(self, path):
         """有界解码一张图片并插入画布；返回新 image item 或 None。"""
@@ -16312,6 +16357,8 @@ class ControlPanel(QWidget):
                 progress.setValue(index)
                 QApplication.processEvents()
                 if progress.wasCanceled():
+                    if getattr(self, "teaching_events", None) is not None:
+                        self._teaching_pdf_cancelled = True
                     notify_user(self, tr("import_media"), tr("import_pdf_cancelled"), level="information")
                     return 0
                 try:
@@ -16349,6 +16396,8 @@ class ControlPanel(QWidget):
                 progress.setValue(index + 1)
                 QApplication.processEvents()
                 if progress.wasCanceled():
+                    if getattr(self, "teaching_events", None) is not None:
+                        self._teaching_pdf_cancelled = True
                     notify_user(self, tr("import_media"), tr("import_pdf_cancelled"), level="information")
                     return 0
             # Commit only after the whole bounded batch succeeds. Histories remain

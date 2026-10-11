@@ -1,0 +1,188 @@
+{
+  "schema_version": 1,
+  "id": "c09",
+  "revision": 1,
+  "compat_revision": 1,
+  "title_key": "teaching_c09_title",
+  "chapters": [
+    {
+      "id": "c09.image",
+      "title_key": "teaching_c09_image_title",
+      "fixture": "media.c09.image",
+      "steps": [
+        {
+          "id": "intro",
+          "kind": "information",
+          "title_key": "teaching_c09_image_intro_title",
+          "body_key": "teaching_c09_image_intro_body",
+          "next": "import_image"
+        },
+        {
+          "id": "import_image",
+          "target": "file.import",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "media.imported",
+            "outcome": "success",
+            "equals": {
+              "kind": "image",
+              "images": 1,
+              "source_sample": true
+            }
+          },
+          "title_key": "teaching_c09_image_import_image_title",
+          "body_key": "teaching_c09_image_import_image_body",
+          "next": "select_mode"
+        },
+        {
+          "id": "select_mode",
+          "target": "toolbar.select",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "tool.changed",
+            "outcome": "success",
+            "equals": {
+              "tool": "SELECT",
+              "drawing_mode": true
+            }
+          },
+          "title_key": "teaching_c09_image_select_mode_title",
+          "body_key": "teaching_c09_image_select_mode_body",
+          "next": "resize_image"
+        },
+        {
+          "id": "resize_image",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "selection.transformed",
+            "outcome": "success",
+            "equals": {
+              "action": "scale",
+              "count": 1,
+              "image_only": true,
+              "same_imported_image": true
+            }
+          },
+          "title_key": "teaching_c09_image_resize_image_title",
+          "body_key": "teaching_c09_image_resize_image_body",
+          "next": "size_info"
+        },
+        {
+          "id": "size_info",
+          "kind": "information",
+          "title_key": "teaching_c09_image_size_info_title",
+          "body_key": "teaching_c09_image_size_info_body",
+          "next": "done"
+        },
+        {
+          "id": "done",
+          "kind": "information",
+          "title_key": "teaching_c09_image_done_title",
+          "body_key": "teaching_c09_image_done_body",
+          "next": "end_chapter"
+        }
+      ]
+    },
+    {
+      "id": "c09.pdf_pages",
+      "title_key": "teaching_c09_pdf_pages_title",
+      "fixture": "media.c09.pdf_pages",
+      "steps": [
+        {
+          "id": "intro",
+          "kind": "information",
+          "title_key": "teaching_c09_pdf_pages_intro_title",
+          "body_key": "teaching_c09_pdf_pages_intro_body",
+          "next": "import_pdf"
+        },
+        {
+          "id": "import_pdf",
+          "target": "file.import",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "media.imported",
+            "outcome": "success",
+            "equals": {
+              "kind": "pdf",
+              "pages_added": 2,
+              "pages": 3,
+              "separate_pages": true,
+              "source_sample": true
+            }
+          },
+          "title_key": "teaching_c09_pdf_pages_import_pdf_title",
+          "body_key": "teaching_c09_pdf_pages_import_pdf_body",
+          "next": "next_page"
+        },
+        {
+          "id": "next_page",
+          "target": "pages.next",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "page.changed",
+            "outcome": "success",
+            "equals": {
+              "page": 3,
+              "previous_page": 2,
+              "pages": 3
+            }
+          },
+          "title_key": "teaching_c09_pdf_pages_next_page_title",
+          "body_key": "teaching_c09_pdf_pages_next_page_body",
+          "next": "annotate"
+        },
+        {
+          "id": "annotate",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "ink.committed",
+            "outcome": "success",
+            "equals": {
+              "tool": "PEN",
+              "style": "pen"
+            },
+            "min_count": {
+              "segments": 1
+            }
+          },
+          "title_key": "teaching_c09_pdf_pages_annotate_title",
+          "body_key": "teaching_c09_pdf_pages_annotate_body",
+          "next": "previous_page"
+        },
+        {
+          "id": "previous_page",
+          "target": "pages.previous",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "page.changed",
+            "outcome": "success",
+            "equals": {
+              "page": 2,
+              "previous_page": 3,
+              "pages": 3
+            }
+          },
+          "title_key": "teaching_c09_pdf_pages_previous_page_title",
+          "body_key": "teaching_c09_pdf_pages_previous_page_body",
+          "next": "limits_info"
+        },
+        {
+          "id": "limits_info",
+          "kind": "information",
+          "title_key": "teaching_c09_pdf_pages_limits_info_title",
+          "body_key": "teaching_c09_pdf_pages_limits_info_body",
+          "next": "done"
+        },
+        {
+          "id": "done",
+          "kind": "information",
+          "title_key": "teaching_c09_pdf_pages_done_title",
+          "body_key": "teaching_c09_pdf_pages_done_body",
+          "next": "end_chapter"
+        }
+      ]
+    }
+  ]
+}

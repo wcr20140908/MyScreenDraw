@@ -34,7 +34,7 @@ APPLICATION_TARGETS = frozenset({
     'pen.style.chalk', 'pen.style.neon', 'pen.style.dashed', 'pen.style.rainbow',
     'pen.style.arrow', 'pen.marker', 'pen.laser', 'eraser.type.circle',
     'eraser.type.stroke', 'eraser.size', 'toolbar.clear', 'file.save', 'file.save_as',
-    'file.open', 'file.recovery', 'export.png',
+    'file.open', 'file.recovery', 'file.import', 'export.png',
     'pages.add', 'pages.previous', 'pages.next', 'tools.teaching',
     'selection.duplicate', 'selection.delete', 'toolbar.board_style',
     'pages.thumbnails_button', 'pages.thumbnail_list', 'pages.rename', 'pages.delete',
@@ -63,7 +63,7 @@ APPLICATION_EVENTS = frozenset({
     'shape.recognized', 'shape.recognition_changed', 'shape.constructed',
     'text.box_created', 'text.edit_started', 'text.changed', 'text.edit_finished',
     'text.formatted', 'formula.inserted', 'formula.slot_changed', 'formula.cursor_moved',
-    'symbols.opened', 'unsaved.decision', 'settings.autosave_changed', 'settings.autosave_custom_opened',
+    'symbols.opened', 'media.imported', 'unsaved.decision', 'settings.autosave_changed', 'settings.autosave_custom_opened',
 })
 
 
@@ -499,6 +499,7 @@ class ApplicationTeachingHost(QObject):
             'pages.copy_position': lambda: getattr(getattr(self.panel, 'document_preferences', None), 'copy_combo', None),
             'settings.autosave_preset': lambda: getattr(getattr(self.panel, 'document_preferences', None), 'interval_combo', None),
             'settings.autosave_custom': lambda: getattr(getattr(self.panel, 'document_preferences', None), 'interval_custom', None),
+            'file.import': lambda: self.panel.btn_import_media,
             'file.save': lambda: self.panel.btn_save_project,
             'file.save_as': lambda: self.panel.btn_save_project_as,
             'file.open': lambda: self.panel.btn_open_project,
@@ -562,7 +563,7 @@ class ApplicationTeachingHost(QObject):
                 reveal = self._reveal_selection
             elif target_id in {'eraser.type.circle', 'eraser.type.stroke', 'eraser.size'}:
                 reveal = self._reveal_eraser
-            elif target_id in {'file.save', 'file.save_as', 'file.open', 'file.recovery', 'export.png'}:
+            elif target_id in {'file.save', 'file.save_as', 'file.open', 'file.recovery', 'file.import', 'export.png'}:
                 reveal = self._reveal_file
             else:
                 reveal = None
@@ -898,6 +899,8 @@ class ApplicationTeachingHost(QObject):
             raise ValueError('practice fixture could not be prepared')
         self.panel.project_path = None
         self.panel.project_dirty = False
+        self.panel._teaching_media_original_id = None
+        self.panel._teaching_media_source_path = None
         from .core_fixtures import prepare_core_fixture
         prepare_core_fixture(self.panel, self.loader, fixture, self.request.paths)
         from .writing_fixtures import prepare_writing_fixture
@@ -912,6 +915,8 @@ class ApplicationTeachingHost(QObject):
         prepare_text_fixture(self.panel, fixture, self.request.paths)
         from .file_fixtures import prepare_file_fixture
         prepare_file_fixture(self.panel, self.loader, fixture, self.request.paths)
+        from .media_fixtures import prepare_media_fixture
+        prepare_media_fixture(self.panel, self.loader, fixture, self.request.paths)
 
     def activate(self):
         if self._closed or not self.context.ui_active:
