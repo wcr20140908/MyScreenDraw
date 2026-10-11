@@ -36,7 +36,9 @@ APPLICATION_TARGETS = frozenset({
     'eraser.type.stroke', 'eraser.size', 'toolbar.clear', 'file.save', 'file.save_as',
     'file.open', 'file.recovery', 'export.png',
     'pages.add', 'pages.previous', 'pages.next', 'tools.teaching',
-    'selection.duplicate', 'selection.delete',
+    'selection.duplicate', 'selection.delete', 'toolbar.board_style',
+    'pages.thumbnails_button', 'pages.thumbnail_list', 'pages.rename', 'pages.delete',
+    'pages.copy', 'pages.copy_position',
 })
 APPLICATION_EVENTS = frozenset({
     'ink.committed', 'ink.erased', 'project.saved', 'mode.changed', 'tool.changed',
@@ -46,6 +48,8 @@ APPLICATION_EVENTS = frozenset({
     'center.visited', 'practice.resumed', 'pen.style_changed', 'eraser.type_changed',
     'eraser.size_changed', 'history.cleared', 'laser.trace', 'pen.default_saved',
     'pen.defaults_changed', 'pen.default_applied', 'selection.duplicated', 'selection.deleted',
+    'board.style_changed', 'page.renamed', 'page.deleted', 'page.copied',
+    'page.copy_placement_changed', 'page.reordered', 'thumbnails.opened',
 })
 
 
@@ -464,6 +468,13 @@ class ApplicationTeachingHost(QObject):
             'toolbar.clear': lambda: self.panel.icon_buttons.get('clear'),
             'selection.duplicate': lambda: self.panel.btn_dup,
             'selection.delete': lambda: self.panel.btn_del,
+            'toolbar.board_style': lambda: self.panel.icon_buttons.get('board_style'),
+            'pages.thumbnails_button': lambda: self.panel.rail_count,
+            'pages.thumbnail_list': lambda: self.panel.thumbnail_list,
+            'pages.rename': lambda: self.panel.btn_rename_page,
+            'pages.delete': lambda: self.panel.btn_delete_page,
+            'pages.copy': lambda: self.panel.btn_copy_page,
+            'pages.copy_position': lambda: getattr(getattr(self.panel, 'document_preferences', None), 'copy_combo', None),
             'file.save': lambda: self.panel.btn_save_project,
             'file.save_as': lambda: self.panel.btn_save_project_as,
             'file.open': lambda: self.panel.btn_open_project,
@@ -484,6 +495,14 @@ class ApplicationTeachingHost(QObject):
                 reveal = self._reveal_laser
             elif target_id in {'pen.defaults', 'pen.defaults.capture'}:
                 reveal = self._reveal_settings
+            elif target_id == 'pages.thumbnails_button':
+                reveal = self._reveal_thumbnail_button
+            elif target_id in {'pages.add', 'pages.previous', 'pages.next'}:
+                reveal = self._reveal_page_rail
+            elif target_id in {'pages.thumbnail_list', 'pages.rename', 'pages.delete', 'pages.copy'}:
+                reveal = self._reveal_thumbnails
+            elif target_id == 'pages.copy_position':
+                reveal = self._reveal_page_settings
             elif target_id in {'selection.duplicate', 'selection.delete'}:
                 reveal = self._reveal_selection
             elif target_id in {'eraser.type.circle', 'eraser.type.stroke', 'eraser.size'}:
@@ -542,6 +561,24 @@ class ApplicationTeachingHost(QObject):
 
     def _reveal_eraser(self):
         self.panel.show_only_sub(self.panel.eraser_sub)
+
+    def _reveal_page_rail(self):
+        self.panel.update_whiteboard_ui()
+
+    def _reveal_thumbnail_button(self):
+        self.panel.close_thumbnail_panel()
+        self._reveal_page_rail()
+
+    def _reveal_thumbnails(self):
+        settings = getattr(self.panel, 'settings_panel', None)
+        if settings is not None and not sip.isdeleted(settings):
+            settings.hide()
+        if not self.panel.thumbnail_panel.isVisible():
+            self.panel.toggle_thumbnail_panel()
+
+    def _reveal_page_settings(self):
+        self.panel.close_thumbnail_panel()
+        self.panel.open_settings_panel()
 
     def _reveal_selection(self):
         self.panel.sync_selection_controls()
@@ -696,6 +733,13 @@ class ApplicationTeachingHost(QObject):
                 else:
                     if self._switch_pending:
                         self.panel.lifecycle.restore_practice_after_chapter_change(token)
+                        if not self._closed and self._center_end_control not in ('pause', 'hide'):
+                            self.panel.show_only_sub(None)
+                            self.panel.close_thumbnail_panel()
+                            settings = getattr(self.panel, 'settings_panel', None)
+                            if settings is not None and not sip.isdeleted(settings):
+                                settings.hide()
+                            self.panel.update_whiteboard_ui()
                     else:
                         self.panel.lifecycle.restore_after_teaching(token)
                     self._center_token = None
@@ -763,6 +807,8 @@ class ApplicationTeachingHost(QObject):
         prepare_writing_fixture(self.panel, fixture, self.request.paths)
         from .selection_fixtures import prepare_selection_fixture
         prepare_selection_fixture(self.panel, fixture, self.request.paths)
+        from .pages_fixtures import prepare_pages_fixture
+        prepare_pages_fixture(self.panel, fixture, self.request.paths)
 
     def activate(self):
         if self._closed or not self.context.ui_active:

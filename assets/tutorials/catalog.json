@@ -4,7 +4,8 @@
     "courses/c01.json",
     "courses/c02.json",
     "courses/c03.json",
-    "courses/c04.json"
+    "courses/c04.json",
+    "courses/c05.json"
   ],
   "fixtures": {
     "core.interface": "fixtures/core.interface.msd",
@@ -20,7 +21,12 @@
     "writing.c03.history_clear": "fixtures/writing.c03.history_clear.msd",
     "selection.c04.select_move": "fixtures/selection.c04.select_move.msd",
     "selection.c04.transform": "fixtures/selection.c04.transform.msd",
-    "selection.c04.copy_delete": "fixtures/selection.c04.copy_delete.msd"
+    "selection.c04.copy_delete": "fixtures/selection.c04.copy_delete.msd",
+    "pages.c05.board": "fixtures/pages.c05.board.msd",
+    "pages.c05.add_switch": "fixtures/pages.c05.add_switch.msd",
+    "pages.c05.rename_delete": "fixtures/pages.c05.rename_delete.msd",
+    "pages.c05.copy_position": "fixtures/pages.c05.copy_position.msd",
+    "pages.c05.reorder": "fixtures/pages.c05.reorder.msd"
   },
   "groups": [
     {
@@ -42,7 +48,8 @@
       "id": "editing",
       "title_key": "teaching_group_editing",
       "courses": [
-        "c04"
+        "c04",
+        "c05"
       ]
     }
   ]

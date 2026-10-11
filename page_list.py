@@ -1,5 +1,7 @@
 ﻿# SPDX-License-Identifier: GPL-3.0-or-later
 """Page thumbnails with explicit model-order dragging, not free icon placement."""
+from contextlib import nullcontext
+
 from PyQt6.QtCore import Qt, QPoint, pyqtSignal
 from PyQt6.QtGui import QDrag, QDragLeaveEvent
 from PyQt6.QtWidgets import QListWidget, QAbstractItemView
@@ -8,8 +10,9 @@ from PyQt6.QtWidgets import QListWidget, QAbstractItemView
 class PageListWidget(QListWidget):
     reorder_requested = pyqtSignal(int, int)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, reorder_scope=None):
         super().__init__(parent)
+        self._reorder_scope = reorder_scope or nullcontext
         self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
         self.setDefaultDropAction(Qt.DropAction.MoveAction)
         self.setDragEnabled(True)
@@ -26,21 +29,26 @@ class PageListWidget(QListWidget):
         item = self.currentItem()
         if item is None:
             return
-        self._drag_source_id = item.data(Qt.ItemDataRole.UserRole)
-        self._drag_source_row = self.row(item)
-        drag = QDrag(self)
-        drag.setMimeData(self.model().mimeData([self.indexFromItem(item)]))
-        pixmap = item.icon().pixmap(self.iconSize())
-        if not pixmap.isNull():
-            drag.setPixmap(pixmap)
-            drag.setHotSpot(QPoint(pixmap.width() // 2, pixmap.height() // 2))
-        try:
-            drag.exec(Qt.DropAction.MoveAction)
-        finally:
-            self._drag_source_id = None
-            self._drag_source_row = None
-            QAbstractItemView.dragLeaveEvent(self, QDragLeaveEvent())
-            drag.deleteLater()
+        with self._reorder_scope():
+            drag = None
+            try:
+                self._drag_source_id = item.data(Qt.ItemDataRole.UserRole)
+                self._drag_source_row = self.row(item)
+                drag = QDrag(self)
+                drag.setMimeData(self.model().mimeData([self.indexFromItem(item)]))
+                pixmap = item.icon().pixmap(self.iconSize())
+                if not pixmap.isNull():
+                    drag.setPixmap(pixmap)
+                    drag.setHotSpot(QPoint(pixmap.width() // 2, pixmap.height() // 2))
+                drag.exec(Qt.DropAction.MoveAction)
+            finally:
+                self._drag_source_id = None
+                self._drag_source_row = None
+                try:
+                    QAbstractItemView.dragLeaveEvent(self, QDragLeaveEvent())
+                finally:
+                    if drag is not None:
+                        drag.deleteLater()
 
     def dragEnterEvent(self, event):
         if event.source() is not self:

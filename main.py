@@ -9352,7 +9352,7 @@ class ControlPanel(QWidget):
         thumb_layout = QVBoxLayout(self.thumbnail_panel)
         self._thumbnail_cache = {}
         self._thumbnail_order = ()
-        self.thumbnail_list = PageListWidget(); self.thumbnail_list.setViewMode(QListWidget.ViewMode.IconMode)
+        self.thumbnail_list = PageListWidget(reorder_scope=lambda: teaching_document_action(self, ("page.reordered",))); self.thumbnail_list.setViewMode(QListWidget.ViewMode.IconMode)
         self.thumbnail_list.setIconSize(QSize(260, 170)); self.thumbnail_list.setGridSize(QSize(280, 205))
         self.thumbnail_list.setMinimumSize(0, 0)
         self.thumbnail_list.setMovement(QListWidget.Movement.Snap)
@@ -10215,8 +10215,15 @@ class ControlPanel(QWidget):
         if getattr(self, "_syncing_thumbnails", False) or row < 0:
             return
         if self.canvas and self.canvas.whiteboard_mode and row != self.canvas.current_page:
-            self.canvas.switch_page(row - self.canvas.current_page)
-            self.update_whiteboard_ui()
+            previous = self.canvas.current_page
+            with teaching_document_operation(self, "page.changed") as (events, operation):
+                with events.suppress() if events is not None else contextlib.nullcontext():
+                    self.canvas.switch_page(row - self.canvas.current_page)
+                    self.update_whiteboard_ui()
+                if events is not None and self.canvas.current_page != previous:
+                    events.emit_result(operation, "page.changed", "success", {
+                        "previous_page": previous + 1, "page": self.canvas.current_page + 1,
+                        "pages": len(self.canvas.pages), "page_id": self.canvas._page_id})
 
     def close_thumbnail_panel(self):
         """收起缩略图浮窗并停掉实时渲染。
@@ -10243,16 +10250,19 @@ class ControlPanel(QWidget):
     def toggle_thumbnail_panel(self):
         if not self.canvas or not self.canvas.whiteboard_mode:
             return
-        if self.close_thumbnail_panel():
-            return
-        # 反向也要让位：否则「开子菜单→缩略图关」之后再开缩略图，子菜单还在，
-        # 两个浮窗又并存，争抢原样复现。
-        self.show_only_sub(None)
-        self._position_thumbnail_panel()
-        self.thumbnail_panel.show()
-        self.refresh_page_thumbnails(force=True)
-        self.raise_floating(self.thumbnail_panel)
-        self._thumbnail_live_timer.start()      # 打开即进入实时渲染
+        with teaching_document_operation(self, "thumbnails.opened") as (events, operation):
+            if self.close_thumbnail_panel():
+                return
+            # 反向也要让位：否则「开子菜单→缩略图关」之后再开缩略图，子菜单还在，
+            # 两个浮窗又并存，争抢原样复现。
+            self.show_only_sub(None)
+            self._position_thumbnail_panel()
+            self.thumbnail_panel.show()
+            self.refresh_page_thumbnails(force=True)
+            self.raise_floating(self.thumbnail_panel)
+            self._thumbnail_live_timer.start()      # 打开即进入实时渲染
+            if events is not None and self.thumbnail_panel.isVisible():
+                events.emit_result(operation, "thumbnails.opened", "success", {"pages": self.thumbnail_list.count()})
 
     THUMBNAIL_SIZE = QSize(260, 170)
     THUMBNAIL_LIVE_MS = 150        # 实时刷新节拍：约 7fps，肉眼上就是「落墨即现」
@@ -10347,28 +10357,76 @@ class ControlPanel(QWidget):
         self._thumbnail_signature = self.canvas.content_signature()
 
     def copy_whiteboard_page(self):
-        if self.canvas and self.canvas.duplicate_page(placement=self.page_copy_placement):
-            self.update_whiteboard_ui()
-        elif self.canvas and len(self.canvas.pages) >= MAX_PAGES:
-            notify_user(self, tr("page_list"), trf("page_limit", count=MAX_PAGES), level="warning")
+        with teaching_document_operation(self, "page.copied") as (events, operation):
+            cv = self.canvas
+            before = [page.get("page_id") for page in cv.pages] if cv and operation is not None else None
+            source_id = cv._page_id if cv and operation is not None else None
+            source_index = cv.current_page if cv else None
+            placement = self.page_copy_placement
+            content = serialize_page(cv.capture_page()) if cv and operation is not None else None
+            if content is not None:
+                content.pop("page_id", None)
+                content.pop("name", None)
+            if cv and cv.duplicate_page(placement=placement):
+                self.update_whiteboard_ui()
+                if events is not None and operation is not None:
+                    copied = serialize_page(cv.capture_page())
+                    copied.pop("page_id", None)
+                    copied.pop("name", None)
+                    expected = {"before": source_index, "after": source_index + 1,
+                                "first": 0, "last": len(before)}[placement]
+                    actual = [page.get("page_id") for page in cv.pages]
+                    added = set(actual) - set(before)
+                    valid = (len(added) == 1 and len(actual) == len(before) + 1
+                             and [page_id for page_id in actual if page_id not in added] == before
+                             and source_id in actual and cv._page_id in added
+                             and cv.current_page == expected and content == copied)
+                    events.emit_result(operation, "page.copied", "success" if valid else "failed", {
+                        "source_page_id": source_id, "page_id": cv._page_id,
+                        "placement": placement, "page": cv.current_page + 1,
+                        "pages": len(cv.pages), "added": len(added), "content_matches": content == copied})
+            elif cv and len(cv.pages) >= MAX_PAGES:
+                notify_user(self, tr("page_list"), trf("page_limit", count=MAX_PAGES), level="warning")
 
     def rename_whiteboard_page(self):
         if not self.canvas or not self.canvas.whiteboard_mode:
             return
-        self.pause_callbacks()
-        try:
-            name, accepted = QInputDialog.getText(self, tr("rename_page"), tr("page_name"),
-                                                text=self.canvas._page_name or trf("page_label", index=self.canvas.current_page + 1))
-            if accepted and self.canvas.rename_page(self.canvas.current_page, name):
-                self.update_whiteboard_ui()
-        finally:
-            self.resume_callbacks()
-            if self.thumbnail_panel.isVisible():
-                self._thumbnail_live_timer.start()
+        with teaching_document_operation(self, "page.renamed") as (events, operation):
+            page_id = self.canvas._page_id
+            changed = False
+            self.pause_callbacks()
+            try:
+                name, accepted = QInputDialog.getText(self, tr("rename_page"), tr("page_name"),
+                    text=self.canvas._page_name or trf("page_label", index=self.canvas.current_page + 1))
+                if accepted and self.canvas.rename_page(self.canvas.current_page, name):
+                    changed = True
+                    self.update_whiteboard_ui()
+            finally:
+                self.resume_callbacks()
+                if self.thumbnail_panel.isVisible():
+                    self._thumbnail_live_timer.start()
+            if events is not None and changed and self.canvas._page_id == page_id:
+                events.emit_result(operation, "page.renamed", "success", {
+                    "page_id": page_id, "page": self.canvas.current_page + 1, "pages": len(self.canvas.pages)})
 
     def reorder_whiteboard_page(self, source, destination):
-        if self.canvas and self.canvas.move_page(source, destination):
-            self.update_whiteboard_ui()
+        with teaching_document_operation(self, "page.reordered") as (events, operation):
+            page_id = (self.canvas.pages[source].get("page_id") if self.canvas and
+                       0 <= source < len(self.canvas.pages) else None)
+            before = ([page.get("page_id") for page in self.canvas.pages]
+                      if self.canvas and operation is not None else None)
+            active_id = self.canvas._page_id if self.canvas and operation is not None else None
+            if self.canvas and self.canvas.move_page(source, destination):
+                self.update_whiteboard_ui()
+                if events is not None and operation is not None:
+                    expected = list(before)
+                    expected.insert(destination, expected.pop(source))
+                    actual = [page.get("page_id") for page in self.canvas.pages]
+                    valid = actual == expected and self.canvas._page_id == active_id
+                    events.emit_result(operation, "page.reordered", "success" if valid else "failed", {
+                        "page_id": page_id, "source": source, "destination": destination,
+                        "current_page_id": self.canvas._page_id, "page": self.canvas.current_page + 1,
+                        "pages": len(self.canvas.pages)})
 
     def update_whiteboard_ui(self):
         if not self.canvas:
@@ -10438,32 +10496,51 @@ class ControlPanel(QWidget):
     def delete_whiteboard_page(self):
         if not self.canvas or not self.canvas.whiteboard_mode:
             return
-        index = self.canvas.current_page
-        box = QMessageBox(self.thumbnail_panel)
-        box.setWindowTitle(tr("delete_page"))
-        box.setText(trf("delete_page_confirm", index=index + 1))
-        box.setIcon(QMessageBox.Icon.Warning)
-        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
-        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
-        box.setEscapeButton(QMessageBox.StandardButton.Cancel)
-        box.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
-        box.setStyleSheet(self.styleSheet())
-        was_live = self._thumbnail_live_timer.isActive()
-        self.pause_callbacks()
-        try:
-            box.show()
-            self.raise_floating(box, bind_owner=False)
-            if box.exec() == QMessageBox.StandardButton.Yes:
-                if self.canvas.delete_page(index):
+        with teaching_document_operation(self, "page.deleted") as (events, operation):
+            index = self.canvas.current_page
+            page_id = self.canvas._page_id
+            before = {page.get("page_id") for page in self.canvas.pages} if operation is not None else None
+            before_content = ([serialize_page(page) for page in self.canvas.document_pages()]
+                              if operation is not None else None)
+            box = QMessageBox(self.thumbnail_panel)
+            box.setWindowTitle(tr("delete_page"))
+            box.setText(trf("delete_page_confirm", index=index + 1))
+            box.setIcon(QMessageBox.Icon.Warning)
+            box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
+            box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+            box.setEscapeButton(QMessageBox.StandardButton.Cancel)
+            box.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+            box.setStyleSheet(self.styleSheet())
+            was_live = self._thumbnail_live_timer.isActive()
+            removed = False
+            self.pause_callbacks()
+            try:
+                box.show()
+                self.raise_floating(box, bind_owner=False)
+                accepted = box.exec() == QMessageBox.StandardButton.Yes
+                if accepted and self.canvas.delete_page(index):
+                    removed = True
                     self.select_panel.hide()
                     self.update_whiteboard_ui()
-        finally:
-            box.hide()
-            box.deleteLater()
-            self.resume_callbacks()
-            foreground = not hasattr(self, "lifecycle") or self.lifecycle.state not in (LifecycleState.HIDDEN, LifecycleState.QUITTING)
-            if was_live and foreground and self.thumbnail_panel.isVisible() and self.canvas.whiteboard_mode:
-                self._thumbnail_live_timer.start()
+            finally:
+                box.hide()
+                box.deleteLater()
+                self.resume_callbacks()
+                foreground = not hasattr(self, "lifecycle") or self.lifecycle.state not in (LifecycleState.HIDDEN, LifecycleState.QUITTING)
+                if was_live and foreground and self.thumbnail_panel.isVisible() and self.canvas.whiteboard_mode:
+                    self._thumbnail_live_timer.start()
+            if events is not None and operation is not None:
+                after = {page.get("page_id") for page in self.canvas.pages}
+                if removed:
+                    deleted = before - after
+                    valid = deleted == {page_id}
+                    events.emit_result(operation, "page.deleted", "success" if valid else "failed", {
+                        "page_id": page_id, "removed": len(deleted), "pages": len(self.canvas.pages)})
+                elif not accepted:
+                    retained = (before == after and self.canvas._page_id == page_id and
+                                before_content == [serialize_page(page) for page in self.canvas.document_pages()])
+                    events.emit_result(operation, "page.deleted", "cancelled", {
+                        "page_id": page_id, "retained": retained, "pages": len(self.canvas.pages)})
 
     def switch_whiteboard_page(self, offset):
         if not self.canvas or not self.canvas.whiteboard_mode:
@@ -10486,9 +10563,14 @@ class ControlPanel(QWidget):
                      "pages": len(self.canvas.pages), "page_id": self.canvas._page_id})
 
     def toggle_board_style(self):
-        self.canvas.toggle_board_style()
-        self.project_dirty = True
-        self.update_whiteboard_ui()
+        with teaching_document_operation(self, "board.style_changed") as (events, operation):
+            previous = self.canvas.board_style
+            self.canvas.toggle_board_style()
+            self.project_dirty = True
+            self.update_whiteboard_ui()
+            if events is not None and previous != self.canvas.board_style:
+                events.emit_result(operation, "board.style_changed", "success", {
+                    "style": self.canvas.board_style, "whiteboard_mode": self.canvas.whiteboard_mode})
 
     def toggle_theme(self):
         self.theme_name = "light" if self.theme_name == "dark" else "dark"
@@ -14776,10 +14858,24 @@ class ControlPanel(QWidget):
         return self.autosave_interval_seconds
 
     def set_page_copy_placement(self, placement, persist=True):
-        self.page_copy_placement = placement if placement in COPY_PLACEMENTS else "after"
-        self._sync_document_preferences()
-        if persist:
-            self.save_settings()
+        normalized = placement if placement in COPY_PLACEMENTS else "after"
+        operation = (self.canvas._begin_teaching_operation("page.copy_placement_changed")
+                     if self.canvas is not None and persist and placement in COPY_PLACEMENTS
+                     and normalized != self.page_copy_placement else None)
+        try:
+            self.page_copy_placement = normalized
+            self._sync_document_preferences()
+            if persist:
+                self.save_settings()
+            if operation is not None:
+                marker = getattr(self, "_last_settings_write", None)
+                saved = (marker is not None and marker[0] == CONFIG_FILE and os.path.isfile(CONFIG_FILE)
+                         and marker[1].get("page_copy_placement") == normalized)
+                self.canvas._emit_teaching_result(operation, "page.copy_placement_changed", {
+                    "placement": normalized}, outcome="success" if saved else "failed")
+        finally:
+            if self.canvas is not None:
+                self.canvas._discard_teaching_operation(operation)
 
     def set_timer_alarm_volume(self, value, persist=True):
         self.timer_alarm_volume = bounded_int(value, 100, 0, 100)

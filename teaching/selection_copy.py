@@ -19,7 +19,7 @@ _STEP_TEXT = {
          'Üben Sie Auswahl und Bearbeitung an separaten Beispielen; Ihre ursprüngliche Arbeit bleibt geschützt. Wählen Sie „Nächster Schritt“; Überspringen zählt nicht als Abschluss, und das Beenden führt zur ursprünglichen Arbeit zurück.',
          'Практикуйте выбор и редактирование на отдельных примерах; исходная работа защищена. Нажмите «Следующий шаг»; пропуск не считается завершением, а выход из обучения вернёт исходную работу.',
          '독립된 예제로 선택과 편집을 연습하며 원래 작업은 보호됩니다. “다음 단계”를 누르세요. 건너뛰기는 완료로 계산되지 않으며 교육을 종료하면 원래 작업으로 돌아갑니다.',
-         '独立したサンプルで選択と編集を練習し、元の作業は保護されます。「次のステップ」で開始します。スキップは完了に数えず、チュートリアルを終了すると元の作業に戻ります。')),
+         '独立したサンプルで選択と編集を練習し、元の作業は保護されます。「次の手順」で開始します。スキップは完了に数えず、チュートリアルを終了すると元の作業に戻ります。')),
     'tool': (
         ('切到框选工具', 'Switch to Select', 'Passer à Sélection', 'Cambiar a Seleccionar', 'Zu Auswählen wechseln', 'Переключитесь на Выбор', '선택 도구로 전환', '選択ツールへ切り替え'),
         ('点击工具栏“框选”，实际切换到选择工具。这里只选择工具，选中样例要在下一步单独操作。',
@@ -59,7 +59,7 @@ _STEP_TEXT = {
          'Der Griff unten rechts skaliert, der oberhalb des Rahmens dreht. Sehen Sie sich beide an und wählen Sie vor dem Ziehen „Nächster Schritt“.',
          'Маркер справа внизу меняет масштаб, а маркер над рамкой поворачивает. Найдите их и нажмите «Следующий шаг», затем используйте каждый отдельно.',
          '오른쪽 아래 핸들은 크기를 조절하고 테두리 위 핸들은 회전합니다. 위치를 확인한 뒤 “다음 단계”를 누르고 각각 끌어 보세요.',
-         '右下のハンドルは拡大縮小、枠の上にあるハンドルは回転に使います。位置を確認し、「次のステップ」の後でそれぞれドラッグします。')),
+         '右下のハンドルは拡大縮小、枠の上にあるハンドルは回転に使います。位置を確認し、「次の手順」の後でそれぞれドラッグします。')),
     'scale': (
         ('拖动右下角缩放柄', 'Drag the lower right scale handle', 'Tirer la poignée de taille', 'Arrastra el control de tamaño', 'Den Skalierungsgriff ziehen', 'Потяните маркер масштаба', '오른쪽 아래 크기 핸들 끌기', '右下の拡大縮小ハンドルをドラッグ'),
         ('按住右下角控制柄，改变样例大小后抬起。需要实际大小变化；点击不动或拖回原大小不会完成。',
@@ -129,7 +129,7 @@ _STEP_TEXT = {
          'Bestätigen Sie nach den erforderlichen Aktionen mit „Nächster Schritt“. Wechseln Sie im Tutorialcenter das Kapitel oder beenden Sie es zur Rückkehr; Überspringen zählt nicht als Abschluss.',
          'После обязательных действий нажмите «Следующий шаг» для подтверждения. Смените главу в центре обучения или выйдите, чтобы вернуться к работе; пропуск не считается завершением.',
          '필수 작업을 마친 뒤 “다음 단계”로 확인하세요. 교육 센터에서 장을 바꾸거나 교육을 종료하여 원래 작업으로 돌아갈 수 있으며 건너뛰기는 완료로 계산되지 않습니다.',
-         '必要な操作の後に「次のステップ」で確認します。センターで章を変更するか、チュートリアルを終了して元の作業へ戻れます。スキップは完了に数えません。')),
+         '必要な操作の後に「次の手順」で確認します。センターで章を変更するか、チュートリアルを終了して元の作業へ戻れます。スキップは完了に数えません。')),
 }
 
 for _chapter, _steps in {
