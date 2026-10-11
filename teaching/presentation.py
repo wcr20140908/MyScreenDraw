@@ -7,7 +7,7 @@ progress, injects native input or executes instructions from course JSON.
 """
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager, suppress
 
 from PyQt6 import sip
@@ -41,7 +41,10 @@ class TeachingPresenter(QObject):
     Event-driven rebuilding may recover for at most two seconds, after which
     Retry/Skip/Exit remain available without an application-wide lock. The host
     must wrap real native file choosers in native_dialog(); this is not a native
-    dialog test or an OS hook.
+    dialog test or an OS hook. layout_obstacles supplies the host's currently
+    visible toolbar/panel rectangles in Qt logical/global coordinates. Its
+    presence enables periodic placement refreshes without watching the desktop.
+    restack_window is a separate trusted hook for visible teaching windows.
     """
 
     exit_requested = pyqtSignal()
@@ -57,6 +60,8 @@ class TeachingPresenter(QObject):
                  condition_reader: Callable[[str, str | None], object] | None = None,
                  pause_action: Callable[[], object] | None = None,
                  available_geometry: Callable[[QWidget | None], QRect] = _work_area,
+                 layout_obstacles: Callable[[], Iterable[QRect]] | None = None,
+                 restack_window: Callable[[QWidget], None] | None = None,
                  manage_window: Callable[[QWidget], None] | None = None,
                  unmanage_window: Callable[[QWidget], None] | None = None,
                  missing_timeout_ms: int = 2000, parent: QObject | None = None) -> None:
@@ -65,6 +70,10 @@ class TeachingPresenter(QObject):
             raise ValueError('target recovery deadline must be 1..2000 milliseconds')
         if pause_action is not None and not callable(pause_action):
             raise ValueError('pause action must be a trusted callable')
+        if layout_obstacles is not None and not callable(layout_obstacles):
+            raise ValueError('layout obstacle source must be a trusted callable')
+        if restack_window is not None and not callable(restack_window):
+            raise ValueError('window restack hook must be a trusted callable')
         actions = dict(reveal_actions or {})
         if actions.keys() - REVEAL_ACTIONS or any(not callable(value) for value in actions.values()):
             raise ValueError('trusted reveal hooks must use registered actions')
@@ -73,6 +82,11 @@ class TeachingPresenter(QObject):
         self.registry, self._canvas = registry, canvas
         self._prepare_fixture, self._prepare_step = prepare_fixture, prepare_step
         self._reveal_actions, self._available_geometry = actions, available_geometry
+        self._layout_obstacles = layout_obstacles
+        self._restack_window = restack_window
+        self._placing_layout = False
+        self._layout_signature: tuple | None = None
+        self._layout_geometry: QRect | None = None
         self._manage_window, self._unmanage_window = manage_window, unmanage_window
         self._managed_windows: list[QWidget] = []
         self._closed = False
@@ -95,6 +109,9 @@ class TeachingPresenter(QObject):
         self._missing_timer.setSingleShot(True)
         self._missing_timer.setInterval(missing_timeout_ms)
         self._missing_timer.timeout.connect(lambda: self._request(self._missing_expired))
+        self._layout_timer = QTimer(self)
+        self._layout_timer.setInterval(150)
+        self._layout_timer.timeout.connect(self.refresh_layout)
         for signal, action in (
             (self.controller.previous_requested, self.engine.previous),
             (self.controller.next_requested, self.engine.next),
@@ -173,17 +190,25 @@ class TeachingPresenter(QObject):
         self.failed.emit('presentation_failed')
 
     def _release(self) -> None:
+        self._layout_timer.stop()
         self._missing_timer.stop()
         self._automatic_retry = False
         self.registry.unwatch()
         self.barrier.deactivate()
         if _live(self.highlight):
             self.highlight.highlight(None)
+            self._restack_floating(self.highlight)
+
+    def _restack_floating(self, window: QWidget) -> None:
+        if (self._restack_window is not None and not self._closed
+                and _live(window) and window.isVisible()):
+            self._restack_window(window)
 
     def _present(self, step: TutorialStep | None) -> None:
         if step is None:
             self.barrier.deactivate()
             self.highlight.highlight(None)
+            self._restack_floating(self.highlight)
             if self.engine.phase == 'paused' and not self._closed:
                 if not self._missing:
                     self._release()
@@ -273,25 +298,70 @@ class TeachingPresenter(QObject):
             return
         if not available:
             target = None
-        anchor = QRect(target.mapToGlobal(QPoint()), target.size()) if target is not None else QRect()
-        area = self._available_geometry(target)
-        if not self._still_current(snapshot):
-            return
-        if not isinstance(area, QRect) or area.isEmpty():
-            raise ValueError('a valid Qt logical screen work area is required')
-        if anchor.isEmpty():
-            anchor = QRect(area.center(), self.controller.size())
-        self.controller.place(anchor, area)
-        if not self._still_current(snapshot):
+        anchor = self._place_controller(target)
+        if anchor is None or not self._still_current(snapshot):
             return
         self.barrier.activate(step.input_policy, targets=(target,) if target else (),
                               canvas=canvas if _live(canvas) else None, controller=self.controller)
         self.highlight.highlight(anchor if self.active_target_id is not None else None)
+        self._restack_floating(self.highlight)
         self._show_controller()
+
+    def _place_controller(self, target: QWidget | None) -> QRect | None:
+        if self._placing_layout:
+            return None
+        self._placing_layout = True
+        try:
+            snapshot = self._snapshot()
+            anchor = QRect(target.mapToGlobal(QPoint()), target.size()) if _live(target) else QRect()
+            area = self._available_geometry(target)
+            if not self._still_current(snapshot):
+                return None
+            if not isinstance(area, QRect) or area.isEmpty():
+                raise ValueError('a valid Qt logical screen work area is required')
+            obstacles = tuple(self._layout_obstacles()) if self._layout_obstacles is not None else ()
+            if not self._still_current(snapshot):
+                return None
+            if any(not isinstance(rect, QRect) for rect in obstacles):
+                raise TypeError('layout obstacles must be QRect values')
+            size = self.controller.size()
+            signature = (anchor.getRect(), area.getRect(), size.width(), size.height(),
+                         tuple(sorted(rect.getRect() for rect in obstacles)))
+            if signature != self._layout_signature or self.controller.geometry() != self._layout_geometry:
+                geometry = self.controller.place(anchor, area, obstacles=obstacles)
+                self._layout_signature, self._layout_geometry = signature, QRect(geometry)
+                self._restack_floating(self.controller)
+                if not self._still_current(snapshot):
+                    return None
+            return anchor
+        finally:
+            self._placing_layout = False
+
+    def refresh_layout(self) -> None:
+        """Refresh placement alone after obstacle/work-area changes, also while paused."""
+        if self._closed or self._dialog_depth:
+            return
+        if (not self.controller.isVisible()
+                or (self.engine.phase not in ('running', 'paused') and not self.controller.chapter_finished)):
+            self._layout_timer.stop()
+            return
+        self._request(self._refresh_layout)
+
+    def _refresh_layout(self) -> None:
+        snapshot = self._snapshot()
+        target = self._target()
+        if not self._still_current(snapshot):
+            return
+        if not _live(target) or not target.isVisible():
+            target = None
+        self._place_controller(target)
 
     def _show_controller(self) -> None:
         if not self._closed and not self._dialog_depth:
             self.controller.show()
+            self._restack_floating(self.controller)
+            if not self._closed and not self._dialog_depth and self._layout_obstacles is not None:
+                self._layout_timer.start()
 
     def _missing_expired(self) -> None:
         if not self._missing or not self._automatic_retry:
@@ -341,6 +411,7 @@ class TeachingPresenter(QObject):
         and the full real file operation belong inside this same scope.
         """
         self._dialog_depth += 1
+        self._layout_timer.stop()
         self.barrier.suspend()
         if not self._closed:
             self.controller.hide()
@@ -355,9 +426,16 @@ class TeachingPresenter(QObject):
             if completed and before_refresh is not None:
                 before_refresh()
             if not self._closed and not self._dialog_depth:
-                self._request(self._targets_changed)
+                self._request(self._refresh_dialog_target)
                 if self.engine.phase == 'paused' or self.controller.chapter_finished:
                     self._show_controller()
+
+    def _refresh_dialog_target(self) -> None:
+        # A cancelled file action can close its panel while the same step remains current.
+        if self.active_target_id is not None and self.registry.resolve(self.active_target_id) is None:
+            with self.events.suppress():
+                self.registry.reveal(self.active_target_id)
+        self._targets_changed()
 
     def _exit(self) -> None:
         self.close()

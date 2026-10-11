@@ -330,23 +330,76 @@ class TeachingCenter(QDialog):
             self.start_requested.emit(*pair)
 
 
-def controller_geometry(anchor: QRect, size: QSize, available: QRect, *, gap: int = 12) -> QRect:
-    """Place beside the anchor, clamping size/position to this screen's work area.
+def _overlap_area(rect: QRect, obstacles: Iterable[QRect]) -> int:
+    """Area covered by the union, counting overlapping/nested panels once."""
+    intersections = [rect.intersected(obstacle) for obstacle in obstacles if rect.intersects(obstacle)]
+    if not intersections:
+        return 0
+    if len(intersections) == 1:
+        return intersections[0].width() * intersections[0].height()
+    edges = sorted({edge for part in intersections for edge in (part.left(), part.right() + 1)})
+    area = 0
+    for left, right in zip(edges, edges[1:]):
+        intervals = sorted((part.top(), part.bottom() + 1) for part in intersections
+                           if part.left() < right and part.right() + 1 > left)
+        covered, bottom = 0, rect.top()
+        for top, end in intervals:
+            covered += max(0, end - max(top, bottom))
+            bottom = max(bottom, end)
+        area += (right - left) * covered
+    return area
 
-    No primary-screen lookup or zero-origin assumption. Oversized controllers
-    shrink to available; callers must pass QScreen.availableGeometry(), not its
-    full geometry, to respect the taskbar/dock.
+
+def controller_geometry(anchor: QRect, size: QSize, available: QRect, *, gap: int = 12,
+                        obstacles: Iterable[QRect] = ()) -> QRect:
+    """Place a teaching window using only Qt logical/global-coordinate geometry.
+
+    Prefer the usual anchor side, then search positions at the anchor, obstacle
+    and work-area edges. Minimize obstacle overlap first, target overlap second,
+    and keep the requested gap where space permits. If no full empty slot exists,
+    return the least obstructed clamped position. Only a teaching window larger
+    than the work area shrinks, preserving the existing size-clamping behavior.
     """
-    if available.isEmpty() or size.isEmpty() or gap < 0:
-        raise ValueError('positive size/work area and nonnegative gap required')
-    width = min(size.width(), available.width())
-    height = min(size.height(), available.height())
-    x = anchor.right() + 1 + gap
-    if x + width > available.right() + 1:
-        x = anchor.left() - gap - width
-    x = max(available.left(), min(x, available.right() + 1 - width))
-    y = max(available.top(), min(anchor.top(), available.bottom() + 1 - height))
-    return QRect(x, y, width, height)
+    if available.isEmpty() or size.isEmpty() or type(gap) is not int or gap < 0:
+        raise ValueError('positive size/work area and nonnegative integer gap required')
+    raw_obstacles = tuple(obstacles)
+    if any(not isinstance(rect, QRect) for rect in raw_obstacles):
+        raise TypeError('layout obstacles must be QRect values')
+    blockers = tuple(rect.intersected(available) for rect in raw_obstacles
+                     if not rect.isEmpty() and rect.intersects(available))
+    width, height = min(size.width(), available.width()), min(size.height(), available.height())
+    max_x, max_y = available.right() + 1 - width, available.bottom() + 1 - height
+
+    def clamp_x(x: int) -> int:
+        return max(available.left(), min(x, max_x))
+
+    def clamp_y(y: int) -> int:
+        return max(available.top(), min(y, max_y))
+
+    if anchor.isEmpty():
+        preferred_x = available.left() + (available.width() - width) // 2
+        preferred_y = available.top() + (available.height() - height) // 2
+        target = ()
+    else:
+        preferred_x = anchor.right() + 1 + gap
+        if preferred_x + width > available.right() + 1:
+            preferred_x = anchor.left() - gap - width
+        preferred_y = anchor.top()
+        target = (anchor,)
+    preferred_x, preferred_y = clamp_x(preferred_x), clamp_y(preferred_y)
+    xs, ys = {available.left(), max_x, preferred_x}, {available.top(), max_y, preferred_y}
+    for rect in (*blockers, *target):
+        for spacing in (0, gap):
+            xs.update((clamp_x(rect.left() - spacing - width), clamp_x(rect.right() + 1 + spacing)))
+            ys.update((clamp_y(rect.top() - spacing - height), clamp_y(rect.bottom() + 1 + spacing)))
+    margins = tuple(rect.adjusted(-gap, -gap, gap, gap) for rect in (*blockers, *target))
+
+    def score(rect: QRect) -> tuple[int, ...]:
+        dx, dy = abs(rect.x() - preferred_x), abs(rect.y() - preferred_y)
+        return (_overlap_area(rect, blockers), _overlap_area(rect, target),
+                _overlap_area(rect, margins), dx + dy, dy, rect.y(), rect.x())
+
+    return min((QRect(x, y, width, height) for x in xs for y in ys), key=score)
 
 
 class TutorialController(QWidget):
@@ -366,7 +419,7 @@ class TutorialController(QWidget):
 
     def __init__(self, translate: Translate, parent: QWidget | None = None) -> None:
         super().__init__(parent, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint
-                         | Qt.WindowType.WindowStaysOnTopHint)
+                         | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.WindowDoesNotAcceptFocus)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setWindowTitle(translate('teaching_controller_title'))
@@ -375,6 +428,11 @@ class TutorialController(QWidget):
         self._finished: str | None = None
         self._can_previous = self._can_next = False
         self._paused = self._missing = self._exit_emitted = False
+        self.practice_label = QLabel(translate('teaching_practice_badge'), self)
+        self.practice_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.practice_label.setWordWrap(True)
+        self.practice_label.setToolTip(translate('teaching_practice_notice'))
+        self.practice_label.hide()
         self.title_label = QLabel(self)
         self.body_label = QLabel(self)
         self.progress_label = QLabel(self)
@@ -401,6 +459,7 @@ class TutorialController(QWidget):
                 button.clicked.connect(getattr(self, f'{name}_requested').emit)
         layout = QVBoxLayout(self)
         layout.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
+        layout.addWidget(self.practice_label)
         layout.addWidget(self.title_label)
         layout.addWidget(self.progress_label)
         layout.addWidget(body_scroll, 1)
@@ -409,6 +468,9 @@ class TutorialController(QWidget):
         layout.addLayout(actions)
         self.resize(420, 300)
         self._update_actions()
+
+    def set_practice_session(self, enabled: bool) -> None:
+        self.practice_label.setVisible(enabled)
 
     def present(self, step: TutorialStep, index: int, total: int,
                 can_previous: bool, can_next: bool) -> None:
@@ -476,9 +538,10 @@ class TutorialController(QWidget):
             key = None
         self.status_label.setText(self._translate(key) if key else '')
 
-    def place(self, anchor: QRect, available: QRect) -> QRect:
-        geometry = controller_geometry(anchor, self.size(), available)
-        self.setGeometry(geometry)
+    def place(self, anchor: QRect, available: QRect, obstacles: Iterable[QRect] = ()) -> QRect:
+        geometry = controller_geometry(anchor, self.size(), available, obstacles=obstacles)
+        if geometry != self.geometry():
+            self.setGeometry(geometry)
         return geometry
 
     def closeEvent(self, event: QCloseEvent) -> None:

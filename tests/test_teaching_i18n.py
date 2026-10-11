@@ -27,6 +27,7 @@ WIDGET_KEYS = frozenset({
     "teaching_filter_unfinished",
     "teaching_course_progress",
     "teaching_context_hints",
+    "teaching_practice_badge",
     "teaching_chapter_switch_confirm",
     "teaching_context_hint_title",
     "teaching_context_hint_body",
@@ -82,7 +83,7 @@ FORMAT_VALUES = {"current": 2, "completed": 3, "total": 7, "chapter": "Practice 
 
 class TeachingI18nTests(unittest.TestCase):
     def test_all_fixed_keys_exist_in_all_eight_languages(self):
-        self.assertEqual(len(FIXED_KEYS), 53)
+        self.assertEqual(len(FIXED_KEYS), 54)
         self.assertEqual(i18n._LANGS, LANGUAGES)
         self.assertEqual(set(STRINGS), set(LANGUAGES))
         for language in LANGUAGES:

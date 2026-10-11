@@ -17,7 +17,7 @@ import json
 import tempfile
 import time
 import weakref
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from PyQt6.QtWidgets import QSystemTrayIcon, QMenu, QMessageBox, QWidgetAction, QLabel, QDialog, QWidget, QToolTip
@@ -141,6 +141,8 @@ class _BackgroundWindowGuard(QObject):
                     manager.state == LifecycleState.HIDDEN
                     and not manager._allowed_in_background(watched))):
                 watched.hide()
+            elif watched.isVisible():
+                manager._queue_teaching_raise(watched)
         elif manager.state == LifecycleState.HIDDEN and not suspended:
             if (event.type() == QEvent.Type.Close or (
                     event.type() == QEvent.Type.Hide
@@ -186,6 +188,8 @@ class AppLifecycleManager:
         self._teaching_restore_windows = weakref.WeakSet()
         self._teaching_recovery_windows = weakref.WeakSet()
         self._practice_teaching_windows = weakref.WeakSet()
+        self._teaching_windows = []
+        self._teaching_raise_pending = weakref.WeakSet()
         self._teaching_timer_phases = []
         self._window_guard = _BackgroundWindowGuard(self)
         self.app.installEventFilter(self._window_guard)
@@ -572,12 +576,73 @@ class AppLifecycleManager:
         """Track ownership without Qt parenting (native stacking owns the tools)."""
         self._tool_windows.add(window)
 
+    def teaching_windows(self):
+        windows = [ref() for ref in self._teaching_windows]
+        windows = [window for window in windows if window is not None and not sip.isdeleted(window)]
+        self._teaching_windows = [weakref.ref(window) for window in windows]
+        # Recent dialogs go first; input-transparent highlights cannot cover controls.
+        newest = list(reversed(windows))
+        return tuple(window for window in newest
+                     if not window.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)) + tuple(
+                     window for window in newest
+                     if window.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents))
+
+    def register_teaching_window(self, window):
+        if (not isinstance(window, QWidget) or sip.isdeleted(window) or not window.isWindow()
+                or QThread.currentThread() != self.panel.thread()):
+            raise ValueError("Teaching layer requires a live top-level window on the GUI thread")
+        self.register_tool_window(window)
+        if not any(existing is window for existing in self.teaching_windows()):
+            self._teaching_windows.append(weakref.ref(window))
+            self.panel._bound_key = None
+        if window.isVisible():
+            self._queue_teaching_raise(window)
+
+    def _queue_teaching_raise(self, window):
+        if (window not in self.teaching_windows() or window in self._teaching_raise_pending):
+            return
+        self._teaching_raise_pending.add(window)
+        manager_ref, window_ref = weakref.ref(self), weakref.ref(window)
+        def raise_later():
+            manager = manager_ref()
+            if manager is None:
+                return
+            current = window_ref()
+            if current is not None:
+                manager._teaching_raise_pending.discard(current)
+                manager._raise_teaching_window(current)
+        QTimer.singleShot(0, raise_later)
+
+    def _raise_teaching_window(self, window):
+        if (sip.isdeleted(self.panel) or window is None or sip.isdeleted(window)
+                or window not in self.teaching_windows() or not window.isVisible()
+                or self.state in (LifecycleState.HIDDEN, LifecycleState.QUITTING)):
+            return False
+        context = getattr(self.panel, "runtime_context", None)
+        if context is not None and not context.ui_active:
+            return False
+        if (getattr(self.panel, "_teaching_suspended", False)
+                and window not in self._practice_teaching_windows
+                and window not in self._teaching_recovery_windows):
+            return False
+        raise_window = getattr(self.panel, "raise_floating", None)
+        if not callable(raise_window):
+            return False
+        try:
+            raise_window(window)
+        except Exception:
+            return False
+        return True
+
     def unregister_tool_window(self, window):
         """Release explicit ownership/allowance, without touching other windows."""
         self._tool_windows.discard(window)
         self._background_allowed_windows.discard(window)
         self._teaching_recovery_windows.discard(window)
         self._practice_teaching_windows.discard(window)
+        self._teaching_windows = [ref for ref in self._teaching_windows if ref() is not None and ref() is not window]
+        self._teaching_raise_pending.discard(window)
+        self.panel._bound_key = None
 
     def allow_practice_teaching_window(self, window):
         """Trusted active child views only; original parent UI cannot use this exemption."""
@@ -588,7 +653,7 @@ class AppLifecycleManager:
                 or not isinstance(window, QWidget) or sip.isdeleted(window)
                 or not window.isWindow() or not self._owns_window(window)):
             raise ValueError("An active owned practice teaching window is required")
-        self.register_tool_window(window)
+        self.register_teaching_window(window)
         self._practice_teaching_windows.add(window)
 
     def allow_teaching_recovery_window(self, window):
@@ -601,7 +666,7 @@ class AppLifecycleManager:
             raise RuntimeError("Teaching recovery UI must run on the panel's Qt thread")
         if not isinstance(window, QWidget) or sip.isdeleted(window) or not window.isWindow():
             raise ValueError("Teaching recovery prompt must be a live top-level QWidget")
-        self.register_tool_window(window)
+        self.register_teaching_window(window)
         self._teaching_recovery_windows.add(window)
 
     def disallow_teaching_recovery_window(self, window):
@@ -849,6 +914,35 @@ class AppLifecycleManager:
         if not snapshot.single_shot:
             self._teaching_timer_phases.append(_TeachingTimerPhase(
                 timer, dispatcher, timer_id, snapshot.interval, snapshot.timer_type))
+
+    def restore_practice_after_chapter_change(self, token):
+        """Rebuild this child's UI sizes; original-work restoration remains exact."""
+        context = getattr(self.panel, "runtime_context", None)
+        paths = getattr(context, "paths", None)
+        if (context is None or not context.ui_active or getattr(paths, "practice", False) is not True):
+            raise ValueError("Chapter layout rebuilding requires an active private practice")
+        if (not isinstance(token, _TeachingSuspension) or token.manager_ref() is not self
+                or not token.restored and self._teaching_token is not token):
+            raise ValueError("Private chapter token belongs to this manager only")
+        if QThread.currentThread() != self.panel.thread() or self._teaching_restoring:
+            raise RuntimeError("Private chapter rebuilding requires the idle GUI thread")
+        if token.restored:
+            return
+        snapshots = []
+        canvas = getattr(self.panel, "canvas", None)
+        for snapshot in token.windows:
+            window = snapshot.window
+            if sip.isdeleted(window):
+                raise RuntimeError("A private chapter window was destroyed")
+            if window is not canvas and snapshot.state == Qt.WindowState.WindowNoState:
+                geometry = QRect(snapshot.geometry.topLeft(), window.size())
+                normal = QRect(snapshot.normal_geometry)
+                if normal.isValid():
+                    normal.setSize(window.size())
+                snapshot = replace(snapshot, geometry=geometry, normal_geometry=normal)
+            snapshots.append(snapshot)
+        token.windows = tuple(snapshots)
+        self.restore_after_teaching(token)
 
     def restore_after_teaching(self, token):
         """Restore this manager's snapshot, or raise and keep it retryable/hidden.

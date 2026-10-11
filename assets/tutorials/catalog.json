@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "courses": [
+    "courses/c01.json"
+  ],
+  "fixtures": {
+    "core.interface": "fixtures/core.interface.msd",
+    "core.ink": "fixtures/core.ink.msd",
+    "core.select": "fixtures/core.select.msd",
+    "core.pages": "fixtures/core.pages.msd",
+    "core.files": "fixtures/core.files.msd",
+    "core.finish": "fixtures/core.finish.msd"
+  },
+  "groups": [
+    {
+      "id": "core",
+      "title_key": "teaching_group_core",
+      "courses": [
+        "c01"
+      ]
+    }
+  ]
+}

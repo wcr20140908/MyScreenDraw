@@ -35,7 +35,7 @@ APPLICATION_EVENTS = frozenset({
     'ink.committed', 'ink.erased', 'project.saved', 'mode.changed', 'tool.changed',
     'pen.color_changed', 'pen.width_changed', 'history.undone', 'history.redone',
     'selection.changed', 'selection.transformed', 'whiteboard.entered', 'whiteboard.exited',
-    'page.created', 'page.changed', 'project.opened', 'recovery.previewed', 'recovery.applied', 'export.finished', 'center.visited',
+    'page.created', 'page.changed', 'project.opened', 'recovery.previewed', 'recovery.applied', 'export.finished', 'center.visited', 'practice.resumed',
 })
 
 
@@ -440,7 +440,12 @@ class ApplicationTeachingHost(QObject):
             'pages.next': lambda: self.panel.rail_next,
         }
         for target_id, resolver in bindings.items():
-            reveal = self._reveal_pen if target_id in {'pen.palette', 'pen.width'} else None
+            if target_id in {'pen.palette', 'pen.width'}:
+                reveal = self._reveal_pen
+            elif target_id in {'file.save', 'file.save_as', 'file.open', 'file.recovery', 'export.png'}:
+                reveal = self._reveal_file
+            else:
+                reveal = None
             self.registry.register(target_id, resolver, reveal=reveal)
         self.presenter = TeachingPresenter(
             self.catalog, session_id=request.paths.session_id, registry=self.registry,
@@ -450,14 +455,28 @@ class ApplicationTeachingHost(QObject):
                             'open_tools_panel': self._reveal_tools},
             on_progress=self._record_progress,
             pause_action=self.pause_requested.emit,
-            manage_window=self.panel.lifecycle.register_tool_window,
+            layout_obstacles=self._layout_obstacles, restack_window=self.panel.raise_floating,
+            manage_window=self.panel.lifecycle.register_teaching_window,
             unmanage_window=self.panel.lifecycle.unregister_tool_window)
+        self.presenter.controller.set_practice_session(True)
         self.panel.teaching_events = self.presenter.events
         self.panel.teaching_presenter = self.presenter
         self.presenter.exit_requested.connect(self.exit_requested)
         self.presenter.failed.connect(self.failed)
         self.panel.exit_requested.disconnect(module.QApplication.quit)
         self.panel.exit_requested.connect(self.exit_requested)
+
+    def _layout_obstacles(self):
+        names = ('toolbar_window', 'logo_window', 'menu_panel', 'select_panel', 'page_rail',
+                 'settings_panel', 'text_panel', 'calc_panel', 'roster_panel',
+                 'thumbnail_panel', 'mini_timer')
+        windows = [getattr(self.panel, name, None) for name in names]
+        if self.panel.main_frame.isVisible():
+            windows.append(self.panel)
+        return tuple(window.frameGeometry() for window in windows
+                     if window is not None and not sip.isdeleted(window)
+                     and window.isWindow() and window.isVisible()
+                     and not window.frameGeometry().isEmpty())
 
     def _reveal_tools(self):
         self.panel.show_only_sub(self.panel.tools_sub)
@@ -605,7 +624,10 @@ class ApplicationTeachingHost(QObject):
                     self._hidden_token, self._center_token = token, None
                     self.presenter.pause()
                 else:
-                    self.panel.lifecycle.restore_after_teaching(token)
+                    if self._switch_pending:
+                        self.panel.lifecycle.restore_practice_after_chapter_change(token)
+                    else:
+                        self.panel.lifecycle.restore_after_teaching(token)
                     self._center_token = None
                     control = self._center_end_control
                     if self._closed:
@@ -665,6 +687,8 @@ class ApplicationTeachingHost(QObject):
             raise ValueError('practice fixture could not be prepared')
         self.panel.project_path = None
         self.panel.project_dirty = False
+        from .core_fixtures import prepare_core_fixture
+        prepare_core_fixture(self.panel, self.loader, fixture, self.request.paths)
 
     def activate(self):
         if self._closed or not self.context.ui_active:
@@ -700,10 +724,19 @@ class ApplicationTeachingHost(QObject):
             for window in tuple(self._center_windows):
                 if not sip.isdeleted(window): window.show()
             return
+        was_paused = self.presenter.engine.phase == 'paused'
+        prior_step = (self.presenter.engine.chapter_id, self.presenter.engine.current_step_id)
         if self._hidden_token is not None:
             self.panel.lifecycle.restore_after_teaching(self._hidden_token)
             self._hidden_token = None
         self.presenter.resume()
+        if (was_paused and self.presenter.engine.phase == 'running'
+                and prior_step == (self.presenter.engine.chapter_id, self.presenter.engine.current_step_id)):
+            events = self.presenter.events
+            operation = events.begin_operation('practice.resumed')
+            if operation is not None:
+                QTimer.singleShot(0, lambda: not self._closed and events.emit_result(
+                    operation, 'practice.resumed', 'success', {}))
 
     def _record_progress(self, chapter_id, status, compat_revision):
         self._on_progress(chapter_id, status, compat_revision)
@@ -979,7 +1012,7 @@ class TeachingCoordinator(QObject):
         hint.start_requested.connect(lambda: self._start_context_hint(offer))
         hint.dismissed.connect(lambda: self._dismiss_context_hint(offer))
         hint.destroyed.connect(lambda: self._context_hint_destroyed(hint, offer))
-        self.panel.lifecycle.register_tool_window(hint)
+        self.panel.lifecycle.register_teaching_window(hint)
         hint.show()
         return not sip.isdeleted(hint) and hint.isVisible() and self._hint_offer is offer
 
@@ -1027,7 +1060,7 @@ class TeachingCoordinator(QObject):
             self.center.start_requested.connect(self.start)
             self.center.context_hints_requested.connect(self.set_context_hints_enabled)
             self.center.reset_requested.connect(self.reset_progress)
-            self.panel.lifecycle.register_tool_window(self.center)
+            self.panel.lifecycle.register_teaching_window(self.center)
         self._refresh_center()
         self.center.show()
         return True
@@ -1072,8 +1105,12 @@ class TeachingCoordinator(QObject):
         return persisted
 
     def maybe_show_welcome(self):
-        return (False if self._closed or self._welcome_deferred_to_next_start
-                else self.welcome.maybe_show(self.readiness()))
+        if self._closed or self._welcome_deferred_to_next_start:
+            return False
+        shown = self.welcome.maybe_show(self.readiness())
+        if shown and self.welcome.dialog is not None and not sip.isdeleted(self.welcome.dialog):
+            self.panel.lifecycle.register_teaching_window(self.welcome.dialog)
+        return shown
 
     def request_startup_welcome(self):
         if (self._closed or self._welcome_deferred_to_next_start
@@ -1208,7 +1245,7 @@ class TeachingCoordinator(QObject):
         box.setTextFormat(Qt.TextFormat.PlainText)
         box.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         box.setModal(False)
-        self.panel.lifecycle.register_tool_window(box)
+        self.panel.lifecycle.register_teaching_window(box)
         self._notices.append(box)
         if recovery:
             from PyQt6.QtCore import QProcess

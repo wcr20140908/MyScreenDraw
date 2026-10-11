@@ -706,6 +706,7 @@ _BASE.update({
         '이 단계의 안내에 따라 작업을 완료하세요.',
         'この手順の説明に従って操作してください。',
     ),
+    'teaching_practice_badge': ('独立练习', 'Independent practice', 'Exercice indépendant', 'Práctica independiente', 'Separate Übung', 'Отдельное упражнение', '독립 연습', '独立した練習'),
     'teaching_entry': ('软件使用教学', 'Software tutorials', 'Tutoriels du logiciel', 'Tutoriales del programa', 'Software-Tutorials', 'Обучение работе с программой', '소프트웨어 사용 안내', 'ソフトウェアの使い方'),
     'teaching_welcome_title': ('学习使用 MyScreenDraw', 'Learn to use MyScreenDraw', 'Découvrez MyScreenDraw', 'Aprenda a usar MyScreenDraw', 'MyScreenDraw kennenlernen', 'Научитесь работать с MyScreenDraw', 'MyScreenDraw 사용법 알아보기', 'MyScreenDraw の使い方を学びましょう'),
     'teaching_welcome_body': (
@@ -767,6 +768,9 @@ _BASE.update({
         'チュートリアル開始前の作業環境を復元できませんでした。',
     ),
 })
+
+from teaching.core_copy import CORE_COPY
+_BASE.update(CORE_COPY)
 
 # 每个条目都必须给全 8 种语言：漏一个就在导入时炸掉，而不是在课堂上显示成英文 key。
 for _key, _values in _BASE.items():

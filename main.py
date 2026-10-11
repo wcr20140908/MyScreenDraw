@@ -369,6 +369,12 @@ def teaching_blocks_updates(panel):
             or coordinator is not None and coordinator.active)
 
 
+def teaching_floating_windows(panel):
+    lifecycle = getattr(panel, "lifecycle", None)
+    windows = getattr(lifecycle, "teaching_windows", None)
+    return list(windows()) if callable(windows) else []
+
+
 @contextlib.contextmanager
 def teaching_native_dialog(panel):
     presenter = getattr(panel, "teaching_presenter", None)
@@ -10334,21 +10340,35 @@ class ControlPanel(QWidget):
         self.refresh_page_thumbnails()
 
     def toggle_whiteboard(self):
-        if self.canvas.whiteboard_mode:
-            self.canvas.exit_whiteboard()
-            self.select_panel.hide()
-        else:
-            self.canvas.enter_whiteboard()
-            self.select_panel.hide()
-        self.update_whiteboard_ui()
-        self.heartbeat_refresh()
+        previous = self.canvas.whiteboard_mode
+        name = "whiteboard.exited" if previous else "whiteboard.entered"
+        with teaching_document_operation(self, name) as (events, operation):
+            with events.suppress() if events is not None else contextlib.nullcontext():
+                if previous:
+                    self.canvas.exit_whiteboard()
+                    self.select_panel.hide()
+                else:
+                    self.canvas.enter_whiteboard()
+                    self.select_panel.hide()
+                self.update_whiteboard_ui()
+                self.heartbeat_refresh()
+            if events is not None and previous != self.canvas.whiteboard_mode:
+                events.emit_result(operation, name, "success",
+                    {"whiteboard_mode": self.canvas.whiteboard_mode, "pages": len(self.canvas.pages)})
         if self.canvas.whiteboard_mode:
             self.maybe_show_teaching_context_hint("whiteboard.pages")
 
     def new_whiteboard_page(self):
-        self.canvas.new_page()
-        self.update_whiteboard_ui()
-        self.select_panel.hide()
+        before = len(self.canvas.pages)
+        with teaching_document_operation(self, "page.created") as (events, operation):
+            with events.suppress() if events is not None else contextlib.nullcontext():
+                self.canvas.new_page()
+                self.update_whiteboard_ui()
+                self.select_panel.hide()
+            if events is not None and len(self.canvas.pages) > before:
+                events.emit_result(operation, "page.created", "success",
+                    {"page": self.canvas.current_page + 1, "pages": len(self.canvas.pages),
+                     "page_id": self.canvas._page_id})
 
     def delete_whiteboard_page(self):
         if not self.canvas or not self.canvas.whiteboard_mode:
@@ -10389,9 +10409,16 @@ class ControlPanel(QWidget):
         if offset > 0 and self.canvas.current_page >= len(self.canvas.pages) - 1:
             notify_user(self, tr("page_list"), tr("last_page"), level="information")
             return
-        self.canvas.switch_page(offset)
-        self.update_whiteboard_ui()
-        self.select_panel.hide()
+        previous = self.canvas.current_page
+        with teaching_document_operation(self, "page.changed") as (events, operation):
+            with events.suppress() if events is not None else contextlib.nullcontext():
+                self.canvas.switch_page(offset)
+                self.update_whiteboard_ui()
+                self.select_panel.hide()
+            if events is not None and self.canvas.current_page != previous:
+                events.emit_result(operation, "page.changed", "success",
+                    {"previous_page": previous + 1, "page": self.canvas.current_page + 1,
+                     "pages": len(self.canvas.pages), "page_id": self.canvas._page_id})
 
     def toggle_board_style(self):
         self.canvas.toggle_board_style()
@@ -12349,7 +12376,7 @@ class ControlPanel(QWidget):
         lifecycle = getattr(self, "lifecycle", None)
         if lifecycle is not None and lifecycle.state in (LifecycleState.HIDDEN, LifecycleState.QUITTING):
             return
-        floatings = [
+        floatings = teaching_floating_windows(self) + [
             w for w in (
                 getattr(self, "menu_panel", None),
                 getattr(self, "select_panel", None),
@@ -13193,7 +13220,7 @@ class ControlPanel(QWidget):
         选中面板（复制/删除那一条）紧随其后，主面板在浮窗之下——主面板是常驻的，
         任何临时浮窗都该盖在它上面。
         """
-        order = [
+        order = teaching_floating_windows(self) + [
             getattr(self, "text_panel", None),
             getattr(self, "settings_panel", None),
             getattr(self, "select_panel", None),
@@ -14050,7 +14077,8 @@ class ControlPanel(QWidget):
             ok, outcome, details, preview = self._offer_autosave_restore_result(allow_private=allow_private)
             if events is not None:
                 if preview is not None:
-                    events.emit_result(preview_operation, "recovery.previewed", "success", preview)
+                    preview_details = dict(preview, returned_without_restore=outcome == "cancelled")
+                    events.emit_result(preview_operation, "recovery.previewed", "success", preview_details)
                 events.emit_result(restore_operation, "recovery.applied", outcome, details)
             return ok
 
@@ -14352,12 +14380,15 @@ class ControlPanel(QWidget):
             data = make_project_data(pages=pages, current_page=self.canvas.current_page, whiteboard_mode=self.canvas.whiteboard_mode, board_style=self.canvas.board_style, app_version=APP_VERSION, metadata={"title": os.path.basename(path)})
             atomic_write_project(path, data)
             self.project_path = path
+            if getattr(self, "runtime_context", RUNTIME_CONTEXT).paths.practice:
+                self._teaching_last_saved_project = path
             self.project_dirty = False
             self._saved_document_signature = self.canvas.document_signature()
             self.setWindowTitle(f"{tr('app')} - {os.path.basename(path)}")
             track_event("project_saved", path=os.path.basename(path), pages=len(pages))
             if events is not None:
-                events.emit_result(operation, "project.saved", "success", {"pages": len(pages)})
+                events.emit_result(operation, "project.saved", "success",
+                                   {"pages": len(pages), "path": os.path.basename(path)})
             return True
         except (OSError, ValueError, TypeError) as exc:
             if events is not None:
@@ -14481,6 +14512,8 @@ class ControlPanel(QWidget):
             pages = [deserialize_page(page) for page in data["pages"]]
             if confirm_unsaved and not self.confirm_unsaved_changes(tr("open_project")):
                 return False, "cancelled", {}
+            saved = getattr(self, "_teaching_last_saved_project", None)
+            reopened_saved = saved is not None and Path(path) == Path(saved)
             cv = self.canvas
             cv._cancel_all_pointers()
             cv._cancel_smart_recognition(drop_pending=True)
@@ -14501,7 +14534,8 @@ class ControlPanel(QWidget):
             self.update_whiteboard_ui()
             self.update_history_ui()
             track_event("project_opened", path=os.path.basename(path), pages=len(pages))
-            return True, "success", {"pages": len(pages), "path": os.path.basename(path)}
+            return True, "success", {"pages": len(pages), "path": os.path.basename(path),
+                                     "reopened_saved": reopened_saved}
         except (OSError, ValueError, TypeError, KeyError) as exc:
             notify_user(self, tr("open_failed"), runtime_io_message(exc, path), level="warning", exc=exc)
             return False, "failed", {}
