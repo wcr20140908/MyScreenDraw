@@ -53,9 +53,12 @@ _ENVELOPE_KEYS = frozenset({
 _MESSAGE_TYPES = frozenset({
     "hello", "ready", "activated", "control", "chapter_state", "state_ack",
     "error", "stopping", "stopped",
+    "center_request", "center_state", "center_close", "center_closed",
+    "chapter_request", "chapter_offer", "chapter_ready", "chapter_commit",
 })
 _CONTROL_ACTIONS = frozenset({"activate", "pause", "resume", "stop"})
-_PAYLOAD_IDENTIFIERS = ("course_id", "chapter_id", "step_id", "phase")
+_PAYLOAD_IDENTIFIERS = ("course_id", "chapter_id", "step_id", "phase",
+                        "center_id", "switch_id", "from_chapter_id")
 _HEADER = struct.Struct(">I")
 
 

@@ -10103,6 +10103,8 @@ class ControlPanel(QWidget):
             self.select_panel.hide()
         self.update_whiteboard_ui()
         self.heartbeat_refresh()
+        if self.canvas.whiteboard_mode:
+            self.maybe_show_teaching_context_hint("whiteboard.pages")
 
     def new_whiteboard_page(self):
         self.canvas.new_page()
@@ -10400,6 +10402,10 @@ class ControlPanel(QWidget):
         return self.teaching_coordinator
 
     def open_teaching_center(self):
+        if self.runtime_context.paths.practice:
+            host = getattr(self, "teaching_host", None)
+            if host is not None:
+                return host.request_center()
         self.show_only_sub(None)
         coordinator = self._ensure_teaching_coordinator()
         if coordinator is not None:
@@ -10410,6 +10416,14 @@ class ControlPanel(QWidget):
     def maybe_show_teaching_welcome(self):
         coordinator = self._ensure_teaching_coordinator()
         return coordinator.request_startup_welcome() if coordinator is not None else False
+
+    def maybe_show_teaching_context_hint(self, context_id):
+        if self.runtime_context.paths.practice:
+            return False
+        if QApplication.platformName() == "offscreen" and self.teaching_coordinator is None:
+            return False
+        coordinator = self._ensure_teaching_coordinator()
+        return coordinator.request_context_hint(context_id) if coordinator is not None else False
 
     def setup_file_sub(self):
         """Build one flat file panel; project/import/export remain distinct groups."""
@@ -10695,7 +10709,9 @@ class ControlPanel(QWidget):
         with teaching_document_operation(self, "export.finished") as (events, operation):
             self.show_only_sub(None)
             self.refresh_ui()
-            return self._export_pages_with_result(fmt, events, operation)
+            result = self._export_pages_with_result(fmt, events, operation)
+        self.maybe_show_teaching_context_hint("file.export")
+        return result
 
     def setup_marker_sub(self):
         grid = QGridLayout(); grid.setSpacing(4)
@@ -10968,6 +10984,13 @@ class ControlPanel(QWidget):
         self.raise_floating(self.menu_panel)
         if hasattr(self, "timer_display"):
             self.update_timer_ui()      # 计时面板开/关联动迷你计时器显隐
+        contexts = {self.annotate_sub: "toolbar.pen", self.draw_sub: "toolbar.pen",
+                    self.eraser_sub: "toolbar.eraser", self.shape_sub: "shapes.create",
+                    self.file_sub: "file.projects", self.aid_sub: "tools.measure",
+                    self.timer_sub: "tools.timer"}
+        context_id = contexts.get(target)
+        if context_id is not None:
+            self.maybe_show_teaching_context_hint(context_id)
 
     def position_menu_panel(self):
         x, y = self._floating_anchor(self.menu_panel.width(), self.menu_panel.height(), gap=6,
@@ -11083,6 +11106,8 @@ class ControlPanel(QWidget):
             self.set_active_tool(button)
             self.canvas._emit_teaching_result(operation, "tool.changed",
                                               {"tool": state, "drawing_mode": self.canvas.is_drawing_mode})
+            if state == "SELECT":
+                self.maybe_show_teaching_context_hint("toolbar.select")
             return
         self.canvas.finish_active_ink()
         self.canvas._cancel_smart_recognition(drop_pending=True)  # 切工具：取消上一笔的延迟识别
@@ -11128,6 +11153,8 @@ class ControlPanel(QWidget):
         # 调用方各自 track_event("tool_changed")，此处不再重复记录
         self.canvas._emit_teaching_result(operation, "tool.changed",
                                           {"tool": state, "drawing_mode": self.canvas.is_drawing_mode})
+        if state == "SELECT":
+            self.maybe_show_teaching_context_hint("toolbar.select")
 
     def _tick_laser_fade(self):
         if self.canvas and self.canvas.draw_state == "LASER":
@@ -12141,6 +12168,7 @@ class ControlPanel(QWidget):
         self.raise_floating(panel)
         self.heartbeat_refresh()
         track_event("settings_opened")
+        self.maybe_show_teaching_context_hint("interface.settings")
 
     def place_settings_panel(self):
         """把设置页摆到「不压住主面板」的落点上，可以反复调。
@@ -13659,6 +13687,7 @@ class ControlPanel(QWidget):
 
     def open_recovery_from_file_panel(self):
         """An explicit manual entry may preview only this practice's private history."""
+        self.maybe_show_teaching_context_hint("file.recovery")
         if self.runtime_context.paths.practice and not self.runtime_context.ui_active:
             return False
         with teaching_document_action(self, ("recovery.previewed", "recovery.applied")):
@@ -14006,6 +14035,7 @@ class ControlPanel(QWidget):
             return self.save_project_as()
 
     def import_media_from_file_panel(self):
+        self.maybe_show_teaching_context_hint("file.import")
         with teaching_native_dialog(self):
             self.show_only_sub(None)
             return self.import_media()
@@ -14097,13 +14127,13 @@ class ControlPanel(QWidget):
             return ok
 
 
-    def _open_project_from_path_result(self, path):
+    def _open_project_from_path_result(self, path, *, confirm_unsaved=True):
         self._document_transition_active = True
         try:
             path = runtime_file_path(path)
             data = normalize_project_data(read_json_maybe_gz(path), kind=PROJECT_KIND)
             pages = [deserialize_page(page) for page in data["pages"]]
-            if not self.confirm_unsaved_changes(tr("open_project")):
+            if confirm_unsaved and not self.confirm_unsaved_changes(tr("open_project")):
                 return False, "cancelled", {}
             cv = self.canvas
             cv._cancel_all_pointers()
@@ -14131,6 +14161,13 @@ class ControlPanel(QWidget):
             return False, "failed", {}
         finally:
             self._document_transition_active = False
+
+    def load_teaching_fixture(self, path):
+        """Trusted chapter preparation may replace only this child document."""
+        if (not self.runtime_context.paths.practice or not self.runtime_context.ui_active
+                or self.teaching_presenter is None or self._document_transition_active):
+            return False
+        return self._open_project_from_path_result(path, confirm_unsaved=False)[0]
 
     def restore_from_restart(self, path):
         """托盘「重启软件」把当前工作存进临时文件再拉起新进程，新进程从这里接回。
@@ -14554,6 +14591,7 @@ class ControlPanel(QWidget):
         if not self._refocus_input():
             QTimer.singleShot(0, self._refocus_input)
         track_event("text_editor_opened", has_formula=bool(item.get("formula")))
+        self.maybe_show_teaching_context_hint("text.edit")
 
     def close_text_input(self):
         panel = getattr(self, "text_panel", None)

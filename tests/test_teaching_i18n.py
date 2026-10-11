@@ -27,6 +27,10 @@ WIDGET_KEYS = frozenset({
     "teaching_filter_unfinished",
     "teaching_course_progress",
     "teaching_context_hints",
+    "teaching_chapter_switch_confirm",
+    "teaching_context_hint_title",
+    "teaching_context_hint_body",
+    "teaching_context_hint_later",
     "teaching_reset_progress",
     "teaching_reset_confirm",
     "teaching_reset_welcome",
@@ -73,12 +77,12 @@ INTEGRATION_KEYS = frozenset({
 })
 
 FIXED_KEYS = WIDGET_KEYS | INTEGRATION_KEYS
-FORMAT_VALUES = {"current": 2, "completed": 3, "total": 7}
+FORMAT_VALUES = {"current": 2, "completed": 3, "total": 7, "chapter": "Practice chapter"}
 
 
 class TeachingI18nTests(unittest.TestCase):
     def test_all_fixed_keys_exist_in_all_eight_languages(self):
-        self.assertEqual(len(FIXED_KEYS), 49)
+        self.assertEqual(len(FIXED_KEYS), 53)
         self.assertEqual(i18n._LANGS, LANGUAGES)
         self.assertEqual(set(STRINGS), set(LANGUAGES))
         for language in LANGUAGES:
@@ -136,6 +140,7 @@ class TeachingI18nTests(unittest.TestCase):
                     expected = {
                         "teaching_progress": {"current", "total"},
                         "teaching_course_progress": {"completed", "total"},
+                        "teaching_context_hint_body": {"chapter"},
                     }.get(key, set())
                     self.assertEqual(fields, english_fields)
                     self.assertEqual(fields, expected)

@@ -98,6 +98,7 @@ class FilePanelTests(unittest.TestCase):
             save_project=lambda: calls.append(("save",)) or True,
             save_project_as=lambda: calls.append(("save_as",)) or True,
             import_media=lambda: calls.append(("import",)) or None,
+            maybe_show_teaching_context_hint=lambda context: calls.append(("hint", context)) or False,
         )
         self.main.ControlPanel.open_project_from_file_panel(panel)
         self.main.ControlPanel.save_project_from_file_panel(panel)
@@ -106,7 +107,8 @@ class FilePanelTests(unittest.TestCase):
         self.assertEqual(
             calls,
             [("close", None), ("open",), ("close", None), ("save",),
-             ("close", None), ("save_as",), ("close", None), ("import",)],
+             ("close", None), ("save_as",), ("hint", "file.import"),
+             ("close", None), ("import",)],
         )
 
     def test_save_as_cancel_preserves_current_path(self):

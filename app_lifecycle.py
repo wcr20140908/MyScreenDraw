@@ -127,13 +127,17 @@ class _BackgroundWindowGuard(QObject):
             return False
         suspended = getattr(manager.panel, "_teaching_suspended", False)
         context = getattr(manager.panel, "runtime_context", None)
+        paths = getattr(context, "paths", None)
         inactive = context is not None and not context.ui_active
         if (event.type() == QEvent.Type.Show and watched.isWindow()
                 and manager._owns_window(watched)):
             allowed_restore = watched in getattr(manager, "_teaching_restore_windows", ())
             allowed_recovery = (suspended and not inactive
                                 and watched in getattr(manager, "_teaching_recovery_windows", ()))
-            if not (allowed_restore or allowed_recovery) and (suspended or inactive or (
+            allowed_practice = (suspended and not inactive and context is not None
+                                and getattr(paths, "practice", False) is True
+                                and watched in manager._practice_teaching_windows)
+            if not (allowed_restore or allowed_recovery or allowed_practice) and (suspended or inactive or (
                     manager.state == LifecycleState.HIDDEN
                     and not manager._allowed_in_background(watched))):
                 watched.hide()
@@ -181,6 +185,7 @@ class AppLifecycleManager:
         self._teaching_restoring = False
         self._teaching_restore_windows = weakref.WeakSet()
         self._teaching_recovery_windows = weakref.WeakSet()
+        self._practice_teaching_windows = weakref.WeakSet()
         self._teaching_timer_phases = []
         self._window_guard = _BackgroundWindowGuard(self)
         self.app.installEventFilter(self._window_guard)
@@ -572,6 +577,19 @@ class AppLifecycleManager:
         self._tool_windows.discard(window)
         self._background_allowed_windows.discard(window)
         self._teaching_recovery_windows.discard(window)
+        self._practice_teaching_windows.discard(window)
+
+    def allow_practice_teaching_window(self, window):
+        """Trusted active child views only; original parent UI cannot use this exemption."""
+        context = getattr(self.panel, "runtime_context", None)
+        paths = getattr(context, "paths", None)
+        if (context is None or getattr(paths, "practice", False) is not True or not context.ui_active
+                or QThread.currentThread() != self.panel.thread()
+                or not isinstance(window, QWidget) or sip.isdeleted(window)
+                or not window.isWindow() or not self._owns_window(window)):
+            raise ValueError("An active owned practice teaching window is required")
+        self.register_tool_window(window)
+        self._practice_teaching_windows.add(window)
 
     def allow_teaching_recovery_window(self, window):
         """Trusted parent UI only: broker must already confirm child NotRunning.

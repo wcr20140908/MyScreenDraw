@@ -11,6 +11,7 @@ from PyQt6.QtCore import QObject, QProcess, QProcessEnvironment, QTimer, pyqtSig
 from runtime_paths import RuntimePaths
 from .bootstrap import PracticeRequest
 from .models import TutorialCatalog
+from .session_view import parent_progress_view, require_transaction_id
 from .state import TutorialStateStore
 from .transport import TeachingConnection, TeachingServer
 
@@ -53,6 +54,11 @@ class PracticeSession(QObject):
         self._hello_seen = False
         self._chapter_id: str | None = None
         self._compat_revision: int | None = None
+        self._center_id = None
+        self._resume_on_center_close = False
+        self._supports_center = False
+        self._hidden = False
+        self._switch = None
 
     @property
     def restore_pending(self) -> bool:
@@ -107,6 +113,11 @@ class PracticeSession(QObject):
         self.cleanup_retained = False
         self._token = None
         self._hello_seen = False
+        self._center_id = None
+        self._resume_on_center_close = False
+        self._supports_center = False
+        self._hidden = False
+        self._switch = None
         self._chapter_id, self._compat_revision = chapter_id, course.compat_revision
         self.paths = None
         self._set_phase('starting')
@@ -177,6 +188,13 @@ class PracticeSession(QObject):
                 self.request_resume()
             else:
                 self._send('control', {'action': 'resume'})
+        elif kind in ('center_request', 'center_close', 'chapter_request', 'chapter_ready'):
+            try:
+                {'center_request':self._open_center, 'center_close':self._close_center,
+                 'chapter_request':self._request_chapter, 'chapter_ready':self._chapter_ready}[kind](payload)
+            except (ValueError, KeyError, TypeError):
+                self._error('invalid_center_transition')
+                self.request_stop('invalid_center_transition')
         elif kind == 'chapter_state' and self.phase in ('running', 'paused'):
             self._record_progress(message)
         elif kind in ('stopping', 'stopped') and not payload:
@@ -217,6 +235,9 @@ class PracticeSession(QObject):
         if self.phase not in ('running', 'paused'):
             return False
         generation = self._generation
+        self._hidden = self._hidden or hidden
+        if self._center_id is not None and not hidden:
+            self._resume_on_center_close = False
         self._set_phase('paused')
         if generation != self._generation or self.phase != 'paused':
             return False
@@ -226,10 +247,84 @@ class PracticeSession(QObject):
         if self.phase != 'paused':
             return False
         generation = self._generation
-        self._set_phase('running')
-        if generation != self._generation or self.phase != 'running':
+        self._hidden = False
+        if self._center_id is not None:
+            self._resume_on_center_close = True
+        phase = 'paused' if self._center_id is not None else 'running'
+        self._set_phase(phase)
+        if generation != self._generation or self.phase != phase:
             return False
         return self._send('control', {'action': 'resume'})
+
+    def _open_center(self, payload):
+        if (self.phase not in ('running','paused') or self._center_id is not None
+                or not isinstance(payload,dict) or set(payload)!={'center_id'}):
+            raise ValueError('invalid center request')
+        require_transaction_id(payload['center_id'])
+        view=parent_progress_view(self.catalog,self.state_store)
+        self._center_id=payload['center_id']
+        self._resume_on_center_close=self.phase=='running'
+        self._supports_center=True
+        generation=self._generation
+        self._set_phase('paused')
+        if generation==self._generation and self.phase=='paused':
+            self._send('center_state',{'center_id':self._center_id,'view':view,
+                'resume_on_close':self._resume_on_center_close,'hidden':self._hidden})
+
+    def _close_center(self, payload):
+        if (self.phase!='paused' or self._switch is not None or not isinstance(payload,dict)
+                or set(payload)!={'center_id'} or payload['center_id']!=self._center_id
+                or self._center_id is None):
+            raise ValueError('invalid center close')
+        center=self._center_id;self._center_id=None
+        resume=self._resume_on_center_close and not self._hidden
+        self._resume_on_center_close=False
+        generation=self._generation
+        phase = 'running' if resume else 'paused'
+        self.phase = phase
+        # Commit the wire transition before observers can send a later control.
+        sent = self._send('center_closed', {'center_id': center, 'resume': resume, 'hidden': self._hidden})
+        if sent and generation == self._generation and self.phase == phase:
+            self._set_phase(phase)
+
+    def _request_chapter(self, payload):
+        if (self.phase!='paused' or self._switch is not None or self._hidden
+                or not isinstance(payload,dict)
+                or set(payload)!={'center_id','switch_id','from_chapter_id','course_id','chapter_id'}
+                or self._center_id is None or payload['center_id']!=self._center_id
+                or payload['from_chapter_id']!=self._chapter_id):
+            raise ValueError('invalid chapter request')
+        require_transaction_id(payload['switch_id'])
+        course=self.catalog.course_by_id(payload['course_id'])
+        if not any(chapter.id==payload['chapter_id'] for chapter in course.chapters):
+            raise ValueError('unknown chapter')
+        offer={key:payload[key] for key in ('center_id','switch_id','course_id','chapter_id')}
+        offer.update(revision=course.revision,compat_revision=course.compat_revision)
+        self._switch=offer
+        self._arm('chapter_switch',self.activation_timeout_ms,self._chapter_timeout)
+        generation=self._generation
+        self._set_phase('switching')
+        if generation==self._generation and self.phase=='switching':
+            self._send('chapter_offer',dict(offer))
+
+    def _chapter_ready(self, payload):
+        expected=({key:self._switch[key] for key in ('center_id','switch_id','course_id','chapter_id')}
+                  if self._switch is not None else None)
+        if self.phase!='switching' or not isinstance(payload,dict) or payload!=expected:
+            raise ValueError('invalid chapter ready')
+        self._chapter_id=self._switch['chapter_id']
+        self._compat_revision=self._switch['compat_revision']
+        self._switch=None;self._center_id=None;self._resume_on_center_close=False
+        self._cancel('chapter_switch')
+        generation=self._generation
+        self.phase = 'running'
+        sent = self._send('chapter_commit', dict(payload))
+        if sent and generation == self._generation and self.phase == 'running':
+            self._set_phase('running')
+
+    def _chapter_timeout(self):
+        self._error('chapter_switch_timeout')
+        self.request_stop('chapter_switch_timeout')
 
     def _record_progress(self, message: dict) -> None:
         payload = message['payload']
@@ -247,8 +342,10 @@ class PracticeSession(QObject):
                                                        compat_revision=payload['compat_revision'])
         except (ValueError, OSError):
             persisted = False
-        self._send('state_ack', {'message_id': message['message_id'],
-                               'chapter_id': payload['chapter_id'], 'persisted': bool(persisted)})
+        ack={'message_id':message['message_id'],'chapter_id':payload['chapter_id'],'persisted':bool(persisted)}
+        if self._supports_center:
+            ack['view']=parent_progress_view(self.catalog,self.state_store)
+        self._send('state_ack',ack)
         if persisted:
             self.progress_saved.emit(dict(payload))
 
