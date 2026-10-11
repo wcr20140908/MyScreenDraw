@@ -317,7 +317,7 @@ from app_lifecycle import AppLifecycleManager, LifecycleState
 import toolbar_windows
 from release_notice import ReleaseNoticeCard, begin_notice_session, normalize_notice_state
 from chalk_texture import make_chalk_texture
-from themed_controls import apply_combo_theme, controls_stylesheet
+from themed_controls import apply_combo_theme, controls_stylesheet, theme_palette
 from pen_defaults import PenDefaultsEditor, normalize_presets, capture_current, apply_preset
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QLabel, QPushButton,
                              QToolButton, QCheckBox,
@@ -8875,6 +8875,46 @@ class _TextInputEdit(QTextEdit):
         super().focusOutEvent(event)
 
 
+class _ColorSchemeFocusRing(QWidget):
+    """Paint an isolated focus ring without changing a button's geometry or input."""
+    def __init__(self, button, panel):
+        super().__init__(button)
+        self.panel = panel
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.hide()
+        button.installEventFilter(self)
+
+    def sync(self):
+        button = self.parentWidget()
+        self.setGeometry(button.rect())
+        visible = self.panel.color_scheme != "classic" and button.hasFocus()
+        self.setVisible(visible)
+        if visible:
+            self.raise_()
+            self.update()
+
+    def eventFilter(self, obj, event):
+        if event.type() in (QEvent.Type.FocusIn, QEvent.Type.FocusOut, QEvent.Type.Resize):
+            self.sync()
+        return False
+
+    def paintEvent(self, event):
+        if self.panel.color_scheme == "classic":
+            return
+        theme = self.panel.theme
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(2, 2, -2, -2)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        # Neutral pixels separate focus from both plain and selected backgrounds.
+        painter.setPen(QPen(QColor(theme["surface"]), 4))
+        painter.drawRoundedRect(rect, 4, 4)
+        painter.setPen(QPen(QColor(theme["focus"]), 2))
+        painter.drawRoundedRect(rect, 4, 4)
+
+
 class ControlPanel(QWidget):
     exit_requested = pyqtSignal()
     # F12 由 pynput 在它自己的线程里回调；隐藏窗口/停计时器必须回到 Qt 主线程做，
@@ -8932,6 +8972,134 @@ class ControlPanel(QWidget):
         },
     }
 
+    # Independent from light/dark; classic keeps the legacy token dictionaries intact.
+    COLOR_SCHEMES = {
+        "classic": "color_scheme_classic",
+        "graphite_teal": "color_scheme_graphite_teal",
+        "slate_blue": "color_scheme_slate_blue",
+        "warm_indigo": "color_scheme_warm_indigo",
+    }
+
+    # Approved light/dark roles from docs/ui-main-panel-color-research-2026-10-09.md.
+    COLOR_SCHEME_TOKENS = {
+        "graphite_teal": {
+            "light": {
+                "surface": "#f5f7fa",
+                "panel": "#ffffff",
+                "button": "#e8eef3",
+                "border": "#647787",
+                "text": "#17212b",
+                "muted": "#4a5d6b",
+                "accent": "#00746f",
+                "selected": "#00746f",
+                "on_selected": "#ffffff",
+                "hover": "#dae6ec",
+                "disabled": "#6b7a88",
+                "focus": "#1d4ed8",
+                "danger": "#b42318",
+                "on_danger": "#ffffff",
+            },
+            "dark": {
+                "surface": "#20272f",
+                "panel": "#28323d",
+                "button": "#34414f",
+                "border": "#a3b4c4",
+                "text": "#f5f7fa",
+                "muted": "#c5d0da",
+                "accent": "#5eead4",
+                "selected": "#5eead4",
+                "on_selected": "#102a28",
+                "hover": "#435365",
+                "disabled": "#93a4b4",
+                "focus": "#93c5fd",
+                "danger": "#ffc1b8",
+                "on_danger": "#3b0a06",
+            },
+        },
+        "slate_blue": {
+            "light": {
+                "surface": "#f4f7fb",
+                "panel": "#ffffff",
+                "button": "#e8eef7",
+                "border": "#66788f",
+                "text": "#17243a",
+                "muted": "#4b5d75",
+                "accent": "#2456a6",
+                "selected": "#2456a6",
+                "on_selected": "#ffffff",
+                "hover": "#d7e4f5",
+                "disabled": "#6a7a8f",
+                "focus": "#6d28d9",
+                "danger": "#b42318",
+                "on_danger": "#ffffff",
+            },
+            "dark": {
+                "surface": "#1b2533",
+                "panel": "#253246",
+                "button": "#31425a",
+                "border": "#a0b2cb",
+                "text": "#f5f8fd",
+                "muted": "#c9d5e5",
+                "accent": "#93c5fd",
+                "selected": "#93c5fd",
+                "on_selected": "#102a4c",
+                "hover": "#405574",
+                "disabled": "#a0acc0",
+                "focus": "#5eead4",
+                "danger": "#ffc1b8",
+                "on_danger": "#3b0a06",
+            },
+        },
+        "warm_indigo": {
+            "light": {
+                "surface": "#f7f5f0",
+                "panel": "#fffefa",
+                "button": "#ece9e2",
+                "border": "#746f67",
+                "text": "#28251f",
+                "muted": "#5d574e",
+                "accent": "#4f46e5",
+                "selected": "#4f46e5",
+                "on_selected": "#ffffff",
+                "hover": "#e1ded6",
+                "disabled": "#7a746a",
+                "focus": "#006d75",
+                "danger": "#b42318",
+                "on_danger": "#ffffff",
+            },
+            "dark": {
+                "surface": "#252420",
+                "panel": "#302e29",
+                "button": "#3c3933",
+                "border": "#aba394",
+                "text": "#faf7f0",
+                "muted": "#d0c8ba",
+                "accent": "#c4b5fd",
+                "selected": "#c4b5fd",
+                "on_selected": "#241b4b",
+                "hover": "#4b473f",
+                "disabled": "#a89f90",
+                "focus": "#5eead4",
+                "danger": "#ffc1b8",
+                "on_danger": "#3b0a06",
+            },
+        },
+    }
+
+    @classmethod
+    def theme_for(cls, theme_name, color_scheme="classic"):
+        """Resolve UI colors without changing the legacy light/dark config key."""
+        if not isinstance(theme_name, str) or theme_name not in cls.THEMES:
+            theme_name = "dark"
+        if not isinstance(color_scheme, str) or color_scheme not in cls.COLOR_SCHEME_TOKENS:
+            return dict(cls.THEMES[theme_name])
+        theme = dict(cls.COLOR_SCHEME_TOKENS[color_scheme][theme_name])
+        aliases = {"frame": "surface", "button_hover": "hover", "label": "accent",
+                   "hint": "muted", "active_text": "on_selected", "mode": "selected",
+                   "mode_off": "disabled", "clear": "danger"}
+        theme.update({alias: theme[role] for alias, role in aliases.items()})
+        return theme
+
     def __init__(self, *, runtime=None):
         context = application_runtime(runtime)
         super().__init__()
@@ -8962,7 +9130,8 @@ class ControlPanel(QWidget):
         QApplication.instance().aboutToQuit.connect(self.shutdown_autosave)
         self.color_buttons = []
         self.theme_name = "dark"
-        self.theme = self.THEMES[self.theme_name]
+        self.color_scheme = "classic"
+        self.theme = self.theme_for(self.theme_name, self.color_scheme)
         # --- 外观与系统设置（全部走 collect_settings / load_settings 持久化）---
         # 图标式分体界面是唯一界面（set_ui_mode 只会写 "icon"）。初值也必须是 icon：
         # 各处 `ui_mode == "icon"` 的判断在 load_settings 之前就会跑（白板区显隐后的
@@ -9318,11 +9487,12 @@ class ControlPanel(QWidget):
             "handle": handle,                        # 滑块手柄恒为圆形
         }
 
-    def apply_theme(self):
+    def apply_theme(self, *, relayout=True):
         t = self.theme
+        border = t.get("border", t["accent"])
         rad = self.radius_tokens()
         self.setStyleSheet(f"""
-            QWidget#MainFrame {{ background-color: {t["frame"]}; border-radius: {rad["frame"]}px; border: 2px solid {t["accent"]}; }}
+            QWidget#MainFrame {{ background-color: {t["frame"]}; border-radius: {rad["frame"]}px; border: 2px solid {border}; }}
             /* 普通按钮恢复紧凑高度：min-height 会和上下 padding【相加】，之前写成
                min-height:38 + padding:16 + margin:2，实际每颗按钮至少 56px，竖栏因此
                被拉成截图里近百像素一颗。触控命中不能靠粗暴撑高整个界面。 */
@@ -9332,7 +9502,7 @@ class ControlPanel(QWidget):
             QPushButton:disabled {{ background-color: {t["button"]}; color: {t["mode_off"]}; }}
             QPushButton:checked {{ background-color: {t["accent"]}; color: {t["active_text"]}; }}
             QPushButton#HistoryBtn {{ padding: 8px 2px; margin: 1px 0px; }}
-            QPushButton#ModeBtn {{ background-color: {t["mode"]}; color: white; }}
+            QPushButton#ModeBtn {{ background-color: {t["mode"]}; color: {t.get("on_selected", "white")}; }}
             QPushButton#ActiveTool {{ background-color: {t["accent"]}; color: {t["active_text"]}; }}
             QPushButton#ArrowBtn {{ background-color: {t["button"]}; min-width: {TOUCH_ARROW}px; max-width: {TOUCH_ARROW}px; min-height: {TOUCH_ARROW}px; max-height: {TOUCH_ARROW}px; padding: 0px; font-size: 12px; }}
             QPushButton#SquareBtn {{ min-width: {TOUCH_SQUARE}px; max-width: {TOUCH_SQUARE}px; min-height: {TOUCH_SQUARE}px; max-height: {TOUCH_SQUARE}px; padding: 0px; font-size: 15px; }}
@@ -9347,12 +9517,12 @@ class ControlPanel(QWidget):
             QLabel#MiniTimer {{ background-color: {t["frame"]}; border: 2px solid {t["accent"]}; border-radius: {rad["mini"]}px; font-size: 20px; font-weight: bold; color: {t["accent"]}; font-family: Consolas, "Microsoft YaHei"; padding: 5px 16px; }}
             QLabel#SettingsSection {{ color: {t["accent"]}; font-size: 12px; font-weight: bold; padding: 6px 2px 2px 2px; }}
             QLabel#SettingsHint {{ color: {t["hint"]}; font-size: 10px; padding: 0px 2px 4px 2px; }}
-            QMenu {{ background-color: {t["panel"]}; color: {t["text"]}; border: 1.5px solid {t["accent"]}; border-radius: {rad["button"]}px; padding: 4px; }}
+            QMenu {{ background-color: {t["panel"]}; color: {t["text"]}; border: 1.5px solid {border}; border-radius: {rad["button"]}px; padding: 4px; }}
             QMenu::item {{ padding: 10px 24px; border-radius: {rad["item"]}px; }}
             QMenu::item:selected {{ background-color: {t["accent"]}; color: {t["active_text"]}; }}
             QMenu::item:disabled {{ color: {t["mode_off"]}; }}
-            QToolTip {{ background-color: {t["panel"]}; color: {t["text"]}; border: 1px solid {t["accent"]}; border-radius: {rad["item"]}px; padding: 4px 6px; font-size: 12px; }}
-            .Sub {{ background-color: {t["panel"]}; border-radius: {rad["sub"]}px; border: 1.5px solid {t["accent"]}; padding: 6px; }}
+            QToolTip {{ background-color: {t["panel"]}; color: {t["text"]}; border: 1px solid {border}; border-radius: {rad["item"]}px; padding: 4px 6px; font-size: 12px; }}
+            .Sub {{ background-color: {t["panel"]}; border-radius: {rad["sub"]}px; border: 1.5px solid {border}; padding: 6px; }}
             QSlider {{ min-height: {TOUCH_SLIDER}px; }}
             QSlider::groove:horizontal {{ height: 6px; background: {t["button_hover"]}; border-radius: {rad["groove"]}px; }}
             QSlider::handle:horizontal {{ background: {t["accent"]}; width: {TOUCH_SLIDER_HANDLE}px; height: {TOUCH_SLIDER_HANDLE}px; margin: -{TOUCH_SLIDER_HANDLE // 2 - 3}px 0; border-radius: {rad["handle"]}px; }}
@@ -9372,7 +9542,8 @@ class ControlPanel(QWidget):
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0px; }}
             QListWidget {{ background-color: {t["panel"]}; color: {t["text"]}; border: none; }}
             QColorDialog QPushButton, QColorDialog QLabel {{ font-size: 12px; }}
-        """ + controls_stylesheet(t))
+        """ + controls_stylesheet(t) + self.color_scheme_stylesheet())
+        self.setPalette(theme_palette(t))
         # 子菜单浮窗/选中面板/迷你计时器是独立顶层窗口，主面板的样式表覆盖不到，需各自下发
         for floating in (getattr(self, "menu_panel", None), getattr(self, "select_panel", None),
                          getattr(self, "mini_timer", None), getattr(self, "calc_panel", None),
@@ -9382,8 +9553,7 @@ class ControlPanel(QWidget):
                 floating.setStyleSheet(self.styleSheet())
         if getattr(self, "pen_defaults_editor", None) is not None:
             self.pen_defaults_editor.apply_theme(t)
-        if getattr(self, "update_channel_combo", None) is not None:
-            apply_combo_theme(self.update_channel_combo, t)
+        self._apply_color_scheme_controls()
         # 分体窗口应用主题
         if hasattr(self, 'logo_window') and self.logo_window:
             self.logo_window.apply_theme(t, rad["frame"], int(self.ui_opacity), self._make_logo_icon(32))
@@ -9399,9 +9569,69 @@ class ControlPanel(QWidget):
             # Light mode → offer dark; dark mode → offer light.
             self.btn_theme.setText(tr("dark_theme") if self.theme_name == "light" else tr("light_theme"))
         if hasattr(self, "btn_exit"):
-            self.btn_exit.setStyleSheet(f"background-color: {t['danger']}; color: white;")
+            self.btn_exit.setStyleSheet(f"background-color: {t['danger']}; color: {t.get('on_danger', 'white')};")
+        self._apply_mode_button_theme()
         # 旋转按钮已移除
-        self.repaint_ui_icons()
+        self.repaint_ui_icons(relayout=relayout)
+
+    def color_scheme_stylesheet(self):
+        """Semantic overrides keep shared controls and toolbar modules compatible."""
+        if self.color_scheme == "classic":
+            return ""
+        t = self.theme
+        return f"""
+            QFrame#MainFrame {{ border: 2px solid {t['border']}; }}
+            QPushButton#LogoButton {{ border-color: {t['border']}; }}
+            QComboBox, QSpinBox, QDoubleSpinBox, QLineEdit {{ border-color: {t['border']}; }}
+            QComboBox QAbstractItemView {{ border-color: {t['border']}; }}
+            QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QLineEdit:focus {{ border-color: {t['focus']}; }}
+            QToolButton#IconBtn:hover {{ background-color: {t['hover']}; }}
+            QPushButton:pressed, QToolButton:pressed, QToolButton#IconBtn:pressed,
+            QPushButton:checked, QToolButton:checked {{ background-color: {t['selected']}; color: {t['on_selected']}; }}
+            QPushButton#ActiveTool, QToolButton#IconBtnActive {{ background-color: {t['selected']}; color: {t['on_selected']}; }}
+            QPushButton#ActiveTool:hover, QToolButton#IconBtnActive:hover {{ background-color: {t['selected']}; }}
+            QPushButton:disabled, QToolButton:disabled,
+            QPushButton#ActiveTool:disabled, QToolButton#IconBtnActive:disabled {{ background-color: {t['button']}; color: {t['disabled']}; }}
+            QListWidget::item:selected {{ background-color: {t['selected']}; color: {t['on_selected']}; }}
+        """
+
+    def _apply_color_scheme_controls(self):
+        windows = [self] + [getattr(self, name, None) for name in (
+            "menu_panel", "select_panel", "mini_timer", "calc_panel", "roster_panel",
+            "thumbnail_panel", "text_panel", "settings_panel", "toolbar_window", "logo_window")]
+        toolbar = getattr(self, "toolbar_window", None)
+        logo = getattr(self, "logo_window", None)
+        if logo is not None:
+            logo.logo_btn.setStyleSheet(self.color_scheme_stylesheet())
+        if toolbar is not None:
+            # Child QSS survives ToolbarWindow's internal size/theme reapplication.
+            toolbar.main_frame.setStyleSheet(self.color_scheme_stylesheet())
+        for window in windows:
+            if window is None:
+                continue
+            window.setPalette(theme_palette(self.theme))
+            for combo in window.findChildren(QComboBox):
+                apply_combo_theme(combo, self.theme)
+            for button in window.findChildren(QPushButton) + window.findChildren(QToolButton):
+                ring = getattr(button, "_color_scheme_focus_ring", None)
+                if ring is None and self.color_scheme != "classic":
+                    ring = button._color_scheme_focus_ring = _ColorSchemeFocusRing(button, self)
+                if ring is not None:
+                    ring.sync()
+                if self.color_scheme == "classic":
+                    button._color_scheme_icon_key = None
+
+    def _apply_mode_button_theme(self):
+        if not hasattr(self, "btn_mode"):
+            return
+        t = self.theme
+        enabled = self.canvas is None or self.canvas.is_drawing_mode
+        if self.color_scheme == "classic":
+            background, foreground = t['mode'] if enabled else t['mode_off'], "white"
+        else:
+            background = t['selected'] if enabled else t['button']
+            foreground = t['on_selected'] if enabled else t['text']
+        self.btn_mode.setStyleSheet(f"background-color: {background}; color: {foreground};")
 
     # 图标主面板的按钮清单：(键, 图标名, 提示文案 key, 点击处理器属性名, 对应的经典按钮属性名)
     # 最后一项是【状态镜像源】：经典按钮是唯一状态真相（高亮 / 可用性都写在它身上），
@@ -9659,7 +9889,7 @@ class ControlPanel(QWidget):
         if hasattr(self, 'toolbar_window') and self.toolbar_window:
             self.toolbar_window._relayout_buttons()
 
-    def repaint_ui_icons(self):
+    def repaint_ui_icons(self, *, relayout=True):
         """主题变了就按新的文字色重绘所有图标（亮色主题下白色图标看不见）。"""
         buttons = getattr(self, "icon_buttons", None)
         if not buttons:
@@ -9670,7 +9900,10 @@ class ControlPanel(QWidget):
         for btn in buttons.values():
             name = btn.property("icon_name")
             if name:
-                btn.setIcon(_make_toolbar_icon(name, self.theme["text"], ICON_GLYPH))
+                if self.color_scheme == "classic":
+                    btn.setIcon(_make_toolbar_icon(name, self.theme["text"], ICON_GLYPH))
+                else:
+                    self._sync_scheme_button_icon(btn, name, ICON_GLYPH)
         # 「批注」按钮带颜色点，上面按名字重画会把它抹掉，强制补回来
         self.refresh_annotate_badge(force=True)
 
@@ -9679,12 +9912,14 @@ class ControlPanel(QWidget):
         if hasattr(self, 'toolbar_window') and self.toolbar_window:
             rad = self.radius_tokens()
             self.toolbar_window.apply_theme(self.theme, rad["frame"], self.ui_opacity)
-            self.toolbar_window.refresh_layout()
+            if relayout:
+                self.toolbar_window.refresh_layout()
         if hasattr(self, 'logo_window') and self.logo_window:
             rad = self.radius_tokens()
             self.logo_window.apply_theme(self.theme, rad["frame"], self.ui_opacity,
                                          self._make_logo_icon(self.logo_window.icon_size()))
-            self._sync_split_geometry(follow=not getattr(self, "_toolbar_detached", False))
+            if relayout:
+                self._sync_split_geometry(follow=not getattr(self, "_toolbar_detached", False))
 
     def sync_icon_buttons(self):
         """把经典按钮的状态单向投影到图标按钮上。
@@ -9722,6 +9957,8 @@ class ControlPanel(QWidget):
             if btn.objectName() != want:
                 btn.setObjectName(want)
                 btn.setStyle(btn.style())        # objectName 变了必须重解样式表
+            if self.color_scheme != "classic" and key != "pen":
+                self._sync_scheme_button_icon(btn, btn.property("icon_name"), ICON_GLYPH)
             # 提示跟着经典按钮的文案走：模式键固定显示「鼠标」，白板键在
             # 「进入白板/退出白板」之间来回，写死 tr(key) 会让提示停在旧文案上。
             text = source.text().strip()
@@ -9730,6 +9967,8 @@ class ControlPanel(QWidget):
                 btn.setAccessibleName(text)
                 if key in ("mode", "whiteboard") and btn.text() != text:
                     btn.setText(text)
+        if self.color_scheme != "classic":
+            self.refresh_annotate_badge()
         # 鼠标模式只保留基础入口；进入批注后恢复完整工具集。
         if layout_changed and self.ui_mode == "icon" and hasattr(self, "toolbar_window"):
             self.toolbar_window.refresh_layout()
@@ -10161,10 +10400,26 @@ class ControlPanel(QWidget):
 
     def toggle_theme(self):
         self.theme_name = "light" if self.theme_name == "dark" else "dark"
-        self.theme = self.THEMES[self.theme_name]
-        self.apply_theme()
+        self.theme = self.theme_for(self.theme_name, self.color_scheme)
+        self.apply_theme(relayout=False)
         self.refresh_ui()
+        self.sync_settings_panel()
+        self.save_settings()
         track_event("theme_changed", theme=self.theme_name)
+
+    def set_color_scheme(self, color_scheme, *, persist=True):
+        if not isinstance(color_scheme, str) or color_scheme not in self.COLOR_SCHEMES:
+            return
+        if color_scheme == self.color_scheme:
+            return
+        self.color_scheme = color_scheme
+        self.theme = self.theme_for(self.theme_name, color_scheme)
+        self.apply_theme(relayout=False)
+        self.refresh_ui()
+        self.sync_settings_panel()
+        if persist:
+            self.save_settings()
+
 
     def on_global_key_press(self, key):
         if not self.runtime_context.global_keyboard:
@@ -10286,13 +10541,65 @@ class ControlPanel(QWidget):
         self.annotate_sub_layout.addLayout(grid)
         self.annotate_sub_layout.addWidget(QLabel(tr("annotate_hint")))
 
+    def _scheme_icon(self, icon_name, size, *, active=False, disabled=False,
+                     badge_color=None, rainbow=False):
+        """Supply explicit Qt modes/states; QSS color cannot recolor a QIcon."""
+        from ui_icons import make_ui_pixmap
+        t = self.theme
+        icon = QIcon()
+        pixmaps = {}
+        for mode in (QIcon.Mode.Normal, QIcon.Mode.Active, QIcon.Mode.Selected, QIcon.Mode.Disabled):
+            for state in (QIcon.State.Off, QIcon.State.On):
+                if disabled or mode == QIcon.Mode.Disabled:
+                    foreground = t["disabled"]
+                elif active or mode == QIcon.Mode.Selected or state == QIcon.State.On:
+                    foreground = t["on_selected"]
+                else:
+                    foreground = t["text"]
+                if foreground not in pixmaps:
+                    if badge_color is None:
+                        pixmaps[foreground] = make_ui_pixmap(icon_name, foreground, size, 2.0)
+                    else:
+                        pixmaps[foreground] = self._badged_pixmap(
+                            icon_name, badge_color, size, rainbow, foreground=foreground)
+                icon.addPixmap(pixmaps[foreground], mode, state)
+        return icon
+
+    def _refresh_scheme_button_icon(self, button):
+        spec = getattr(button, "_color_scheme_icon_spec", None)
+        if self.color_scheme != "classic" and spec is not None:
+            name, size, badge_color, rainbow = spec
+            self._sync_scheme_button_icon(button, name, size, badge_color, rainbow)
+
+    def _sync_scheme_button_icon(self, button, icon_name, size, badge_color=None, rainbow=False):
+        if not icon_name:
+            return
+        active = button.objectName() in ("ActiveTool", "IconBtnActive") or button.isDown() or button.isChecked()
+        disabled = not button.isEnabled()
+        t = self.theme
+        badge = QColor(badge_color) if badge_color is not None else None
+        key = (icon_name, size, active, disabled, badge.rgb() if badge is not None else None,
+               rainbow, t["text"], t["on_selected"], t["disabled"], t["frame"])
+        button._color_scheme_icon_spec = (icon_name, size, badge, rainbow)
+        if not getattr(button, "_color_scheme_icon_connected", False):
+            button.pressed.connect(lambda: self._refresh_scheme_button_icon(button))
+            button.released.connect(lambda: self._refresh_scheme_button_icon(button))
+            button._color_scheme_icon_connected = True
+        if key != getattr(button, "_color_scheme_icon_key", None):
+            button.setIcon(self._scheme_icon(icon_name, size, active=active, disabled=disabled,
+                                            badge_color=badge, rainbow=rainbow))
+            button._color_scheme_icon_key = key
+
     def _badged_icon(self, icon_name, color, size, rainbow=False):
+        return QIcon(self._badged_pixmap(icon_name, color, size, rainbow))
+
+    def _badged_pixmap(self, icon_name, color, size, rainbow=False, *, foreground=None):
         """图标右下角加一颗当前颜色的小圆点（外圈用面板底色描边，任何主题下都分得清）。
 
         画在图标里而不是另加控件：主栏按钮的尺寸写死在样式表里，多一个控件就得改宽高。
         """
         from ui_icons import make_ui_pixmap
-        pixmap = make_ui_pixmap(icon_name, self.theme["text"], size, 2.0)
+        pixmap = make_ui_pixmap(icon_name, foreground or self.theme["text"], size, 2.0)
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         radius = size * 0.2
@@ -10309,7 +10616,7 @@ class ControlPanel(QWidget):
             painter.setBrush(solid)
         painter.drawEllipse(center, radius, radius)
         painter.end()
-        return QIcon(pixmap)
+        return pixmap
 
     def refresh_annotate_badge(self, force=False):
         """主栏「批注」按钮与批注菜单里的颜色点。按内容缓存，心跳频繁调用也不重绘。"""
@@ -10324,6 +10631,21 @@ class ControlPanel(QWidget):
         else:
             name = self.PEN_STYLE_META.get(cv.pen_style, ("pen", "pen"))[1]
             color, rainbow = cv.pen_color, cv.pen_style == "rainbow"
+        if self.color_scheme != "classic":
+            btn = (getattr(self, "icon_buttons", None) or {}).get("pen")
+            if btn is not None:
+                btn.setProperty("icon_name", name)
+                self._sync_scheme_button_icon(btn, name, ICON_GLYPH, color, rainbow)
+            size = self.ANNOTATE_ICON
+            for style, style_btn in (getattr(self, "pen_style_buttons", None) or {}).items():
+                self._sync_scheme_button_icon(style_btn, self.PEN_STYLE_META[style][1], size,
+                                              QColor(cv.pen_profile(style)["color"]), style == "rainbow")
+            for attr, glyph, user_color in (("btn_ann_marker", "highlighter", cv.marker_color),
+                                            ("btn_ann_laser", "laser", cv.laser_color)):
+                button = getattr(self, attr, None)
+                if button is not None:
+                    self._sync_scheme_button_icon(button, glyph, size, user_color)
+            return
         theme_key = (self.theme["text"], self.theme["frame"])
         key = (name, QColor(color).rgb(), rainbow, theme_key)
         btn = (getattr(self, "icon_buttons", None) or {}).get("pen")
@@ -11753,7 +12075,7 @@ class ControlPanel(QWidget):
         cv.show()
         self.sync_canvas_input_mode()
         self.btn_mode.setText(tr("mouse"))
-        self.btn_mode.setStyleSheet(f"background-color: {self.theme['mode'] if enabled else self.theme['mode_off']}; color: white;")
+        self._apply_mode_button_theme()
         track_event("mode_changed", drawing_mode=enabled)
         self.bind_topmost_stack()
         if enabled and cv.draw_state == "LASER":
@@ -12257,6 +12579,17 @@ class ControlPanel(QWidget):
         # ---------- 外观 ----------
         section("settings_appearance")
         form.addWidget(self.btn_theme)          # 主题按钮从主栏搬到这里
+        self.color_scheme_label = QLabel(tr("color_scheme"))
+        form.addWidget(self.color_scheme_label)
+        self.color_scheme_combo = QComboBox()
+        self.color_scheme_combo.setAccessibleName(tr("color_scheme"))
+        for scheme, label_key in self.COLOR_SCHEMES.items():
+            self.color_scheme_combo.addItem(tr(label_key), scheme)
+        self.color_scheme_combo.setCurrentIndex(self.color_scheme_combo.findData(self.color_scheme))
+        self.color_scheme_label.setBuddy(self.color_scheme_combo)
+        self.color_scheme_combo.currentIndexChanged.connect(
+            lambda _index: self.set_color_scheme(self.color_scheme_combo.currentData()))
+        form.addWidget(self.color_scheme_combo)
 
         # UI模式统一为图标式，不再提供切换选项
 
@@ -12376,6 +12709,7 @@ class ControlPanel(QWidget):
         self.settings_scroll = scroll
         self.settings_panel.setMinimumWidth(300)
         self.settings_panel.setStyleSheet(self.styleSheet())
+        self._apply_color_scheme_controls()
 
     def _set_orientation_from_settings(self, orientation):
         self.set_orientation(orientation)
@@ -12400,6 +12734,9 @@ class ControlPanel(QWidget):
 
         self.release_notice.set_theme(self.theme_name)
         self.release_notice.setVisible(self._notice_visible)
+        blocked = self.color_scheme_combo.blockSignals(True)
+        self.color_scheme_combo.setCurrentIndex(self.color_scheme_combo.findData(self.color_scheme))
+        self.color_scheme_combo.blockSignals(blocked)
         self.auto_pen_checkbox.blockSignals(True)
         self.auto_pen_checkbox.setChecked(self.whiteboard_auto_pen)
         self.auto_pen_checkbox.blockSignals(False)
@@ -13133,6 +13470,7 @@ class ControlPanel(QWidget):
             "pen_defaults": normalize_presets(self.pen_defaults, PEN_STYLES, PEN_STYLE_OPTIONS),
             "last_annotate_tool": self.last_annotate_tool,
             "theme": self.theme_name,
+            "color_scheme": self.color_scheme,
             "pen_color": cv.pen_color.name(),
             "pen_width": int(cv.pen_width),
             "pen_profiles": {style: dict(cv.pen_profile(style)) for style in PEN_STYLES},
@@ -13307,6 +13645,8 @@ class ControlPanel(QWidget):
         cv = self.canvas
 
         default_settings = self.collect_settings()
+        # Old configurations always select classic, including a reload after a new scheme.
+        default_settings["color_scheme"] = "classic"
         default_settings.setdefault("marker_alpha_pct", 35)
         default_settings.setdefault("timer_mode", "DOWN")
         default_settings.setdefault("timer_target", 10)
@@ -13345,9 +13685,15 @@ class ControlPanel(QWidget):
         remembered = settings.get("last_annotate_tool")
         self.last_annotate_tool = remembered if remembered in ("PEN", "MARKER", "LASER") else "PEN"
         try:
-            if isinstance(settings.get("theme"), str) and settings["theme"] in self.THEMES and settings["theme"] != self.theme_name:
-                self.theme_name = settings["theme"]
-                self.theme = self.THEMES[self.theme_name]
+            mode = settings.get("theme")
+            if not isinstance(mode, str) or mode not in self.THEMES:
+                mode = self.theme_name
+            scheme = settings.get("color_scheme")
+            if not isinstance(scheme, str) or scheme not in self.COLOR_SCHEMES:
+                scheme = "classic"
+            if (mode, scheme) != (self.theme_name, self.color_scheme):
+                self.theme_name, self.color_scheme = mode, scheme
+                self.theme = self.theme_for(mode, scheme)
                 self.apply_theme()
 
             # 旧配置的共享值迁移为独立副本，新配置逐笔验证，损坏的一项不影响其他笔。

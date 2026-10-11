@@ -158,6 +158,11 @@ _BASE = {
 
     # ---------- 设置页（5.5.0）----------
     "settings": ("设置", "Settings", "Réglages", "Ajustes", "Einstellungen", "Настройки", "설정", "設定"),
+    "color_scheme": ("界面配色", "UI color scheme", "Palette de l’interface", "Colores de la interfaz", "Oberflächenfarben", "Цветовая схема интерфейса", "인터페이스 색상", "UI 配色"),
+    "color_scheme_classic": ("经典", "Classic", "Classique", "Clásica", "Klassisch", "Классическая", "클래식", "クラシック"),
+    "color_scheme_graphite_teal": ("A · 石墨青绿", "A · Graphite Teal", "A · Graphite et turquoise", "A · Grafito y verde azulado", "A · Graphit und Türkis", "A · Графит и бирюза", "A · 흑연 청록", "A · グラファイト・ティール"),
+    "color_scheme_slate_blue": ("B · 冷灰钢蓝", "B · Cool Gray Steel Blue", "B · Gris froid et bleu acier", "B · Gris frío y azul acero", "B · Kühles Grau und Stahlblau", "B · Холодный серый и стальной синий", "B · 쿨 그레이 스틸 블루", "B · クールグレー・スチールブルー"),
+    "color_scheme_warm_indigo": ("C · 暖灰靛蓝", "C · Warm Gray Indigo", "C · Gris chaud et indigo", "C · Gris cálido e índigo", "C · Warmes Grau und Indigo", "C · Тёплый серый и индиго", "C · 웜 그레이 인디고", "C · ウォームグレー・インディゴ"),
     "settings_appearance": ("外观", "Appearance", "Apparence", "Apariencia", "Darstellung", "Внешний вид", "모양", "外観"),
     "settings_panel_group": ("主面板", "Main panel", "Panneau principal", "Panel principal", "Hauptleiste", "Главная панель", "메인 패널", "メインパネル"),
     "settings_drawing": ("绘制", "Drawing", "Dessin", "Dibujo", "Zeichnen", "Рисование", "그리기", "描画"),
