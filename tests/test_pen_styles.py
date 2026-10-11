@@ -21,6 +21,7 @@ class PenStyleTestCase(unittest.TestCase):
     def setUpClass(cls):
         from PyQt6.QtWidgets import QApplication
         cls.app = QApplication.instance() or QApplication([])
+        cls._initial_windows = set(cls.app.topLevelWidgets())
         import main
         cls.main = main
         cls.panel = main.ControlPanel()
@@ -30,11 +31,9 @@ class PenStyleTestCase(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        for name in ("listener", "timer", "autosave_timer", "_thumbnail_live_timer"):
-            try:
-                getattr(cls.panel, name).stop()
-            except Exception:
-                pass
+        from conftest import _dispose_offscreen_widgets
+        owned_windows = set(cls.app.topLevelWidgets()) - cls._initial_windows
+        _dispose_offscreen_widgets(cls.app, owned_windows)
 
     def setUp(self):
         c = self.canvas

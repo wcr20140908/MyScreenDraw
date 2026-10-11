@@ -280,6 +280,7 @@ import base64
 import logging
 import ast
 import contextlib
+from collections import Counter
 import copy
 import tempfile
 from export_pipeline import export_document, ExportResult, ExportFailure
@@ -3417,6 +3418,9 @@ class DrawingCanvas(QMainWindow):
         self.laser_width = 14
         self.laser_trail = []           # [(QPointF, birth_time), ...]
         self.laser_trail_ms = 450
+        self._teaching_laser_trace_operation = None
+        self._teaching_laser_moved = False
+        self._teaching_laser_start = None
         # 辅助作图工具（不进撤销栈，可自由移动/缩放/旋转）
         self.aids = []                  # list of dicts
         self.ruler_calibrations = {}    # screen_key -> calibration record
@@ -4071,7 +4075,8 @@ class DrawingCanvas(QMainWindow):
             name = "ink.erased"
             operation = self._begin_teaching_operation(name)
             before = (len(self.all_segments), len(self.shape_items), len(self.text_items),
-                      len(self.image_items), self.eraser_type) if operation is not None else None
+                      len(self.image_items), self.eraser_type,
+                      Counter(s["id"] for s in self.all_segments)) if operation is not None else None
         else:
             return None
         return (operation, name, before) if operation is not None else None
@@ -4096,8 +4101,14 @@ class DrawingCanvas(QMainWindow):
                 removed_objects = sum(before[1:4]) - len(self.shape_items) - len(self.text_items) - len(self.image_items)
                 if removed_segments + removed_objects <= 0:
                     return
+                remaining = Counter(s["id"] for s in self.all_segments)
+                affected = [stroke_id for stroke_id, count in before[5].items()
+                            if remaining[stroke_id] < count]
+                stroke_id = affected[0] if len(affected) == 1 else None
                 details = {"removed_segments": removed_segments, "removed_objects": removed_objects,
-                           "eraser_type": before[4]}
+                           "eraser_type": before[4],
+                           "stroke_id": str(stroke_id) if stroke_id is not None else None,
+                           "remaining_segments": remaining[stroke_id] if stroke_id is not None else 0}
             self._emit_teaching_result(operation, name, details)
         finally:
             self._discard_teaching_operation(operation)
@@ -7407,6 +7418,15 @@ class DrawingCanvas(QMainWindow):
         self.update()
 
     # --- 激光笔（不落墨） ---
+    def _discard_teaching_laser_operations(self):
+        events = getattr(self.panel, "teaching_events", None)
+        for name in ("_teaching_laser_trace_operation",):
+            operation = getattr(self, name, None)
+            if events is not None:
+                events.discard_operation(operation)
+            setattr(self, name, None)
+        self._teaching_laser_moved = False
+
     def push_laser_point(self, pos):
         now = time.monotonic()
         self.laser_trail.append((QPointF(pos), now))
@@ -8085,6 +8105,12 @@ class DrawingCanvas(QMainWindow):
         # is discarded on release and makes pen-down cost grow with old ink.
         self.pending_undo = None if self.draw_state in ("PEN", "MARKER", "LASER") else self.capture_page()
         if self.draw_state == "LASER":
+            self._discard_teaching_laser_operations()
+            events = getattr(self.panel, "teaching_events", None)
+            if events is not None:
+                self._teaching_laser_trace_operation = events.begin_operation("laser.trace")
+            self._teaching_laser_moved = False
+            self._teaching_laser_start = QPoint(pos)
             self.laser_trail = []
             self.push_laser_point(pos)
             self.update()
@@ -8214,6 +8240,8 @@ class DrawingCanvas(QMainWindow):
                 return
         if self.is_drawing_mode and self.draw_state == "LASER":
             if event.buttons() & Qt.MouseButton.LeftButton:
+                self._teaching_laser_moved = self._teaching_laser_moved or (
+                    self._teaching_laser_start is not None and pos != self._teaching_laser_start)
                 self.push_laser_point(pos)
             self.update()
             return
@@ -8332,12 +8360,21 @@ class DrawingCanvas(QMainWindow):
                     self.panel.heartbeat_refresh()
                 return
             if self.draw_state == "LASER":
-                # 轨迹自然淡出，不写页面；按下时存的整页快照在这里作废，
-                # 否则它会一直挂在 pending_undo 上白占一份页面内存。
                 self.pending_undo = None
-                self.update()
-                if self.panel:
-                    self.panel.heartbeat_refresh()
+                events = getattr(self.panel, "teaching_events", None)
+                trace = self._teaching_laser_trace_operation
+                self._teaching_laser_trace_operation = None
+                moved, points = self._teaching_laser_moved, len(self.laser_trail)
+                try:
+                    self.update()
+                    if self.panel:
+                        self.panel.heartbeat_refresh()
+                    if events is not None and trace is not None:
+                        events.emit_result(trace, "laser.trace", "success" if moved else "cancelled",
+                                           {"points": points if moved else 0})
+                finally:
+                    if events is not None:
+                        events.discard_operation(trace)
                 return
             if self.draw_state == "SELECT" and self.selection_rect:
                 self.select_objects_in_rect(self.selection_rect)
@@ -11417,28 +11454,42 @@ class ControlPanel(QWidget):
 
     @contextlib.contextmanager
     def _teaching_tool_action(self):
-        """Deliver one toolbar operation only after its tool and menus are settled."""
+        """Deliver toolbar results only after the effective tool and menus settle."""
         events = self.teaching_events
         if events is None:
             yield
             return
         before_drawing, before_tool = self.canvas.is_drawing_mode, self.canvas.draw_state
+        before_style = self.canvas.pen_style if before_tool == "PEN" else before_tool.lower()
         mode_operation = events.begin_operation("mode.changed")
         tool_operation = events.begin_operation("tool.changed")
+        style_operation = events.begin_operation("pen.style_changed")
+        preset_operation = events.begin_operation("pen.default_applied")
         try:
             with events.suppress():
                 yield
-            # Snapshot both results before either callback can reveal the next step.
             drawing, tool = self.canvas.is_drawing_mode, self.canvas.draw_state
-            events.emit_result(mode_operation, "mode.changed",
-                               "success" if drawing != before_drawing else "cancelled",
-                               {"drawing_mode": drawing})
-            events.emit_result(tool_operation, "tool.changed",
-                               "success" if tool != before_tool or drawing != before_drawing else "cancelled",
-                               {"tool": tool, "drawing_mode": drawing})
+            style = self.canvas.pen_style if tool == "PEN" else tool.lower()
+            changed = tool != before_tool or drawing != before_drawing
+            preset_matches = (preset_operation is not None and self.pen_defaults_enabled and
+                style in self.pen_defaults and capture_current(self.canvas, style,
+                    pen_styles=PEN_STYLES, style_options=PEN_STYLE_OPTIONS) == self.pen_defaults[style])
+            results = (
+                (mode_operation, "mode.changed", "success" if drawing != before_drawing else "cancelled",
+                 {"drawing_mode": drawing}),
+                (tool_operation, "tool.changed", "success" if changed else "cancelled",
+                 {"tool": tool, "drawing_mode": drawing}),
+                (style_operation, "pen.style_changed", "success" if drawing and
+                 tool in ("PEN", "MARKER", "LASER") and (style != before_style or changed) else "cancelled",
+                 {"style": style, "tool": tool}),
+                (preset_operation, "pen.default_applied", "success" if preset_matches and
+                 (changed or style != before_style) else "cancelled", {"key": style}),
+            )
+            for context, name, outcome, details in results:
+                events.emit_result(context, name, outcome, details)
         finally:
-            events.discard_operation(mode_operation)
-            events.discard_operation(tool_operation)
+            for operation in (mode_operation, tool_operation, style_operation, preset_operation):
+                events.discard_operation(operation)
 
     def set_tool(self, state, button):
         was_drawing, previous_tool = self.canvas.is_drawing_mode, self.canvas.draw_state
@@ -11488,6 +11539,7 @@ class ControlPanel(QWidget):
         if prev == "PEN" and state != "PEN":
             self.canvas.dash_chain = None            # 离开批注笔时打断虚线连击
         if prev == "LASER" and state != "LASER":
+            self.canvas._discard_teaching_laser_operations()
             self.canvas.laser_trail = []
             self._laser_fade.stop()
         # 立刻改 draw_state，再 update：确保排队的重绘已经按新工具绘制，不再出现上一工具的光标圈。
@@ -12293,12 +12345,29 @@ class ControlPanel(QWidget):
         self.label_w.setText(trf("width_value", value=v))
         track_event("pen_width_changed", width=v)
         self.canvas._emit_teaching_result(operation, "pen.width_changed", {"width": self.canvas.pen_width})
-    def on_eraser_slider_changed(self, v): self.canvas.eraser_size = v; self.e_label.setText(trf("sensitivity_value", value=v)); track_event("eraser_size_changed", size=v)
+    def on_eraser_slider_changed(self, v):
+        operation = (self.canvas._begin_teaching_operation("eraser.size_changed")
+                     if v != self.canvas.eraser_size else None)
+        try:
+            self.canvas.eraser_size = v
+            self.e_label.setText(trf("sensitivity_value", value=v))
+            track_event("eraser_size_changed", size=v)
+            self.canvas._emit_teaching_result(operation, "eraser.size_changed", {"size": v})
+        finally:
+            self.canvas._discard_teaching_operation(operation)
     def set_eraser_type(self, t):
-        self.canvas.eraser_type = t
-        self.btn_circ.setObjectName("ActiveTool" if t == "CIRCLE" else ""); self.btn_stroke.setObjectName("ActiveTool" if t == "STROKE" else "")
-        self.btn_circ.setStyle(self.btn_circ.style()); self.btn_stroke.setStyle(self.btn_stroke.style())
-        track_event("eraser_type_changed", eraser_type=t)
+        operation = (self.canvas._begin_teaching_operation("eraser.type_changed")
+                     if t != self.canvas.eraser_type and t in ("CIRCLE", "STROKE") else None)
+        try:
+            self.canvas.eraser_type = t
+            self.btn_circ.setObjectName("ActiveTool" if t == "CIRCLE" else "")
+            self.btn_stroke.setObjectName("ActiveTool" if t == "STROKE" else "")
+            self.btn_circ.setStyle(self.btn_circ.style())
+            self.btn_stroke.setStyle(self.btn_stroke.style())
+            track_event("eraser_type_changed", eraser_type=t)
+            self.canvas._emit_teaching_result(operation, "eraser.type_changed", {"eraser_type": t})
+        finally:
+            self.canvas._discard_teaching_operation(operation)
 
     def update_button_highlight(self, active_btn):
         for btn in self.color_buttons:
@@ -12343,15 +12412,28 @@ class ControlPanel(QWidget):
         self.sync_icon_buttons()      # 可用性变了，图标树跟上
 
     def clear(self):
-        if not (self.canvas.all_segments or self.canvas.text_items or self.canvas.shape_items or self.canvas.image_items):
+        count = sum(len(items) for items in (self.canvas.all_segments, self.canvas.text_items,
+                                            self.canvas.shape_items, self.canvas.image_items))
+        if not count:
             return
-        self.canvas._cancel_smart_recognition(drop_pending=True)  # 清屏：丢弃还没触发的延迟识别
-        self.canvas.push_undo()
-        self.canvas.dash_chain = None
-        self.canvas.all_segments = []; self.canvas.text_items = []; self.canvas.shape_items = []; self.canvas.image_items = []; self.canvas.selected_ids.clear(); self.canvas.update()
-        if self.canvas.whiteboard_mode: self.canvas.save_current_page()
-        self.select_panel.hide()
-        track_event("clear")
+        with teaching_document_operation(self, "history.cleared") as (events, operation):
+            with events.suppress() if events is not None else contextlib.nullcontext():
+                self.canvas._cancel_smart_recognition(drop_pending=True)
+                self.canvas.push_undo()
+                self.canvas.dash_chain = None
+                self.canvas.all_segments = []
+                self.canvas.text_items = []
+                self.canvas.shape_items = []
+                self.canvas.image_items = []
+                self.canvas.selected_ids.clear()
+                self.canvas.update()
+                if self.canvas.whiteboard_mode:
+                    self.canvas.save_current_page()
+                self.select_panel.hide()
+                track_event("clear")
+            if events is not None:
+                events.emit_result(operation, "history.cleared", "success", {"removed": count})
+
     def bind_topmost_stack(self):
         """Keep the control panel and floating tools above the fullscreen canvas.
 
@@ -12445,17 +12527,32 @@ class ControlPanel(QWidget):
             self.release_notice.hide()
 
     def set_pen_defaults_enabled(self, enabled):
-        self.pen_defaults_enabled = bool(enabled)
-        if enabled and self.canvas.draw_state in ("PEN", "MARKER", "LASER"):
-            self.canvas.finish_active_ink()
-            self.apply_current_pen_default()
-        self.save_settings()
+        previous = self.pen_defaults_enabled
+        operation = self.canvas._begin_teaching_operation("pen.defaults_changed") if bool(enabled) != previous else None
+        try:
+            self.pen_defaults_enabled = bool(enabled)
+            if enabled and self.canvas.draw_state in ("PEN", "MARKER", "LASER"):
+                self.canvas.finish_active_ink()
+                self.apply_current_pen_default()
+            self.save_settings()
+            self.canvas._emit_teaching_result(operation, "pen.defaults_changed", {"enabled": self.pen_defaults_enabled})
+        finally:
+            self.canvas._discard_teaching_operation(operation)
 
     def save_pen_default(self, key, preset):
-        updated = dict(self.pen_defaults)
-        updated[key] = preset
-        self.pen_defaults = normalize_presets(updated, PEN_STYLES, PEN_STYLE_OPTIONS)
-        self.save_settings()
+        operation = self.canvas._begin_teaching_operation("pen.default_saved")
+        try:
+            updated = dict(self.pen_defaults)
+            updated[key] = preset
+            self.pen_defaults = normalize_presets(updated, PEN_STYLES, PEN_STYLE_OPTIONS)
+            self.save_settings()
+            marker = getattr(self, "_last_settings_write", None)
+            persisted = (marker is not None and marker[0] == CONFIG_FILE and
+                         marker[1].get("pen_defaults") == self.pen_defaults and os.path.isfile(CONFIG_FILE))
+            self.canvas._emit_teaching_result(operation, "pen.default_saved", {"key": key},
+                                             outcome="success" if persisted else "failed")
+        finally:
+            self.canvas._discard_teaching_operation(operation)
 
     def apply_current_pen_default(self):
         cv = self.canvas

@@ -28,14 +28,23 @@ from .session_view import PracticeProgressView, require_transaction_id
 APPLICATION_TARGETS = frozenset({
     'canvas.ink', 'toolbar.mode', 'toolbar.pen', 'toolbar.eraser', 'toolbar.select',
     'toolbar.undo', 'toolbar.redo', 'toolbar.whiteboard', 'toolbar.file', 'toolbar.tools',
-    'pen.palette', 'pen.width', 'file.save', 'file.save_as', 'file.open', 'file.recovery', 'export.png',
+    'pen.palette', 'pen.width', 'pen.marker.width', 'pen.marker.alpha', 'pen.laser.width',
+    'pen.defaults', 'pen.defaults.capture', 'pen.style.pen', 'pen.style.fountain',
+    'pen.style.brush', 'pen.style.calligraphy', 'pen.style.pencil', 'pen.style.crayon',
+    'pen.style.chalk', 'pen.style.neon', 'pen.style.dashed', 'pen.style.rainbow',
+    'pen.style.arrow', 'pen.marker', 'pen.laser', 'eraser.type.circle',
+    'eraser.type.stroke', 'eraser.size', 'toolbar.clear', 'file.save', 'file.save_as',
+    'file.open', 'file.recovery', 'export.png',
     'pages.add', 'pages.previous', 'pages.next', 'tools.teaching',
 })
 APPLICATION_EVENTS = frozenset({
     'ink.committed', 'ink.erased', 'project.saved', 'mode.changed', 'tool.changed',
     'pen.color_changed', 'pen.width_changed', 'history.undone', 'history.redone',
     'selection.changed', 'selection.transformed', 'whiteboard.entered', 'whiteboard.exited',
-    'page.created', 'page.changed', 'project.opened', 'recovery.previewed', 'recovery.applied', 'export.finished', 'center.visited', 'practice.resumed',
+    'page.created', 'page.changed', 'project.opened', 'recovery.previewed', 'recovery.applied', 'export.finished',
+    'center.visited', 'practice.resumed', 'pen.style_changed', 'eraser.type_changed',
+    'eraser.size_changed', 'history.cleared', 'laser.trace', 'pen.default_saved',
+    'pen.defaults_changed', 'pen.default_applied',
 })
 
 
@@ -430,6 +439,28 @@ class ApplicationTeachingHost(QObject):
             'tools.teaching': lambda: self.panel.btn_teaching,
             'pen.palette': lambda: self.panel.pen_palette,
             'pen.width': lambda: self.panel.pen_width_row,
+            'pen.marker.width': lambda: self.panel.marker_width_slider,
+            'pen.marker.alpha': lambda: self.panel.marker_alpha_slider,
+            'pen.laser.width': lambda: self.panel.laser_width_slider,
+            'pen.defaults': lambda: self.panel.pen_defaults_checkbox,
+            'pen.defaults.capture': lambda: getattr(getattr(self.panel, 'pen_defaults_editor', None), 'capture_button', None),
+            'pen.style.pen': lambda: self.panel.pen_style_buttons.get('pen'),
+            'pen.style.fountain': lambda: self.panel.pen_style_buttons.get('fountain'),
+            'pen.style.brush': lambda: self.panel.pen_style_buttons.get('brush'),
+            'pen.style.calligraphy': lambda: self.panel.pen_style_buttons.get('calligraphy'),
+            'pen.style.pencil': lambda: self.panel.pen_style_buttons.get('pencil'),
+            'pen.style.crayon': lambda: self.panel.pen_style_buttons.get('crayon'),
+            'pen.style.chalk': lambda: self.panel.pen_style_buttons.get('chalk'),
+            'pen.style.neon': lambda: self.panel.pen_style_buttons.get('neon'),
+            'pen.style.dashed': lambda: self.panel.pen_style_buttons.get('dashed'),
+            'pen.style.rainbow': lambda: self.panel.pen_style_buttons.get('rainbow'),
+            'pen.style.arrow': lambda: self.panel.pen_style_buttons.get('arrow'),
+            'pen.marker': lambda: self.panel.btn_ann_marker,
+            'pen.laser': lambda: self.panel.btn_ann_laser,
+            'eraser.type.circle': lambda: self.panel.btn_circ,
+            'eraser.type.stroke': lambda: self.panel.btn_stroke,
+            'eraser.size': lambda: self.panel.e_slider,
+            'toolbar.clear': lambda: self.panel.icon_buttons.get('clear'),
             'file.save': lambda: self.panel.btn_save_project,
             'file.save_as': lambda: self.panel.btn_save_project_as,
             'file.open': lambda: self.panel.btn_open_project,
@@ -442,6 +473,16 @@ class ApplicationTeachingHost(QObject):
         for target_id, resolver in bindings.items():
             if target_id in {'pen.palette', 'pen.width'}:
                 reveal = self._reveal_pen
+            elif target_id.startswith('pen.style.') or target_id in {'pen.marker', 'pen.laser'}:
+                reveal = self._reveal_annotations
+            elif target_id in {'pen.marker.width', 'pen.marker.alpha'}:
+                reveal = self._reveal_marker
+            elif target_id == 'pen.laser.width':
+                reveal = self._reveal_laser
+            elif target_id in {'pen.defaults', 'pen.defaults.capture'}:
+                reveal = self._reveal_settings
+            elif target_id in {'eraser.type.circle', 'eraser.type.stroke', 'eraser.size'}:
+                reveal = self._reveal_eraser
             elif target_id in {'file.save', 'file.save_as', 'file.open', 'file.recovery', 'export.png'}:
                 reveal = self._reveal_file
             else:
@@ -452,6 +493,7 @@ class ApplicationTeachingHost(QObject):
             owns=self.panel.lifecycle._owns_window, canvas=lambda: self.panel.canvas, translate=module.tr,
             prepare_fixture=self._prepare_fixture,
             reveal_actions={'open_file_panel': self._reveal_file, 'open_pen_panel': self._reveal_pen,
+                            'open_eraser_panel': self._reveal_eraser, 'open_settings': self._reveal_settings,
                             'open_tools_panel': self._reveal_tools},
             on_progress=self._record_progress,
             pause_action=self.pause_requested.emit,
@@ -480,6 +522,25 @@ class ApplicationTeachingHost(QObject):
 
     def _reveal_tools(self):
         self.panel.show_only_sub(self.panel.tools_sub)
+
+    def _reveal_annotations(self):
+        settings = getattr(self.panel, 'settings_panel', None)
+        if settings is not None and not sip.isdeleted(settings):
+            settings.hide()
+        self.panel.show_only_sub(self.panel.annotate_sub)
+
+    def _reveal_marker(self):
+        self.panel.show_only_sub(self.panel.marker_sub)
+
+    def _reveal_laser(self):
+        self.panel.show_only_sub(self.panel.laser_sub)
+
+    def _reveal_eraser(self):
+        self.panel.show_only_sub(self.panel.eraser_sub)
+
+    def _reveal_settings(self):
+        self.panel.open_settings_panel()
+        self.panel.pen_defaults_editor.set_current_key('pen')
 
     def _busy(self):
         canvas = self.panel.canvas
@@ -689,6 +750,8 @@ class ApplicationTeachingHost(QObject):
         self.panel.project_dirty = False
         from .core_fixtures import prepare_core_fixture
         prepare_core_fixture(self.panel, self.loader, fixture, self.request.paths)
+        from .writing_fixtures import prepare_writing_fixture
+        prepare_writing_fixture(self.panel, fixture, self.request.paths)
 
     def activate(self):
         if self._closed or not self.context.ui_active:

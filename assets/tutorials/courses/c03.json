@@ -1,0 +1,209 @@
+{
+  "schema_version": 1,
+  "id": "c03",
+  "revision": 1,
+  "compat_revision": 1,
+  "title_key": "teaching_c03_title",
+  "chapters": [
+    {
+      "id": "c03.erase",
+      "title_key": "teaching_c03_erase_title",
+      "fixture": "writing.c03.erase",
+      "steps": [
+        {
+          "id": "intro",
+          "title_key": "teaching_c03_erase_intro_title",
+          "body_key": "teaching_c03_erase_intro_body",
+          "kind": "information",
+          "next": "eraser"
+        },
+        {
+          "id": "eraser",
+          "title_key": "teaching_c03_erase_eraser_title",
+          "body_key": "teaching_c03_erase_eraser_body",
+          "target": "toolbar.eraser",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "tool.changed",
+            "outcome": "success",
+            "equals": {
+              "tool": "ERASER"
+            }
+          },
+          "next": "circle"
+        },
+        {
+          "id": "circle",
+          "title_key": "teaching_c03_erase_circle_title",
+          "body_key": "teaching_c03_erase_circle_body",
+          "target": "eraser.type.circle",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "eraser.type_changed",
+            "outcome": "success",
+            "equals": {
+              "eraser_type": "CIRCLE"
+            }
+          },
+          "next": "size"
+        },
+        {
+          "id": "size",
+          "title_key": "teaching_c03_erase_size_title",
+          "body_key": "teaching_c03_erase_size_body",
+          "target": "eraser.size",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "eraser.size_changed",
+            "outcome": "success",
+            "equals": {
+              "size": 60
+            }
+          },
+          "next": "circle_erase"
+        },
+        {
+          "id": "circle_erase",
+          "title_key": "teaching_c03_erase_circle_erase_title",
+          "body_key": "teaching_c03_erase_circle_erase_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "ink.erased",
+            "outcome": "success",
+            "equals": {
+              "eraser_type": "CIRCLE",
+              "stroke_id": "dadb8e81-cea9-76ac-79e5-d213276df443"
+            },
+            "min_count": {
+              "removed_segments": 1,
+              "remaining_segments": 1
+            }
+          },
+          "next": "stroke_mode"
+        },
+        {
+          "id": "stroke_mode",
+          "title_key": "teaching_c03_erase_stroke_mode_title",
+          "body_key": "teaching_c03_erase_stroke_mode_body",
+          "target": "eraser.type.stroke",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "eraser.type_changed",
+            "outcome": "success",
+            "equals": {
+              "eraser_type": "STROKE"
+            }
+          },
+          "next": "stroke_erase"
+        },
+        {
+          "id": "stroke_erase",
+          "title_key": "teaching_c03_erase_stroke_erase_title",
+          "body_key": "teaching_c03_erase_stroke_erase_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "ink.erased",
+            "outcome": "success",
+            "equals": {
+              "eraser_type": "STROKE",
+              "stroke_id": "72c2ee1f-9618-e1ea-e59d-cb7eb9931a99",
+              "remaining_segments": 0
+            },
+            "min_count": {
+              "removed_segments": 1
+            }
+          },
+          "next": "done"
+        },
+        {
+          "id": "done",
+          "title_key": "teaching_c03_erase_done_title",
+          "body_key": "teaching_c03_erase_done_body",
+          "kind": "information",
+          "next": "end_chapter"
+        }
+      ]
+    },
+    {
+      "id": "c03.history_clear",
+      "title_key": "teaching_c03_history_clear_title",
+      "fixture": "writing.c03.history_clear",
+      "steps": [
+        {
+          "id": "intro",
+          "title_key": "teaching_c03_history_clear_intro_title",
+          "body_key": "teaching_c03_history_clear_intro_body",
+          "kind": "information",
+          "next": "undo"
+        },
+        {
+          "id": "undo",
+          "title_key": "teaching_c03_history_clear_undo_title",
+          "body_key": "teaching_c03_history_clear_undo_body",
+          "target": "toolbar.undo",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "history.undone",
+            "outcome": "success"
+          },
+          "next": "redo"
+        },
+        {
+          "id": "redo",
+          "title_key": "teaching_c03_history_clear_redo_title",
+          "body_key": "teaching_c03_history_clear_redo_body",
+          "target": "toolbar.redo",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "history.redone",
+            "outcome": "success"
+          },
+          "next": "clear"
+        },
+        {
+          "id": "clear",
+          "title_key": "teaching_c03_history_clear_clear_title",
+          "body_key": "teaching_c03_history_clear_clear_body",
+          "target": "toolbar.clear",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "history.cleared",
+            "outcome": "success",
+            "min_count": {
+              "removed": 1
+            }
+          },
+          "next": "undo_clear"
+        },
+        {
+          "id": "undo_clear",
+          "title_key": "teaching_c03_history_clear_undo_clear_title",
+          "body_key": "teaching_c03_history_clear_undo_clear_body",
+          "target": "toolbar.undo",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "history.undone",
+            "outcome": "success"
+          },
+          "next": "limits"
+        },
+        {
+          "id": "limits",
+          "title_key": "teaching_c03_history_clear_limits_title",
+          "body_key": "teaching_c03_history_clear_limits_body",
+          "kind": "information",
+          "next": "done"
+        },
+        {
+          "id": "done",
+          "title_key": "teaching_c03_history_clear_done_title",
+          "body_key": "teaching_c03_history_clear_done_body",
+          "kind": "information",
+          "next": "end_chapter"
+        }
+      ]
+    }
+  ]
+}

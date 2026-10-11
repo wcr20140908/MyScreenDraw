@@ -1,7 +1,9 @@
 {
   "schema_version": 1,
   "courses": [
-    "courses/c01.json"
+    "courses/c01.json",
+    "courses/c02.json",
+    "courses/c03.json"
   ],
   "fixtures": {
     "core.interface": "fixtures/core.interface.msd",
@@ -9,7 +11,12 @@
     "core.select": "fixtures/core.select.msd",
     "core.pages": "fixtures/core.pages.msd",
     "core.files": "fixtures/core.files.msd",
-    "core.finish": "fixtures/core.finish.msd"
+    "core.finish": "fixtures/core.finish.msd",
+    "writing.c02.styles": "fixtures/writing.c02.styles.msd",
+    "writing.c02.color_width": "fixtures/writing.c02.color_width.msd",
+    "writing.c02.transient": "fixtures/writing.c02.transient.msd",
+    "writing.c03.erase": "fixtures/writing.c03.erase.msd",
+    "writing.c03.history_clear": "fixtures/writing.c03.history_clear.msd"
   },
   "groups": [
     {
@@ -17,6 +24,14 @@
       "title_key": "teaching_group_core",
       "courses": [
         "c01"
+      ]
+    },
+    {
+      "id": "drawing",
+      "title_key": "teaching_group_drawing",
+      "courses": [
+        "c02",
+        "c03"
       ]
     }
   ]
