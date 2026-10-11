@@ -43,6 +43,11 @@ APPLICATION_TARGETS = frozenset({
     'shape.type.parallelogram', 'shape.type.trapezoid', 'shape.type.diamond', 'shape.type.angle',
     'shape.type.circle', 'shape.type.ellipse', 'shape.type.cuboid', 'shape.type.cube',
     'shape.type.cylinder', 'shape.type.cone', 'settings.smart_shapes', 'selection.more',
+    'toolbar.text', 'text.input', 'text.done', 'text.backspace', 'text.newline',
+    'text.group.greek', 'text.group.structure', 'text.symbol.alpha', 'text.symbol.pm',
+    'text.symbol.member', 'text.symbol.integral', 'text.structure.frac', 'text.structure.sup',
+    'text.structure.sub', 'text.structure.sqrt', 'text.structure.sum', 'text.structure.int',
+    'selection.width', 'selection.color',
 })
 APPLICATION_EVENTS = frozenset({
     'ink.committed', 'ink.erased', 'project.saved', 'mode.changed', 'tool.changed',
@@ -56,6 +61,9 @@ APPLICATION_EVENTS = frozenset({
     'page.copy_placement_changed', 'page.reordered', 'thumbnails.opened',
     'shape.type_changed', 'shape.committed', 'shape.point_added', 'shape.points_cancelled',
     'shape.recognized', 'shape.recognition_changed', 'shape.constructed',
+    'text.box_created', 'text.edit_started', 'text.changed', 'text.edit_finished',
+    'text.formatted', 'formula.inserted', 'formula.slot_changed', 'formula.cursor_moved',
+    'symbols.opened',
 })
 
 
@@ -476,6 +484,10 @@ class ApplicationTeachingHost(QObject):
             'selection.delete': lambda: self.panel.btn_del,
             'selection.more': lambda: self.panel.btn_more,
             'toolbar.shape': lambda: self.panel.icon_buttons.get('shape'),
+            'toolbar.text': lambda: self.panel.icon_buttons.get('text'),
+            'text.input': lambda: getattr(self.panel, 'text_input', None),
+            'selection.width': lambda: self.panel.select_width_slider,
+            'selection.color': lambda: self.panel.selection_color_button,
             'shape.cancel_points': lambda: self.panel.btn_cancel_points,
             'settings.smart_shapes': lambda: getattr(self.panel, 'btn_settings_smart', None),
             'toolbar.board_style': lambda: self.panel.icon_buttons.get('board_style'),
@@ -498,6 +510,18 @@ class ApplicationTeachingHost(QObject):
                      'DIAMOND', 'ANGLE', 'CIRCLE', 'ELLIPSE', 'CUBOID', 'CUBE', 'CYLINDER', 'CONE'):
             bindings['shape.type.'+kind.lower()] = lambda kind=kind: next(
                 (button for button in self.panel.shape_buttons if button.property('shape_type') == kind), None)
+        for action in ('done', 'backspace', 'newline'):
+            bindings['text.'+action] = lambda action=action: getattr(
+                self.panel, 'text_action_buttons', {}).get('text_'+action)
+        for group in ('greek', 'structure'):
+            bindings['text.group.'+group] = lambda group=group: getattr(
+                self.panel, '_symbol_group_buttons', {}).get(group)
+        symbols = {'alpha': ('greek', 'α'), 'pm': ('operator', '±'),
+                   'member': ('relation', '∈'), 'integral': ('calculus', '∫')}
+        for key, (group, entry) in symbols.items():
+            bindings['text.symbol.'+key] = lambda entry=entry: self._symbol_target(entry)
+        for kind in ('frac', 'sup', 'sub', 'sqrt', 'sum', 'int'):
+            bindings['text.structure.'+kind] = lambda kind=kind: self._symbol_target(kind)
         for target_id, resolver in bindings.items():
             if target_id in {'pen.palette', 'pen.width'}:
                 reveal = self._reveal_pen
@@ -521,7 +545,15 @@ class ApplicationTeachingHost(QObject):
                 reveal = self._reveal_thumbnails
             elif target_id == 'pages.copy_position':
                 reveal = self._reveal_page_settings
-            elif target_id in {'selection.duplicate', 'selection.delete', 'selection.more'}:
+            elif target_id.startswith('text.symbol.'):
+                group = symbols[target_id.rsplit('.', 1)[1]][0]
+                reveal = lambda group=group: self._reveal_symbols(group)
+            elif target_id.startswith('text.structure.'):
+                reveal = lambda: self._reveal_symbols('structure')
+            elif target_id.startswith('text.'):
+                reveal = self._reveal_text_input
+            elif target_id in {'selection.duplicate', 'selection.delete', 'selection.more',
+                               'selection.width', 'selection.color'}:
                 reveal = self._reveal_selection
             elif target_id in {'eraser.type.circle', 'eraser.type.stroke', 'eraser.size'}:
                 reveal = self._reveal_eraser
@@ -607,6 +639,29 @@ class ApplicationTeachingHost(QObject):
     def _reveal_page_settings(self):
         self.panel.close_thumbnail_panel()
         self.panel.open_settings_panel()
+
+    def _symbol_target(self, entry):
+        layout = getattr(self.panel, 'symbol_grid_layout', None)
+        if layout is None:
+            return None
+        for index in range(layout.count()):
+            button = layout.itemAt(index).widget()
+            if button is not None and button.property('teaching_symbol') == entry:
+                return button
+        return None
+
+    def _reveal_text_input(self):
+        if self.panel.canvas.editing_text_item() is None:
+            return
+        panel = getattr(self.panel, 'text_panel', None)
+        if panel is not None and panel.isVisible():
+            self.panel._position_text_panel()
+
+    def _reveal_symbols(self, group):
+        self._reveal_text_input()
+        if (self.panel.canvas.editing_text_item() is not None
+                and getattr(self.panel, '_open_symbol_group', None) != group):
+            self.panel._toggle_symbol_group(group)
 
     def _reveal_selection(self):
         self.panel.sync_selection_controls()
@@ -839,6 +894,8 @@ class ApplicationTeachingHost(QObject):
         prepare_pages_fixture(self.panel, fixture, self.request.paths)
         from .geometry_fixtures import prepare_geometry_fixture
         prepare_geometry_fixture(self.panel, fixture, self.request.paths)
+        from .text_fixtures import prepare_text_fixture
+        prepare_text_fixture(self.panel, fixture, self.request.paths)
 
     def activate(self):
         if self._closed or not self.context.ui_active:

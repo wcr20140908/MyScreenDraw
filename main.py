@@ -252,6 +252,10 @@ import os
 from pathlib import Path
 from runtime_paths import RuntimeContext, RuntimePaths
 from teaching.bootstrap import parse_practice_request
+from teaching.text_actions import (teaching_text_change, teaching_input_change,
+    teaching_text_input_action, teaching_text_panel_action, teaching_text_finish,
+    teaching_formula_insert, teaching_cursor_move, teaching_symbol_group, teaching_text_format,
+    teaching_symbol_action, same_original)
 
 # Private arguments must be validated before importing Qt, configuring logs or
 # creating ordinary directories. A malformed internal launch must never fall back.
@@ -4051,7 +4055,7 @@ class DrawingCanvas(QMainWindow):
     def _emit_teaching_result(self, operation, name, details, *, outcome="success"):
         events = getattr(self.panel, "teaching_events", None)
         if operation is not None and events is not None:
-            events.emit_result(operation, name, outcome, details)
+            return events.emit_result(operation, name, outcome, details)
 
     def _discard_teaching_operation(self, operation):
         if operation is None:
@@ -4073,6 +4077,17 @@ class DrawingCanvas(QMainWindow):
                 name = "selection.transformed"
                 operation = self._begin_teaching_operation(name)
             before = frozenset(self.selected_ids) if operation is not None else None
+        elif self.draw_state == "TEXT":
+            name = "text.box_created"
+            operation = self._begin_teaching_operation(name)
+            if operation is None:
+                name = "text.edit_started"
+                operation = self._begin_teaching_operation(name)
+            if operation is None:
+                name = "formula.slot_changed"
+                operation = self._begin_teaching_operation(name)
+            before = (frozenset(item["id"] for item in self.text_items), self.editing_text_id,
+                      tuple(self.editing_slot or ())) if operation is not None else None
         elif self.draw_state == "SHAPE":
             name = "shape.committed"
             operation = self._begin_teaching_operation(name)
@@ -4135,6 +4150,27 @@ class DrawingCanvas(QMainWindow):
                 if not content_changed or action not in ("move", "scale", "rotate") or not self.selected_ids:
                     return
                 details = {"count": len(self.selected_ids), "action": action}
+            elif name in ("text.box_created", "text.edit_started", "formula.slot_changed"):
+                item = self.editing_text_item()
+                panel = getattr(self.panel, "text_panel", None)
+                if item is None or panel is None or not panel.isVisible():
+                    return
+                if name == "text.box_created":
+                    added = [row for row in self.text_items if row["id"] not in before[0]]
+                    if not content_changed or len(added) != 1 or added[0]["id"] != item["id"]:
+                        return
+                    details = {"count": 1, "item_id": str(item["id"])}
+                elif name == "text.edit_started":
+                    if item["id"] not in before[0] or item["id"] == before[1] or self.text_item_is_empty(item):
+                        return
+                    details = {"existing": True, "item_id": str(item["id"]),
+                               "same_original": same_original(self, item["id"])}
+                else:
+                    path = tuple(self.editing_slot or ())
+                    if item.get("formula") is None or item["id"] != before[1] or path == before[2]:
+                        return
+                    details = {"slot": path[-1] if path else "root", "depth": len(path)//2,
+                               "item_id": str(item["id"])}
             elif name == "shape.point_added":
                 if self.shape_type != before[0] or len(self.pending_points) != before[2] + 1:
                     return
@@ -4165,7 +4201,11 @@ class DrawingCanvas(QMainWindow):
                            "eraser_type": before[4],
                            "stroke_id": str(stroke_id) if stroke_id is not None else None,
                            "remaining_segments": remaining[stroke_id] if stroke_id is not None else 0}
-            self._emit_teaching_result(operation, name, details)
+            accepted = self._emit_teaching_result(operation, name, details)
+            if accepted and name == "text.box_created":
+                self.panel._teaching_text_original_id = item["id"]
+            if accepted and name == "text.edit_started":
+                self.panel._teaching_reedit_prefix = str(item.get("text", ""))
         finally:
             self._discard_teaching_operation(operation)
 
@@ -4546,6 +4586,7 @@ class DrawingCanvas(QMainWindow):
         self.mark_content_changed()
         return True
 
+    @teaching_text_finish
     def end_text_edit(self, *, discard_empty=True):
         """离开编辑态。空框默认删掉，避免画布上留一堆看不见的空盒子。"""
         item = self.editing_text_item()
@@ -4630,6 +4671,7 @@ class DrawingCanvas(QMainWindow):
         self.caret_offset = max(0, min(int(self.caret_offset), self.caret_limit(item)))
         return self.caret_offset
 
+    @teaching_cursor_move
     def set_caret(self, offset, item=None):
         """把插入点移到 offset，并让闪烁相位重新开始。
 
@@ -4916,6 +4958,7 @@ class DrawingCanvas(QMainWindow):
         return self.set_caret(start if home else start + len(lines[row]), item)
 
     # --- 编辑态下的内容变更 ---
+    @teaching_text_change('insert')
     def text_insert(self, chars):
         """往当前插入点写字符。
 
@@ -4937,6 +4980,7 @@ class DrawingCanvas(QMainWindow):
         self._after_text_change(item)
         return True
 
+    @teaching_text_change('backspace')
     def text_backspace(self):
         """删掉插入点前的一个位置。公式里的结构节点整个删掉。"""
         item = self.editing_text_item()
@@ -4958,6 +5002,7 @@ class DrawingCanvas(QMainWindow):
         self._after_text_change(item)
         return True
 
+    @teaching_text_change('delete')
     def text_delete_forward(self):
         """Delete 键：删掉插入点后的一个位置。插入点自己不动。"""
         item = self.editing_text_item()
@@ -4984,6 +5029,7 @@ class DrawingCanvas(QMainWindow):
             return False        # 公式里换行没有意义
         return self.text_insert("\n")
 
+    @teaching_formula_insert
     def text_insert_structure(self, kind):
         """插入一个结构节点（分数/根号/上下标/求和/积分）并把插入点移进它的第一个槽。"""
         item = self.editing_text_item()
@@ -6472,6 +6518,7 @@ class DrawingCanvas(QMainWindow):
             track_event("selection_rotated", degrees=degrees, count=len(self.selected_ids))
         self.mark_content_changed()
 
+    @teaching_text_format('color')
     def apply_selection_color(self, color):
         if not self.selected_ids:
             return
@@ -6492,6 +6539,7 @@ class DrawingCanvas(QMainWindow):
                 item["color"] = QColor(color)
         self.mark_content_changed()
 
+    @teaching_text_format('size')
     def apply_selection_width(self, width):
         if not self.selected_ids:
             return
@@ -8971,6 +9019,7 @@ class _TextInputEdit(QTextEdit):
             return
         canvas.set_caret(position)
 
+    @teaching_input_change
     def _on_text_changed(self):
         if self._syncing:
             return
@@ -8991,6 +9040,7 @@ class _TextInputEdit(QTextEdit):
         canvas.caret_offset = self.textCursor().position()
         canvas._after_text_change(item)
 
+    @teaching_text_input_action
     def keyPressEvent(self, event):
         canvas = self._canvas()
         if canvas is not None and self._formula_mode():
@@ -9031,6 +9081,7 @@ class _TextInputEdit(QTextEdit):
             return
         super().keyPressEvent(event)
 
+    @teaching_text_input_action
     def inputMethodEvent(self, event):
         """输入法事件：跟踪组字状态，并在公式模式下把提交串转进当前格子。
 
@@ -11569,6 +11620,7 @@ class ControlPanel(QWidget):
         self.select_sub_layout.addWidget(self.select_label)
 
         color_btn = QPushButton(tr("change_color"))
+        self.selection_color_button = color_btn
         color_btn.clicked.connect(self.open_selection_color)
         self.select_sub_layout.addWidget(color_btn)
 
@@ -12335,19 +12387,21 @@ class ControlPanel(QWidget):
                 self._refocus_input()
 
     def open_selection_color(self):
-        self.timer.stop()
-        try:
-            d = QColorDialog(self.canvas.pen_color, self)
-            d.setWindowTitle(tr("choose_object_color"))
-            d.setOption(QColorDialog.ColorDialogOption.DontUseNativeDialog, True)
-            if d.exec():
-                self.canvas.pen_color = d.selectedColor()
-                self.canvas.apply_selection_color(self.canvas.pen_color)
-                self.color_preview.setStyleSheet(f"background-color: {self.canvas.pen_color.name()}; border: 1px solid white;")
-                track_event("selection_color_changed", color=self.canvas.pen_color.name(), count=len(self.canvas.selected_ids))
-        finally:
-            self.timer.start(self.HEARTBEAT_MS)
+        with teaching_document_operation(self, "text.formatted"):
+            self.timer.stop()
+            try:
+                d = QColorDialog(self.canvas.pen_color, self)
+                d.setWindowTitle(tr("choose_object_color"))
+                d.setOption(QColorDialog.ColorDialogOption.DontUseNativeDialog, True)
+                if d.exec():
+                    self.canvas.pen_color = d.selectedColor()
+                    self.canvas.apply_selection_color(self.canvas.pen_color)
+                    self.color_preview.setStyleSheet(f"background-color: {self.canvas.pen_color.name()}; border: 1px solid white;")
+                    track_event("selection_color_changed", color=self.canvas.pen_color.name(), count=len(self.canvas.selected_ids))
+            finally:
+                self.timer.start(self.HEARTBEAT_MS)
 
+    @teaching_text_panel_action
     def on_selection_width_changed(self, v):
         self.canvas.pen_width = v
         self.canvas.apply_selection_width(v)
@@ -15391,6 +15445,7 @@ class ControlPanel(QWidget):
         # 编辑操作：退格 / 换行 / 完成。字母数字由系统键盘负责。
         action_row = QHBoxLayout()
         action_row.setSpacing(3)
+        self.text_action_buttons = {}
         for label_key, handler in (("text_backspace", self._text_backspace),
                                    ("text_newline", self._text_newline),
                                    ("text_keyboard", self._text_show_keyboard),
@@ -15398,6 +15453,7 @@ class ControlPanel(QWidget):
             btn = QPushButton(tr(label_key))
             btn.setMinimumHeight(TOUCH_MIN_BUTTON)
             btn.clicked.connect(handler)
+            self.text_action_buttons[label_key] = btn
             action_row.addWidget(btn)
         layout.addLayout(action_row)
         self._open_symbol_group = None
@@ -15466,6 +15522,7 @@ class ControlPanel(QWidget):
         # 高低，主面板压上来时拉不回去。
         self.restack_floatings()
 
+    @teaching_symbol_group
     def _toggle_symbol_group(self, key):
         """同一时间只展开一组——全铺开在触屏上是一片小按钮，必然误触。"""
         if self._open_symbol_group == key:
@@ -15485,9 +15542,11 @@ class ControlPanel(QWidget):
             for index, entry in enumerate(formula.group_entries(self._open_symbol_group)):
                 btn = QPushButton(formula.entry_label(entry))
                 btn.setFixedSize(self.SYMBOL_BTN, self.SYMBOL_BTN)
+                btn.setProperty("teaching_symbol", formula.structure_kind(entry) or entry)
                 btn.clicked.connect(lambda _=False, e=entry: self._symbol_pressed(e))
                 self.symbol_grid_layout.addWidget(btn, index // self.SYMBOL_COLUMNS,
                                                   index % self.SYMBOL_COLUMNS)
+                btn.show()
             self.symbol_grid_host.setVisible(True)
         # 不重锚：切符号组只是面板长高/变矮，重算锚点会让它跳位置
         self._position_text_panel()
@@ -15497,6 +15556,7 @@ class ControlPanel(QWidget):
         self.restack_floatings()
         self.text_input.setFocus(Qt.FocusReason.OtherFocusReason)
 
+    @teaching_symbol_action
     def _symbol_pressed(self, entry):
         if not self.canvas:
             return
@@ -15574,12 +15634,14 @@ class ControlPanel(QWidget):
         if canvas.editing_text_item() is not None:
             self.text_input.sync_from_canvas()
 
+    @teaching_text_panel_action
     def _text_backspace(self):
         if self.canvas:
             self.canvas.text_backspace()
             self._sync_input_from_canvas()
         self._refocus_input()
 
+    @teaching_text_panel_action
     def _text_newline(self):
         if self.canvas:
             self.canvas.text_newline()
@@ -15690,6 +15752,7 @@ class ControlPanel(QWidget):
         else:
             self.text_hint_label.setText(tr("text_keyboard_missing"))
 
+    @teaching_text_panel_action
     def _text_done(self):
         if self.canvas:
             self.canvas.end_text_edit()
