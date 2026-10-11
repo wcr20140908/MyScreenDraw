@@ -1,0 +1,2 @@
+# Preserve PDF byte offsets when checking out offline teaching assets on Windows.
+assets/tutorials/fixtures/*.pdf -text
