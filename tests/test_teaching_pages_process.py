@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""All C01-C05 chapters use one owned offscreen application process."""
+"""All C01-C06 chapters use one owned offscreen application process."""
 import json
 import sys
 from unittest.mock import Mock
@@ -9,11 +9,74 @@ from teaching.bootstrap import practice_arguments
 from test_teaching_application import parent_coordinator,until
 from test_teaching_selection_process import ROOT,practice_request,BRIDGE as SELECTION_BRIDGE,CHAPTERS as SELECTION_CHAPTERS
 
-CHAPTERS=SELECTION_CHAPTERS+('c05.board','c05.add_switch','c05.rename_delete','c05.copy_position','c05.reorder')
+CHAPTERS=SELECTION_CHAPTERS+('c05.board','c05.add_switch','c05.rename_delete','c05.copy_position','c05.reorder','c06.plane','c06.solid','c06.points','c06.recognition_snap')
 assert 'chapters = '+repr(SELECTION_CHAPTERS) in SELECTION_BRIDGE
 BRIDGE=SELECTION_BRIDGE.replace('chapters = '+repr(SELECTION_CHAPTERS),'chapters = '+repr(CHAPTERS))
 BRIDGE=BRIDGE.replace('time.monotonic() + 50','time.monotonic() + 75')
-BRIDGE=BRIDGE.replace("        elif chapter.startswith('c04.'):", """        elif chapter.startswith('c05.'):
+assert "        elif chapter.startswith('c04.'):" in BRIDGE
+BRIDGE=BRIDGE.replace("        elif chapter.startswith('c04.'):", """        elif chapter.startswith('c06.'):
+            if name.startswith('choose_'):
+                kind=name.removeprefix('choose_').upper()
+                next(btn for btn in panel.shape_buttons if btn.property('shape_type')==kind).click()
+            elif name.startswith('draw_'):
+                kind=name.removeprefix('draw_').upper()
+                points={
+                    'LINE':((100,160),(360,160)),
+                    'DASHED_LINE':((100,160),(360,160)),
+                    'TRIANGLE':((100,160),(360,160),(240,340)),
+                    'RECT':((100,160),(360,340)),
+                    'PARALLELOGRAM':((100,160),(300,160),(360,340)),
+                    'TRAPEZOID':((100,340),(360,340),(320,160),(140,160)),
+                    'DIAMOND':((100,250),(360,250),(240,340)),
+                    'ANGLE':((240,240),(100,240),(240,360)),
+                    'CIRCLE':((240,240),(340,240)),
+                    'ELLIPSE':((100,160),(360,340)),
+                }.get(kind)
+                if points is not None:
+                    for x,y in points:
+                        mouse(canvas,'press',x,y); mouse(canvas,'release',x,y)
+                else:
+                    mouse(canvas,'press',100,160); mouse(canvas,'move',360,340); mouse(canvas,'release',360,340)
+            elif name == 'enable':
+                panel.btn_settings_smart.click()
+            elif name == 'pen':
+                panel.pen_style_buttons['pen'].click()
+            elif name == 'recognize_line':
+                if not trace.get('hold_started'):
+                    trace['hold_started']=time.perf_counter()
+                    trace['hold_shapes']=len(canvas.shape_items)
+                    mouse(canvas,'press',100,460)
+                    for x in range(112,365,12): mouse(canvas,'move',x,460+(x%3))
+                elif len(canvas.shape_items)>trace['hold_shapes']:
+                    trace['hold_elapsed']=time.perf_counter()-trace['hold_started']
+                    assert trace['hold_elapsed']>=canvas.SMART_HOLD_MS/1000
+                    mouse(canvas,'release',364,460)
+            elif name in ('undo_recognition','redo_recognition'):
+                panel.icon_buttons['undo' if name.startswith('undo') else 'redo'].click()
+            elif name == 'point1':
+                mouse(canvas,'press',120,160); mouse(canvas,'release',120,160)
+            elif name == 'point2':
+                mouse(canvas,'press',360,160); mouse(canvas,'release',360,160)
+            elif name == 'cancel':
+                panel.btn_cancel_points.click()
+            elif name == 'restart1':
+                mouse(canvas,'press',120,160); mouse(canvas,'release',120,160)
+            elif name == 'restart2':
+                mouse(canvas,'press',360,160); mouse(canvas,'release',360,160)
+            elif name == 'finish3':
+                mouse(canvas,'press',240,340); mouse(canvas,'release',240,340)
+            elif name == 'snap_line':
+                for point in ((240,340),(248,157)):
+                    mouse(canvas,'press',*point); mouse(canvas,'release',*point)
+            elif name in ('midpoint','perp_bisector'):
+                line=canvas.single_flat_shape()
+                assert line['type']=='LINE'
+                label=dict(canvas.shape_op_list(line))[name]
+                self.module.QMenu.exec=lambda menu,*args: next(action for action in menu.actions() if action.text()==label).trigger()
+                panel.btn_more.click()
+            else:
+                raise AssertionError('unexpected C06 action: '+name)
+        elif chapter.startswith('c05.'):
             if name in ('enter','exit'):
                 panel.icon_buttons['whiteboard'].click()
             elif name in ('black','white'):
@@ -66,8 +129,14 @@ BRIDGE=BRIDGE.replace("        elif chapter.startswith('c04.'):", """        eli
                 raise AssertionError('unexpected C05 action: '+name)
         elif chapter.startswith('c04.'):""")
 
+assert "elif chapter.startswith('c05.')" in BRIDGE
+assert "elif chapter.startswith('c06.')" in BRIDGE
+BRIDGE=BRIDGE.replace("        chapter, name = engine.chapter_id, current.id", """        chapter, name = engine.chapter_id, current.id
+        key=[chapter,name]
+        if key not in trace.setdefault('steps',[]):
+            trace['steps'].append(key)""")
 
-def test_five_courses_137_steps_share_one_process_and_restore_once(parent_coordinator,tmp_path,monkeypatch):
+def test_six_courses_192_steps_share_one_process_and_restore_once(parent_coordinator,tmp_path,monkeypatch):
     panel,coordinator=parent_coordinator
     stderr=tmp_path/'pages-child.stderr'
     original_stderr=QProcess.setStandardErrorFile
@@ -89,11 +158,12 @@ def test_five_courses_137_steps_share_one_process_and_restore_once(parent_coordi
           timeout=90000,diagnostic=diagnostic)
     proof=json.loads((coordinator.session.paths.data_dir/'formal-core-proof.json').read_text(encoding='utf-8'))
     assert proof['completed']==list(CHAPTERS) and proof['all_complete']
+    assert len(proof['steps'])==192 and proof['hold_elapsed']>=0.65
     assert len(set(proof['pids']))==1 and proof['pids'][0]==process.processId()
     assert coordinator.session._token is token and coordinator.session.process is process
     assert coordinator.session.suspend.call_count==1 and coordinator.session.restore.call_count==0
     assert panel.canvas.document_signature()==original and panel._teaching_suspended
-    coordinator.session.request_stop('pages course accepted')
+    coordinator.session.request_stop('geometry course accepted')
     until(lambda:coordinator.session.phase=='stopped',diagnostic=diagnostic)
     assert coordinator.session.restore.call_count==1 and not root.exists()
     assert panel.canvas.document_signature()==original and not panel._teaching_suspended

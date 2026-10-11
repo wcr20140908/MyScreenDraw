@@ -3297,6 +3297,8 @@ class DrawingCanvas(QMainWindow):
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint
                             | Qt.WindowType.Tool | Qt.WindowType.WindowDoesNotAcceptFocus)
         self._teaching_stroke_operation = None
+        self._teaching_recognition_operation = None
+        self._teaching_recognition_shape_id = None
         self._teaching_stroke_tool = None
         self._teaching_edit = None
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -4063,7 +4065,7 @@ class DrawingCanvas(QMainWindow):
         if edit is not None:
             self._discard_teaching_operation(edit[0])
 
-    def _begin_teaching_edit(self):
+    def _begin_teaching_edit(self, pos=None):
         if self.draw_state == "SELECT":
             name = "selection.changed"
             operation = self._begin_teaching_operation(name)
@@ -4071,6 +4073,14 @@ class DrawingCanvas(QMainWindow):
                 name = "selection.transformed"
                 operation = self._begin_teaching_operation(name)
             before = frozenset(self.selected_ids) if operation is not None else None
+        elif self.draw_state == "SHAPE":
+            name = "shape.committed"
+            operation = self._begin_teaching_operation(name)
+            if operation is None:
+                name = "shape.point_added"
+                operation = self._begin_teaching_operation(name)
+            before = (self.shape_type, frozenset(item["id"] for item in self.shape_items),
+                      len(self.pending_points), QPointF(pos) if pos is not None else None) if operation is not None else None
         elif self.draw_state == "ERASER":
             name = "ink.erased"
             operation = self._begin_teaching_operation(name)
@@ -4080,6 +4090,37 @@ class DrawingCanvas(QMainWindow):
         else:
             return None
         return (operation, name, before) if operation is not None else None
+
+    @staticmethod
+    def _teaching_shape_nonempty(item):
+        kind = item.get("kind", "rect")
+        if kind == "poly":
+            points = item["points"]
+            if item["type"] in ("LINE", "DASHED_LINE"):
+                return len(points) == 2 and math.hypot(points[0].x()-points[1].x(), points[0].y()-points[1].y()) > 8
+            if item["type"] == "TRAPEZOID":
+                if len(points) != 4:
+                    return False
+                a, b, c, d = points
+                base = math.hypot(b.x()-a.x(), b.y()-a.y())
+                top = math.hypot(d.x()-c.x(), d.y()-c.y())
+                if base < 4 or top < 4:
+                    return False
+                height = abs((b.x()-a.x())*(c.y()-a.y())-(b.y()-a.y())*(c.x()-a.x())) / base
+                if height < 4:
+                    return False
+            area = sum(a.x()*b.y()-b.x()*a.y() for a,b in zip(points, points[1:]+points[:1]))
+            return abs(area) > 1
+        if kind == "circle":
+            return item["radius"] >= 4
+        if kind == "ellipse":
+            return item["rx"] >= 4 and item["ry"] >= 4
+        if kind == "angle":
+            vertex = item["vertex"]
+            ax, ay = item["p1"].x()-vertex.x(), item["p1"].y()-vertex.y()
+            bx, by = item["p2"].x()-vertex.x(), item["p2"].y()-vertex.y()
+            return math.hypot(ax, ay) >= 4 and math.hypot(bx, by) >= 4 and abs(ax*by-ay*bx) > 1
+        return item["rect"].width() >= 4 and item["rect"].height() >= 4
 
     def _finish_teaching_edit(self, edit, content_changed, action, selection_method):
         if edit is None:
@@ -4094,6 +4135,21 @@ class DrawingCanvas(QMainWindow):
                 if not content_changed or action not in ("move", "scale", "rotate") or not self.selected_ids:
                     return
                 details = {"count": len(self.selected_ids), "action": action}
+            elif name == "shape.point_added":
+                if self.shape_type != before[0] or len(self.pending_points) != before[2] + 1:
+                    return
+                details = {"type": before[0], "points": len(self.pending_points)}
+            elif name == "shape.committed":
+                added = [item for item in self.shape_items if item["id"] not in before[1]]
+                if not content_changed or len(added) != 1 or added[0]["type"] != before[0] or not self._teaching_shape_nonempty(added[0]):
+                    return
+                item = added[0]
+                snapped = (item["type"] in ("LINE", "DASHED_LINE") and before[3] is not None
+                           and item["points"][-1] != before[3])
+                details = {"type": item["type"], "count": 1, "snapped": bool(snapped)}
+                if item["type"] in ("LINE", "DASHED_LINE"):
+                    first, last = item["points"]
+                    details.update(start_x=first.x(), start_y=first.y(), end_x=last.x(), end_y=last.y())
             else:
                 if not content_changed:
                     return
@@ -5232,6 +5288,8 @@ class DrawingCanvas(QMainWindow):
         # 直接摆状态的旧式调用（测试里有）保持 False，走原来的整页快照分支。
         "_stroke_uses_delta": False,
         "_teaching_stroke_operation": None,
+        "_teaching_recognition_operation": None,
+        "_teaching_recognition_shape_id": None,
         "_teaching_stroke_tool": None,
         # 速度→宽度：每指一份，否则两根手指的速度会互相污染。
         "_speed_mm_s": None,      # 平滑后的笔速（mm/s）；None 表示这一笔还没测到
@@ -5410,21 +5468,34 @@ class DrawingCanvas(QMainWindow):
 
     def _commit_hold_recognition(self):
         """停笔到时：就地把这一笔换成标准图形，笔不需要抬起。"""
-        stroke_id = self.current_stroke_id
-        points = [(p.x(), p.y()) for p in self.current_stroke_points]
-        self._cancel_smart_recognition()
-        if stroke_id is None or len(points) < 2:
-            return
-        self.finish_smart_stroke(stroke_id, points)
-        if any(seg.get("id") == stroke_id for seg in self.all_segments):
-            return          # 没识别成标准图形：原笔迹还在，继续画就是了
-        # 已定形。笔可能还按着，就此收束当前这一笔；继续移动会在 mouseMoveEvent 里另起一笔。
-        self.current_stroke_id = None
-        self.current_stroke_points = []
-        self.current_stroke_widths = []
-        self.current_stroke_segments = []
-        self.last_point = None
-        self.update()
+        operation, self._teaching_recognition_operation = self._teaching_recognition_operation, None
+        before = frozenset(item["id"] for item in self.shape_items) if operation is not None else None
+        staged = False
+        try:
+            stroke_id = self.current_stroke_id
+            points = [(p.x(), p.y()) for p in self.current_stroke_points]
+            self._cancel_smart_recognition()
+            if stroke_id is None or len(points) < 2:
+                return
+            self.finish_smart_stroke(stroke_id, points)
+            if any(seg.get("id") == stroke_id for seg in self.all_segments):
+                return          # 没识别成标准图形：原笔迹还在，继续画就是了
+            # 已定形。笔可能还按着，就此收束当前这一笔；继续移动会在 mouseMoveEvent 里另起一笔。
+            self.current_stroke_id = None
+            self.current_stroke_points = []
+            self.current_stroke_widths = []
+            self.current_stroke_segments = []
+            self.last_point = None
+            self.update()
+            if operation is not None:
+                added = [item for item in self.shape_items if item["id"] not in before]
+                if len(added) == 1 and self._teaching_shape_nonempty(added[0]):
+                    self._teaching_recognition_operation = operation
+                    self._teaching_recognition_shape_id = added[0]["id"]
+                    staged = True
+        finally:
+            if not staged:
+                self._discard_teaching_operation(operation)
 
     def _begin_stroke(self, pos, snapshot=False):
         """开始新的一笔。
@@ -5437,6 +5508,9 @@ class DrawingCanvas(QMainWindow):
         self._discard_teaching_operation(self._teaching_stroke_operation)
         events = getattr(self.panel, "teaching_events", None)
         self._teaching_stroke_operation = events.begin_operation("ink.committed") if events else None
+        self._discard_teaching_operation(self._teaching_recognition_operation)
+        self._teaching_recognition_operation = events.begin_operation("shape.recognized") if events else None
+        self._teaching_recognition_shape_id = None
         self._teaching_stroke_tool = self.draw_state
         self.current_stroke_widths = []
         self.current_stroke_segments = []
@@ -5466,6 +5540,21 @@ class DrawingCanvas(QMainWindow):
         self.current_stroke_widths = []
         self.current_stroke_segments = []
 
+    def _take_teaching_recognition(self):
+        operation = self._teaching_recognition_operation
+        shape_id = self._teaching_recognition_shape_id
+        self._teaching_recognition_operation = None
+        self._teaching_recognition_shape_id = None
+        return operation, shape_id
+
+    def _finish_teaching_recognition(self, recognition):
+        operation, shape_id = recognition
+        if operation is None or shape_id is None:
+            return
+        item = next((shape for shape in self.shape_items if shape["id"] == shape_id), None)
+        if item is not None and self._teaching_shape_nonempty(item):
+            self._emit_teaching_result(operation, "shape.recognized", {"type": item["type"], "count": 1})
+
     def _finish_pointer_stroke(self):
         """一笔结束（抬笔/抬指）时按完成时间入栈。
 
@@ -5474,6 +5563,8 @@ class DrawingCanvas(QMainWindow):
         if not self._stroke_uses_delta:
             return False
         operation, self._teaching_stroke_operation = self._teaching_stroke_operation, None
+        recognition, self._teaching_recognition_operation = self._teaching_recognition_operation, None
+        self._teaching_recognition_shape_id = None
         try:
             stroke_id = self.current_stroke_id
             self._stroke_uses_delta = False
@@ -5504,6 +5595,7 @@ class DrawingCanvas(QMainWindow):
             return True
         finally:
             self._discard_teaching_operation(operation)
+            self._discard_teaching_operation(recognition)
 
     def draw_hold_ring(self, painter, center=None, progress=None):
         """笔尖停留进度环：转满一圈这一笔就定形。
@@ -6021,13 +6113,20 @@ class DrawingCanvas(QMainWindow):
         return [(key, tr(label_key)) for key, label_key in self.SHAPE_OPS.get(item["type"], [])]
 
     def apply_shape_op(self, item, op):
-        new_items = self._make_op_items(item, op)
-        if not new_items:
-            return
-        self.push_undo()
-        for aux in new_items:
-            self.add_shape_item(aux, select=False)
-        track_event("shape_op", shape_type=item["type"], op=op)
+        with teaching_document_operation(self.panel, "shape.constructed") as (events, operation):
+            before = frozenset(shape["id"] for shape in self.shape_items) if operation is not None else None
+            new_items = self._make_op_items(item, op)
+            if not new_items:
+                return
+            self.push_undo()
+            for aux in new_items:
+                self.add_shape_item(aux, select=False)
+            track_event("shape_op", shape_type=item["type"], op=op)
+            if events is not None and operation is not None:
+                added = [shape for shape in self.shape_items if shape["id"] not in before]
+                if added and item in self.shape_items:
+                    events.emit_result(operation, "shape.constructed", "success", {
+                        "operation": op, "source_type": item["type"], "added": len(added)})
 
     def _make_op_items(self, item, op):
         try:
@@ -8128,7 +8227,7 @@ class DrawingCanvas(QMainWindow):
             self.update()
             return
         # Capture the teaching context at press, never at a later release/step.
-        self._teaching_edit = self._begin_teaching_edit()
+        self._teaching_edit = self._begin_teaching_edit(pos)
         # Ink already has per-stroke delta undo. Cloning the whole page here
         # is discarded on release and makes pen-down cost grow with old ink.
         self.pending_undo = None if self.draw_state in ("PEN", "MARKER", "LASER") else self.capture_page()
@@ -8373,6 +8472,7 @@ class DrawingCanvas(QMainWindow):
         if event.button() != Qt.MouseButton.LeftButton:
             return
         edit, self._teaching_edit = self._teaching_edit, None
+        recognition = self._take_teaching_recognition()
         try:
             action = self.drag_action
             selection_method = "rectangle" if self.selection_rect is not None else "click"
@@ -8445,7 +8545,9 @@ class DrawingCanvas(QMainWindow):
                 self.save_current_page()
             if self.panel: self.panel.heartbeat_refresh()
             self._finish_teaching_edit(edit, content_changed, action, selection_method)
+            self._finish_teaching_recognition(recognition)
         finally:
+            self._discard_teaching_operation(recognition[0])
             if edit is not None:
                 self._discard_teaching_operation(edit[0])
 
@@ -8658,13 +8760,20 @@ class DrawingCanvas(QMainWindow):
     def _pointer_release(self, key, pos):
         if key not in self._pointer_slots:
             return
-        with self._pointer_scope(key):
-            if self.last_point is not None and pos != self.last_point:
-                self.current_stroke_points.append(QPointF(pos))
-                self.add_smooth_segments(pos)
-            self._cancel_smart_recognition(drop_pending=True)
-            self._finish_pointer_stroke()
-        self._drop_pointer(key)
+        recognition = None
+        try:
+            with self._pointer_scope(key):
+                recognition = self._take_teaching_recognition()
+                if self.last_point is not None and pos != self.last_point:
+                    self.current_stroke_points.append(QPointF(pos))
+                    self.add_smooth_segments(pos)
+                self._cancel_smart_recognition(drop_pending=True)
+                self._finish_pointer_stroke()
+            self._drop_pointer(key)
+            self._finish_teaching_recognition(recognition)
+        finally:
+            if recognition is not None:
+                self._discard_teaching_operation(recognition[0])
 
     def _drop_pointer(self, key):
         timer = self._pointer_timers.pop(key, None)
@@ -11001,15 +11110,25 @@ class ControlPanel(QWidget):
         self.set_smart_shapes(not self.canvas.smart_shapes_enabled)
 
     def set_smart_shapes(self, enabled):
-        """智能识别图形的唯一写入点（开关已移至设置页面）。"""
         enabled = bool(enabled)
         if not self.canvas:
             return
-        self.canvas.smart_shapes_enabled = enabled
-        self.canvas.dash_chain = None
-        self.sync_settings_panel()
-        self.save_settings()
-        track_event("smart_shapes_toggled", enabled=enabled)
+        operation = (self.canvas._begin_teaching_operation("shape.recognition_changed")
+                     if enabled != self.canvas.smart_shapes_enabled else None)
+        try:
+            self.canvas.smart_shapes_enabled = enabled
+            self.canvas.dash_chain = None
+            self.sync_settings_panel()
+            self.save_settings()
+            track_event("smart_shapes_toggled", enabled=enabled)
+            if operation is not None:
+                marker = getattr(self, "_last_settings_write", None)
+                saved = (marker is not None and marker[0] == CONFIG_FILE and os.path.isfile(CONFIG_FILE)
+                         and marker[1].get("smart_shapes") == enabled)
+                self.canvas._emit_teaching_result(operation, "shape.recognition_changed", {"enabled": enabled},
+                                                 outcome="success" if saved else "failed")
+        finally:
+            self.canvas._discard_teaching_operation(operation)
 
     # --- 计时器 ---
     def setup_timer_sub(self):
@@ -11382,21 +11501,43 @@ class ControlPanel(QWidget):
         self.update_shape_buttons()
 
     def cancel_shape_points(self):
-        if self.canvas:
+        if not self.canvas or not self.canvas.pending_points:
+            return
+        operation = self.canvas._begin_teaching_operation("shape.points_cancelled")
+        removed = len(self.canvas.pending_points)
+        try:
             self.canvas.cancel_pending_points()
+            self.canvas._emit_teaching_result(operation, "shape.points_cancelled", {"removed": removed})
+        finally:
+            self.canvas._discard_teaching_operation(operation)
 
     def on_shape_selected(self):
         btn = self.sender()
-        self.set_drawing_mode(True)
-        self.canvas.cancel_pending_points()          # 换图形类型时丢弃已落的顶点
-        self.canvas.shape_type = btn.property("shape_type")
-        self.canvas.draw_state = "SHAPE"
-        self.set_active_tool(self.btn_shape)
-        self.update_shape_buttons()
-        key = self.SHAPE_HINTS.get(self.canvas.shape_type)
-        self.shape_hint_label.setText(
-            trf("shape_hint_suffix", hint=tr(key)) if key else tr("hint_drag_draw"))
-        track_event("shape_selected", shape_type=self.canvas.shape_type)
+        requested = btn.property("shape_type")
+        previous = self.canvas.shape_type
+        previous_tool = self.canvas.draw_state
+        previous_drawing = self.canvas.is_drawing_mode
+        operation = self.canvas._begin_teaching_operation("shape.type_changed")
+        try:
+            with self._teaching_tool_action():
+                self.set_drawing_mode(True)
+                self.canvas.cancel_pending_points()          # 换图形类型时丢弃已落的顶点
+                self.canvas.shape_type = btn.property("shape_type")
+                self.canvas.draw_state = "SHAPE"
+                self.set_active_tool(self.btn_shape)
+                self.update_shape_buttons()
+                key = self.SHAPE_HINTS.get(self.canvas.shape_type)
+                self.shape_hint_label.setText(
+                    trf("shape_hint_suffix", hint=tr(key)) if key else tr("hint_drag_draw"))
+                track_event("shape_selected", shape_type=self.canvas.shape_type)
+            # Same-type activation is still a real selection when returning from
+            # another tool or from passthrough mode. A repeated click while the
+            # same shape tool is already active remains a no-op for teaching.
+            reactivated = previous_tool != "SHAPE" or not previous_drawing
+            if requested != previous or reactivated:
+                self.canvas._emit_teaching_result(operation, "shape.type_changed", {"type": self.canvas.shape_type})
+        finally:
+            self.canvas._discard_teaching_operation(operation)
 
     def update_shape_buttons(self):
         if not hasattr(self, "shape_buttons"):
@@ -12098,62 +12239,63 @@ class ControlPanel(QWidget):
 
     def open_more_menu(self):
         """「⋯」：对唯一选中的平面图形做几何构造 / 角度调整。"""
-        item = self.canvas.single_flat_shape()
-        if item is None:
-            return
-
-        # 临时隐藏 select_panel，避免遮挡菜单
-        select_was_visible = self.select_panel.isVisible()
-        if select_was_visible:
-            self.select_panel.hide()
-
-        # 不挂父窗口：select_panel 的 owner 被我们手工改写过（GWLP_HWNDPARENT），
-        # 作为弹出菜单的 transient parent 会破坏 Qt 的内部假设导致崩溃
-        menu = QMenu()
-        # 设置菜单为置顶窗口，确保不被其他窗口遮挡
-        menu.setWindowFlags(menu.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
-        menu.setStyleSheet(self.styleSheet())
-        self._more_menu = menu             # 持引用防止弹出期间被回收
-
-        if item["type"] == "ANGLE":
-            _, span = self.canvas.angle_span(item)
-            info = menu.addAction(trf("angle_current", value=abs(round(span))))
-            info.setEnabled(False)
-            menu.addSeparator()
-            menu.addAction(tr("angle_plus"), lambda: self.canvas.adjust_angle_item(item, delta=5))
-            menu.addAction(tr("angle_minus"), lambda: self.canvas.adjust_angle_item(item, delta=-5))
-            preset = menu.addMenu(tr("angle_preset"))
-            for deg in (30, 45, 60, 90, 120, 135):
-                preset.addAction(f"{deg}°", lambda d=deg: self.canvas.adjust_angle_item(item, target=d))
-            menu.addSeparator()
-            menu.addAction(tr("angle_bisector"), lambda: self.canvas.angle_bisector_item(item))
-        else:
-            ops = self.canvas.shape_op_list(item)
-            if not ops:
-                if select_was_visible:
-                    self.select_panel.show()
-                    self.raise_floating(self.select_panel)
+        with teaching_document_action(self, ("shape.constructed",)):
+            item = self.canvas.single_flat_shape()
+            if item is None:
                 return
-            for key, label in ops:
-                menu.addAction(label, lambda k=key: self.canvas.apply_shape_op(item, k))
 
-        # 弹出期间停掉置顶心跳：这个 QMenu 刻意不挂父窗口，因而没有 owner 保护，心跳一旦
-        # 因别的原因重排整条链（外来窗口冒上来、链序被打乱），画布就可能压到它上面——
-        # 菜单还在，但画布上的笔迹直接压在菜单文字上，点击也穿到画布。其余模态对话框
-        # （取色/校准/导入名单）早就用同一套 stop/start 处理。
-        # singleShot(0)：QMenu 的原生窗口要等 exec() 弹出后才存在，此时再矫正一次 Z 序；
-        # bind_owner=False 表示只排 Z 序、不改它的 owner，避免干扰 Qt 的弹窗管理。
-        self.timer.stop()
-        try:
-            QTimer.singleShot(0, lambda: self.raise_floating(menu, bind_owner=False))
-            menu.exec(QCursor.pos())
-        finally:
-            self.timer.start(self.HEARTBEAT_MS)
+            # 临时隐藏 select_panel，避免遮挡菜单
+            select_was_visible = self.select_panel.isVisible()
+            if select_was_visible:
+                self.select_panel.hide()
 
-        # 菜单关闭后恢复 select_panel
-        if select_was_visible:
-            self.select_panel.show()
-            self.raise_floating(self.select_panel)
+            # 不挂父窗口：select_panel 的 owner 被我们手工改写过（GWLP_HWNDPARENT），
+            # 作为弹出菜单的 transient parent 会破坏 Qt 的内部假设导致崩溃
+            menu = QMenu()
+            # 设置菜单为置顶窗口，确保不被其他窗口遮挡
+            menu.setWindowFlags(menu.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
+            menu.setStyleSheet(self.styleSheet())
+            self._more_menu = menu             # 持引用防止弹出期间被回收
+
+            if item["type"] == "ANGLE":
+                _, span = self.canvas.angle_span(item)
+                info = menu.addAction(trf("angle_current", value=abs(round(span))))
+                info.setEnabled(False)
+                menu.addSeparator()
+                menu.addAction(tr("angle_plus"), lambda: self.canvas.adjust_angle_item(item, delta=5))
+                menu.addAction(tr("angle_minus"), lambda: self.canvas.adjust_angle_item(item, delta=-5))
+                preset = menu.addMenu(tr("angle_preset"))
+                for deg in (30, 45, 60, 90, 120, 135):
+                    preset.addAction(f"{deg}°", lambda d=deg: self.canvas.adjust_angle_item(item, target=d))
+                menu.addSeparator()
+                menu.addAction(tr("angle_bisector"), lambda: self.canvas.angle_bisector_item(item))
+            else:
+                ops = self.canvas.shape_op_list(item)
+                if not ops:
+                    if select_was_visible:
+                        self.select_panel.show()
+                        self.raise_floating(self.select_panel)
+                    return
+                for key, label in ops:
+                    menu.addAction(label, lambda k=key: self.canvas.apply_shape_op(item, k))
+
+            # 弹出期间停掉置顶心跳：这个 QMenu 刻意不挂父窗口，因而没有 owner 保护，心跳一旦
+            # 因别的原因重排整条链（外来窗口冒上来、链序被打乱），画布就可能压到它上面——
+            # 菜单还在，但画布上的笔迹直接压在菜单文字上，点击也穿到画布。其余模态对话框
+            # （取色/校准/导入名单）早就用同一套 stop/start 处理。
+            # singleShot(0)：QMenu 的原生窗口要等 exec() 弹出后才存在，此时再矫正一次 Z 序；
+            # bind_owner=False 表示只排 Z 序、不改它的 owner，避免干扰 Qt 的弹窗管理。
+            self.timer.stop()
+            try:
+                QTimer.singleShot(0, lambda: self.raise_floating(menu, bind_owner=False))
+                menu.exec(QCursor.pos())
+            finally:
+                self.timer.start(self.HEARTBEAT_MS)
+
+            # 菜单关闭后恢复 select_panel
+            if select_was_visible:
+                self.select_panel.show()
+                self.raise_floating(self.select_panel)
 
     def position_selection_panel(self, rect, restack=True):
         """把选中面板摆到选中范围旁边。

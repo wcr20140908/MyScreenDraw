@@ -5,7 +5,8 @@
     "courses/c02.json",
     "courses/c03.json",
     "courses/c04.json",
-    "courses/c05.json"
+    "courses/c05.json",
+    "courses/c06.json"
   ],
   "fixtures": {
     "core.interface": "fixtures/core.interface.msd",
@@ -26,7 +27,11 @@
     "pages.c05.add_switch": "fixtures/pages.c05.add_switch.msd",
     "pages.c05.rename_delete": "fixtures/pages.c05.rename_delete.msd",
     "pages.c05.copy_position": "fixtures/pages.c05.copy_position.msd",
-    "pages.c05.reorder": "fixtures/pages.c05.reorder.msd"
+    "pages.c05.reorder": "fixtures/pages.c05.reorder.msd",
+    "geometry.c06.plane": "fixtures/geometry.c06.plane.msd",
+    "geometry.c06.solid": "fixtures/geometry.c06.solid.msd",
+    "geometry.c06.points": "fixtures/geometry.c06.points.msd",
+    "geometry.c06.recognition_snap": "fixtures/geometry.c06.recognition_snap.msd"
   },
   "groups": [
     {
@@ -41,7 +46,8 @@
       "title_key": "teaching_group_drawing",
       "courses": [
         "c02",
-        "c03"
+        "c03",
+        "c06"
       ]
     },
     {

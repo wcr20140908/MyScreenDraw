@@ -777,6 +777,8 @@ from teaching.selection_copy import SELECTION_COPY
 _BASE.update(SELECTION_COPY)
 from teaching.pages_copy import PAGES_COPY
 _BASE.update(PAGES_COPY)
+from teaching.geometry_copy import GEOMETRY_COPY
+_BASE.update(GEOMETRY_COPY)
 
 # 每个条目都必须给全 8 种语言：漏一个就在导入时炸掉，而不是在课堂上显示成英文 key。
 for _key, _values in _BASE.items():

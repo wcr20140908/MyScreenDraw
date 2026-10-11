@@ -38,7 +38,11 @@ APPLICATION_TARGETS = frozenset({
     'pages.add', 'pages.previous', 'pages.next', 'tools.teaching',
     'selection.duplicate', 'selection.delete', 'toolbar.board_style',
     'pages.thumbnails_button', 'pages.thumbnail_list', 'pages.rename', 'pages.delete',
-    'pages.copy', 'pages.copy_position',
+    'pages.copy', 'pages.copy_position', 'toolbar.shape', 'shape.cancel_points',
+    'shape.type.line', 'shape.type.dashed_line', 'shape.type.triangle', 'shape.type.rect',
+    'shape.type.parallelogram', 'shape.type.trapezoid', 'shape.type.diamond', 'shape.type.angle',
+    'shape.type.circle', 'shape.type.ellipse', 'shape.type.cuboid', 'shape.type.cube',
+    'shape.type.cylinder', 'shape.type.cone', 'settings.smart_shapes', 'selection.more',
 })
 APPLICATION_EVENTS = frozenset({
     'ink.committed', 'ink.erased', 'project.saved', 'mode.changed', 'tool.changed',
@@ -50,6 +54,8 @@ APPLICATION_EVENTS = frozenset({
     'pen.defaults_changed', 'pen.default_applied', 'selection.duplicated', 'selection.deleted',
     'board.style_changed', 'page.renamed', 'page.deleted', 'page.copied',
     'page.copy_placement_changed', 'page.reordered', 'thumbnails.opened',
+    'shape.type_changed', 'shape.committed', 'shape.point_added', 'shape.points_cancelled',
+    'shape.recognized', 'shape.recognition_changed', 'shape.constructed',
 })
 
 
@@ -468,6 +474,10 @@ class ApplicationTeachingHost(QObject):
             'toolbar.clear': lambda: self.panel.icon_buttons.get('clear'),
             'selection.duplicate': lambda: self.panel.btn_dup,
             'selection.delete': lambda: self.panel.btn_del,
+            'selection.more': lambda: self.panel.btn_more,
+            'toolbar.shape': lambda: self.panel.icon_buttons.get('shape'),
+            'shape.cancel_points': lambda: self.panel.btn_cancel_points,
+            'settings.smart_shapes': lambda: getattr(self.panel, 'btn_settings_smart', None),
             'toolbar.board_style': lambda: self.panel.icon_buttons.get('board_style'),
             'pages.thumbnails_button': lambda: self.panel.rail_count,
             'pages.thumbnail_list': lambda: self.panel.thumbnail_list,
@@ -484,6 +494,10 @@ class ApplicationTeachingHost(QObject):
             'pages.previous': lambda: self.panel.rail_prev,
             'pages.next': lambda: self.panel.rail_next,
         }
+        for kind in ('LINE', 'DASHED_LINE', 'TRIANGLE', 'RECT', 'PARALLELOGRAM', 'TRAPEZOID',
+                     'DIAMOND', 'ANGLE', 'CIRCLE', 'ELLIPSE', 'CUBOID', 'CUBE', 'CYLINDER', 'CONE'):
+            bindings['shape.type.'+kind.lower()] = lambda kind=kind: next(
+                (button for button in self.panel.shape_buttons if button.property('shape_type') == kind), None)
         for target_id, resolver in bindings.items():
             if target_id in {'pen.palette', 'pen.width'}:
                 reveal = self._reveal_pen
@@ -495,6 +509,10 @@ class ApplicationTeachingHost(QObject):
                 reveal = self._reveal_laser
             elif target_id in {'pen.defaults', 'pen.defaults.capture'}:
                 reveal = self._reveal_settings
+            elif target_id.startswith('shape.type.') or target_id == 'shape.cancel_points':
+                reveal = self._reveal_shapes
+            elif target_id == 'settings.smart_shapes':
+                reveal = self._reveal_geometry_settings
             elif target_id == 'pages.thumbnails_button':
                 reveal = self._reveal_thumbnail_button
             elif target_id in {'pages.add', 'pages.previous', 'pages.next'}:
@@ -503,7 +521,7 @@ class ApplicationTeachingHost(QObject):
                 reveal = self._reveal_thumbnails
             elif target_id == 'pages.copy_position':
                 reveal = self._reveal_page_settings
-            elif target_id in {'selection.duplicate', 'selection.delete'}:
+            elif target_id in {'selection.duplicate', 'selection.delete', 'selection.more'}:
                 reveal = self._reveal_selection
             elif target_id in {'eraser.type.circle', 'eraser.type.stroke', 'eraser.size'}:
                 reveal = self._reveal_eraser
@@ -561,6 +579,16 @@ class ApplicationTeachingHost(QObject):
 
     def _reveal_eraser(self):
         self.panel.show_only_sub(self.panel.eraser_sub)
+
+    def _reveal_shapes(self):
+        settings = getattr(self.panel, 'settings_panel', None)
+        if settings is not None and not sip.isdeleted(settings):
+            settings.hide()
+        self.panel.show_only_sub(self.panel.shape_sub)
+
+    def _reveal_geometry_settings(self):
+        self.panel.close_thumbnail_panel()
+        self.panel.open_settings_panel()
 
     def _reveal_page_rail(self):
         self.panel.update_whiteboard_ui()
@@ -809,6 +837,8 @@ class ApplicationTeachingHost(QObject):
         prepare_selection_fixture(self.panel, fixture, self.request.paths)
         from .pages_fixtures import prepare_pages_fixture
         prepare_pages_fixture(self.panel, fixture, self.request.paths)
+        from .geometry_fixtures import prepare_geometry_fixture
+        prepare_geometry_fixture(self.panel, fixture, self.request.paths)
 
     def activate(self):
         if self._closed or not self.context.ui_active:
