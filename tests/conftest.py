@@ -24,7 +24,11 @@ def _dispose_offscreen_widgets(app, owned_windows=None):
             window.shutdown_autosave()
             listener = getattr(window, "listener", None)
             if listener is not None:
-                listener.stop()
+                try:
+                    listener.stop()
+                except NotImplementedError:
+                    if os.environ.get("PYNPUT_BACKEND") != "dummy":
+                        raise
                 try:
                     listener.join(timeout=1)
                 except RuntimeError:

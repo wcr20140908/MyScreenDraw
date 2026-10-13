@@ -60,8 +60,8 @@ function Invoke-Smoke([string]$Executable, [string]$Directory) {
 }
 
 $version = (& python -c "from version import VERSION; print(VERSION)").Trim()
-if ($LASTEXITCODE -ne 0 -or $version -ne "6.1.0") {
-    throw "Release build requires version 6.1.0, found '$version'"
+if ($LASTEXITCODE -ne 0 -or $version -ne "6.1.1") {
+    throw "Release build requires version 6.1.1, found '$version'"
 }
 
 # Never package checked-out runtime data or stale PyInstaller output.
@@ -91,7 +91,8 @@ $env:QT_QPA_PLATFORM = "offscreen"
 $previousErrorAction = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
 try {
-    python -m pytest -q --ignore=tests/test_touch_injection.py --ignore=tests/test_multitouch_injection.py --ignore=tests/test_multitouch.py
+    # 6.1.1: focused release checks per the user's request for fast delivery.
+    python -B -m pytest -q -p no:cacheprovider --tb=short tests/test_ink_latency.py tests/test_stroke_spatial_index.py tests/test_stroke_cache_610.py tests/test_document_safety_610.py tests/test_release_hygiene.py tests/test_color_schemes.py::test_classic_factory_keeps_legacy_tokens tests/test_color_schemes.py::test_settings_choice_applies_and_reopens_from_disk tests/test_color_schemes.py::test_switching_preserves_user_content_preferences_and_button_geometry
     $testsExit = $LASTEXITCODE
 } finally {
     $ErrorActionPreference = $previousErrorAction

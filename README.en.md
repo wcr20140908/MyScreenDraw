@@ -1,4 +1,4 @@
-﻿# MyScreenDraw
+# MyScreenDraw
 
 > **中文**: [README.md](README.md)
 
@@ -11,9 +11,16 @@ MyScreenDraw is a fullscreen annotation / whiteboard / math-teaching tool built 
 - **Random name picker, timer, presentation spotlight, calculator** — a whole lesson without switching apps
 - **No account; drawings, rosters and logs are not uploaded**. Automatic update checks are enabled by default and can be disabled in Settings. Downloads and installation each require separate confirmation; neither happens silently
 
-Current version **v6.1.0** (stable release; published and independently re-downloaded for verification). The UI follows the system language in 8 languages: English, 中文, Français, Español, Deutsch, Русский, 한국어, 日本語.
+Current version **v6.1.1** (stable release: lower ink-input overhead and four UI color schemes). The UI follows the system language in 8 languages: English, 中文, Français, Español, Deutsch, Русский, 한국어, 日本語.
 
 > Product screenshots are not included in the public release yet; the current local captures contain development-environment details and must not be committed to GitHub.
+
+## 6.1.1: responsive ink input and four color schemes
+
+- Avoid full-page cloning and historical-stroke scans during steady-state writing. Local repaint regions and a bounded spatial index reduce input work on heavily annotated pages.
+- Settings → Appearance → UI color scheme offers Classic, Graphite teal, Slate blue and Warm indigo; light/dark mode is independent. Pen colors, opacity and layout are preserved.
+- This release excludes the software-use tutorial system. Synthetic offscreen timings are not physical pen-to-display latency measurements.
+- [Release notes](release-notes-v6.1.1.md) · [Validation](docs/release-validation-6.1.1.md).
 
 ## 6.1.0: document safety, streaming exports and recovery previews (released)
 
@@ -64,9 +71,9 @@ These changes are included in the stable 6.0.0 portable release. The older beta.
 
 These links and checksum examples refer to the published and verified **6.1.0 stable release**.
 
-**[Download Windows x64 portable v6.1.0 (stable; includes EXE, no installation)](https://github.com/wcr20140908/MyScreenDraw/releases/download/v6.1.0/MyScreenDraw-v6.1.0-windows-x64.zip)**
+**[Download Windows x64 portable v6.1.0 (stable; includes EXE, no installation)](https://github.com/wcr20140908/MyScreenDraw/releases/download/v6.1.1/MyScreenDraw-v6.1.1-windows-x64.zip)**
 
-[Release page and notes](https://github.com/wcr20140908/MyScreenDraw/releases/tag/v6.1.0) · [SHA-256 checksum](https://github.com/wcr20140908/MyScreenDraw/releases/download/v6.1.0/MyScreenDraw-v6.1.0-windows-x64.zip.sha256). The public assets were downloaded again and hash-verified; the extracted EXE passed an offscreen startup check.
+[Release page and notes](https://github.com/wcr20140908/MyScreenDraw/releases/tag/v6.1.1) · [SHA-256 checksum](https://github.com/wcr20140908/MyScreenDraw/releases/download/v6.1.1/MyScreenDraw-v6.1.1-windows-x64.zip.sha256). The public assets were downloaded again and hash-verified; the extracted EXE passed an offscreen startup check.
 
 > Do not download GitHub's automatic **Source code (zip)** / **Source code (tar.gz)** assets or **Code → Download ZIP**. Those contain source code, not the runnable application.
 
@@ -185,7 +192,7 @@ Click **Mouse** to let mouse/touch input pass through the canvas to the applicat
 Download the ZIP and `.zip.sha256` from the same Release, then run in PowerShell:
 
 ```powershell
-Get-FileHash -Algorithm SHA256 .\MyScreenDraw-v6.1.0-windows-x64.zip
+Get-FileHash -Algorithm SHA256 .\MyScreenDraw-v6.1.1-windows-x64.zip
 ```
 
 Compare the hash with the value in the `.sha256` file. Quit the old application through the tray, back up `data/`, `exports/`, and projects saved elsewhere, and extract the entire new ZIP into a new directory. Copy the backed-up data as needed. Do not run two versions against the same data. Autosave is not a version backup.

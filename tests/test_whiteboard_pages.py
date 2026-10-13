@@ -25,7 +25,8 @@ class WhiteboardPagesTests(unittest.TestCase):
     def tearDownClass(cls):
         cls.panel.pause_callbacks()
         if getattr(cls.panel, "listener", None):
-            cls.panel.listener.stop()
+            if cls.panel.listener is not None:
+                cls.panel.listener.stop()
         for widget in cls.app.topLevelWidgets():
             widget.hide()
 

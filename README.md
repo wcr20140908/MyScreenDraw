@@ -1,4 +1,4 @@
-﻿# MyScreenDraw
+# MyScreenDraw
 
 > **English**: [README.en.md](README.en.md)
 
@@ -11,7 +11,14 @@ MyScreenDraw 是一个面向**教室触控大屏**的全屏批注 / 白板 / 数
 - **随机点名、计时器、演示聚光灯、计算器**——一节课无需切换任何软件
 - **无账号，不上传绘图、名单或日志**：默认自动检查更新，仅获取 GitHub 发布信息；下载和安装分别需要手动确认，不静默下载或安装。可在设置中关闭自动检查
 
-当前版本 **v6.1.0**（正式版，已发布并回下载核验），界面支持 8 种语言（自动跟随系统）：中文、English（英语）、Français（法语）、Español（西班牙语）、Deutsch（德语）、Русский（俄语）、한국어（韩语）、日本語（日语）。
+当前版本 **v6.1.1**（正式版：落笔性能优化与主题选择），界面支持 8 种语言（自动跟随系统）：中文、English（英语）、Français（法语）、Español（西班牙语）、Deutsch（德语）、Русский（俄语）、한국어（韩语）、日本語（日语）。
+
+## 6.1.1：落笔性能优化与四套主题
+
+- 书写按下、移动和抬笔不再对历史笔迹执行无用的整页深拷贝和扫描；局部重绘及空间索引降低大量历史笔迹时的输入阻塞。
+- 设置 → 外观 → 界面配色可切换经典、石墨青绿、冷灰钢蓝、暖灰靛蓝，亮/暗模式独立保存；用户笔色、透明度和布局保持兼容。
+- 本版不包含软件使用教学系统。性能数字基于合成离屏事件到绘制测量，不等同真实触屏的笔尖到显示延迟。
+- [6.1.1 发布说明](release-notes-v6.1.1.md) · [验证记录](docs/release-validation-6.1.1.md)。
 
 ## 6.1.0：文档安全、逐页导出与恢复预览（已发布）
 
@@ -60,11 +67,11 @@ MyScreenDraw 是一个面向**教室触控大屏**的全屏批注 / 白板 / 数
 
 ## 快速开始
 
-以下链接和校验示例指向已发布并回下载核验的 **6.1.0 正式版**。
+以下链接和校验示例指向 **6.1.1 正式版**；验证记录包含便携包、哈希与离屏启动结果。
 
-**[下载 Windows x64 便携版 v6.1.0（正式版，含 EXE，免安装）](https://github.com/wcr20140908/MyScreenDraw/releases/download/v6.1.0/MyScreenDraw-v6.1.0-windows-x64.zip)**
+**[下载 Windows x64 便携版 v6.1.1（正式版，含 EXE，免安装）](https://github.com/wcr20140908/MyScreenDraw/releases/download/v6.1.1/MyScreenDraw-v6.1.1-windows-x64.zip)**
 
-[发布页面与更新说明](https://github.com/wcr20140908/MyScreenDraw/releases/tag/v6.1.0) · [SHA-256 校验文件](https://github.com/wcr20140908/MyScreenDraw/releases/download/v6.1.0/MyScreenDraw-v6.1.0-windows-x64.zip.sha256)。公开附件已回下载核对哈希，并通过解压 EXE 离屏启动检查。
+[发布页面与更新说明](https://github.com/wcr20140908/MyScreenDraw/releases/tag/v6.1.1) · [SHA-256 校验文件](https://github.com/wcr20140908/MyScreenDraw/releases/download/v6.1.1/MyScreenDraw-v6.1.1-windows-x64.zip.sha256)。便携包验证结果见本版验证记录。
 
 > 不要下载 GitHub 自动生成的 **Source code (zip)** / **Source code (tar.gz)**，也不要使用仓库的 **Code → Download ZIP**：这些都是源码，不含可直接运行的程序。
 
@@ -184,7 +191,7 @@ PDF 每页会导入为一个独立白板页。PNG/PDF 导出显示进度并允�
 下载同一 Release 的 ZIP 和 `.zip.sha256`，在 PowerShell 中计算：
 
 ```powershell
-Get-FileHash -Algorithm SHA256 .\MyScreenDraw-v6.1.0-windows-x64.zip
+Get-FileHash -Algorithm SHA256 .\MyScreenDraw-v6.1.1-windows-x64.zip
 ```
 
 将结果与 `.sha256` 文件中的值比较。正式退出旧程序后，备份 `data/`、`exports/` 和另存到其他位置的项目文件；将新包完整解压到新目录，再按需要复制备份数据。不要同时运行两个版本操作同一份数据。自动保存不是版本备份。

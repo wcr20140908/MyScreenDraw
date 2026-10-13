@@ -1,6 +1,6 @@
 # 构建与发布 / Building and releasing
 
-**v6.0.1 已发布并回下载核验**。本轮构建门禁、隔离真实包重启、手动迁移及公开附件结果见 [6.0.1 验证记录](release-validation-6.0.1.md)。实屏触控等未覆盖项仍须独立验收。
+**v6.1.1 当前发行验证**见 [本版记录](release-validation-6.1.1.md)。本版按用户要求仅运行改动范围的门禁。以下6.0.1记录作为历史参考：**v6.0.1 已发布并回下载核验**。本轮构建门禁、隔离真实包重启、手动迁移及公开附件结果见 [6.0.1 验证记录](release-validation-6.0.1.md)。实屏触控等未覆盖项仍须独立验收。
 
 README 的下载与校验入口已切换至 6.0.1。下列清单用于各次发布重新核对，不表示所有设备与场景已通过；6.0.0 的历史证据不能代替本轮结果。
 
@@ -18,7 +18,7 @@ python -m pip install pytest pytest-subtests
 
 ## 脚本实际做什么
 
-1. 校验 `version.py` 与脚本中的版本门禁一致（当前锁定 `6.0.1`）。
+1. 校验 `version.py` 与脚本中的版本门禁一致（当前锁定 `6.1.1`）。
 2. 执行离屏 pytest 门禁，排除真实触控层。
 3. 使用 `MyScreenDraw.spec` 生成无控制台、禁用 UPX 的 onedir 包。spec 在依赖分析期间将 System32 放在 PATH 前，避免外部工具的同名系统 DLL（例如不兼容的 ICU）污染产物；分析结束后恢复环境。
 4. 检查许可证、Qt 平台/图片/PDF/SVG 依赖，并拒绝用户数据、截图、源码和运行日志混入。
@@ -27,7 +27,7 @@ python -m pip install pytest pytest-subtests
 7. 打包 ZIP（排除 `data/`、`exports/`），执行 `release_artifact.py` 归档校验，再比对全部解压文件，并以同样的 offscreen 保护验证 EXE 启动与哈希。
 8. 全部检查通过后，候选 ZIP 才提升为正式文件名，同时保存 `.sha256` 和 `build/release-receipts/` 下的验收收据。收据绑定包、EXE 及打包源码；不是数字签名。
 
-成功构建后预期输出为 `dist/MyScreenDraw/`、`MyScreenDraw-v6.0.1-windows-x64.zip` 和同名 `.zip.sha256`。ZIP 根目录必须直接包含 `MyScreenDraw.exe`、`_internal/`、许可证和清单；不能额外套一层目录，也不能上传源码 ZIP 冒充便携版。
+成功构建后预期输出为 `dist/MyScreenDraw/`、`MyScreenDraw-v6.1.1-windows-x64.zip` 和同名 `.zip.sha256`。ZIP 根目录必须直接包含 `MyScreenDraw.exe`、`_internal/`、许可证和清单；不能额外套一层目录，也不能上传源码 ZIP 冒充便携版。
 
 构建成功不等于实屏验收通过，也不会自动发布 GitHub Release。发布脚本要求干净工作树、指定提交等于 HEAD、远端提交存在，以及源码、清单、校验文件和验收收据一致；不会重写校验文件来认可未经验收的包。源码或构建脚本改变后需要重新打包，验证报告等文档可以在构建后补齐再提交。
 

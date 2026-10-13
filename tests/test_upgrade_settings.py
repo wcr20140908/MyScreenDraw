@@ -36,7 +36,7 @@ import pytest
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-FIELDS = tuple("""theme pen_color pen_width pen_profiles pen_style calligraphy_angle
+FIELDS = tuple("""theme color_scheme pen_color pen_width pen_profiles pen_style calligraphy_angle
 pen_options eraser_type eraser_size marker_color marker_alpha_pct marker_width
 laser_color laser_width magnifier_zoom magnifier_size board_style smart_shapes
 smart_multitouch speed_width timer_mode timer_target panel_x panel_y panel_screen
@@ -102,8 +102,9 @@ def rig(tmp_path, monkeypatch, app):
 
     yield SimpleNamespace(main=main, fresh=fresh, load=load, path=Path(main.CONFIG_FILE))
     for panel, canvas in pairs:
-        panel.listener.stop()
-        panel.listener.join(timeout=1)
+        if panel.listener is not None:
+            panel.listener.stop()
+            panel.listener.join(timeout=1)
         panel.stop_update_worker()
         for owner in (panel, canvas):
             if owner is not None:
@@ -123,8 +124,9 @@ def rich_settings(rig):
     from PyQt6.QtGui import QColor
     p, c = rig.fresh()
     baseline = p.collect_settings()
+    p.set_color_scheme("slate_blue", persist=False)
     p.theme_name = "light"
-    p.theme = p.THEMES["light"]
+    p.theme = p.theme_for("light", p.color_scheme)
     p.apply_theme()
     p.set_orientation("landscape")
     p.set_ui_radius(21, persist=False)
