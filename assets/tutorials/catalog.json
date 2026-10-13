@@ -9,7 +9,8 @@
     "courses/c06.json",
     "courses/c07.json",
     "courses/c08.json",
-    "courses/c09.json"
+    "courses/c09.json",
+    "courses/c10.json"
   ],
   "fixtures": {
     "core.interface": "fixtures/core.interface.msd",
@@ -43,7 +44,10 @@
     "files.c08.recovery": "fixtures/files.c08.recovery.msd",
     "files.c08.interval": "fixtures/files.c08.interval.msd",
     "media.c09.image": "fixtures/media.c09.image.msd",
-    "media.c09.pdf_pages": "fixtures/media.c09.pdf_pages.msd"
+    "media.c09.pdf_pages": "fixtures/media.c09.pdf_pages.msd",
+    "export.c10.formats": "fixtures/export.c10.formats.msd",
+    "export.c10.progress_cancel": "fixtures/export.c10.progress_cancel.msd",
+    "export.c10.result": "fixtures/export.c10.result.msd"
   },
   "groups": [
     {
@@ -76,7 +80,8 @@
       "title_key": "teaching_group_files",
       "courses": [
         "c08",
-        "c09"
+        "c09",
+        "c10"
       ]
     }
   ]

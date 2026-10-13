@@ -15221,7 +15221,8 @@ class ControlPanel(QWidget):
             outcome = "success" if result.success else "cancelled" if result.cancelled else "failed"
             details = {"format": str(fmt).upper(), "pages": len(result.exported_indices),
                        "total": result.total, "failed_pages": len(result.failures),
-                       "complete": result.complete, "cancelled": result.cancelled}
+                       "complete": result.complete, "cancelled": result.cancelled,
+                       "partial": bool(result.exported_indices and result.failures and not result.cancelled)}
             events.emit_result(operation, "export.finished", outcome, details)
         return result
 
@@ -15249,8 +15250,11 @@ class ControlPanel(QWidget):
                 screen = self.target_screen()
                 size = screen.geometry().size() if screen is not None else QSize(1920, 1080)
             os.makedirs(runtime_directory_path(EXPORT_DIR), exist_ok=True)
+            from teaching.export_actions import teaching_export_destination
+            practice_output = teaching_export_destination(self, fmt)
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-            path = runtime_file_path(os.path.join(EXPORT_DIR, f"Export_{stamp}.{fmt.lower()}"), write=True)
+            path = runtime_file_path(practice_output if practice_output is not None else
+                                     os.path.join(EXPORT_DIR, f"Export_{stamp}.{fmt.lower()}"), write=True)
             progress = self._create_document_progress(tr("export"), len(pages))
 
             def update(index, total, phase):
