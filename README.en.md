@@ -11,11 +11,23 @@ MyScreenDraw is a fullscreen annotation / whiteboard / math-teaching tool built 
 - **Random name picker, timer, presentation spotlight, calculator** — a whole lesson without switching apps
 - **No account; drawings, rosters and logs are not uploaded**. Automatic update checks are enabled by default and can be disabled in Settings. Downloads and installation each require separate confirmation; neither happens silently
 
-Current version **v6.1.0** (stable release; published and independently re-downloaded for verification). The UI follows the system language in 8 languages: English, 中文, Français, Español, Deutsch, Русский, 한국어, 日本語.
+Current source version: **v6.2.0 — in development, awaiting user testing; not packaged or released**. The UI follows the system language in 8 languages: English, 中文, Français, Español, Deutsch, Русский, 한국어, 日本語.
 
 > Product screenshots are not included in the public release yet; the current local captures contain development-environment details and must not be committed to GitHub.
 
-## 6.1.0: document safety, streaming exports and recovery previews (released)
+Stable 6.1.1 was published from a separate release tree. This 6.2.0 source tree has no release package. The 6.1.0 download links and validation records below are historical; they do not describe the current source version or validate 6.2.0.
+
+## 6.2.0 development progress (awaiting user testing)
+
+- Software tutorials now cover **C01–C13: 13 courses, 46 chapters and 390 defined steps**. The single-display route has **389 steps**; the complete route passed in one real QProcess, including original-work, undo/redo and configuration-hash restoration checks.
+- Fixed tutorial text clipping, contrast and several help-text wrapping issues. Rear base arcs of cylinders and cones are dashed, including in EPS output.
+- Custom UI palettes now support creation, editing, deletion, separate light/dark colours and persistence. All 96 supplemental palette, view and built-in theme checks passed.
+- **Infinite whiteboard is on by default**. In **Pan** mode, drag with one finger or the mouse; zoom with two fingers or the wheel. Settings offers **Reset view (100%)** and **Fit all content**.
+- Per-page views are saved with the document and restored on reopen, page switch and copy. Ink retains floating-point coordinates; PNG/PDF/SVG/EPS exports include all content, including negative coordinates and content outside the viewport.
+- Erasing now updates the spatial index locally. See the [6.2.0 development checkpoint](docs/6.2.0-development-checkpoint.md) for benchmark scope and targeted test results. Private Windows native touch-injection checks passed (not physical-touchscreen testing). Follow-up captures confirm readable, complete text after the palette-editor contrast fix; user testing is not complete.
+- Additional interactive 3D prisms/pyramids and in-app text feedback remain research only, **not implemented**. See the [feedback feasibility note](docs/feedback-feasibility-2026-10-14.md).
+
+## 6.1.0: document safety, streaming exports and recovery previews (historical release)
 
 - Preserve the complete document after leaving whiteboard mode; explicit unsaved-work confirmation before destructive open/update operations.
 - Background autosave, configurable intervals and a collapsed-by-default older-version picker with page previews.
@@ -34,7 +46,7 @@ Current version **v6.1.0** (stable release; published and independently re-downl
 
 Final build regression: **1347 passed, 7 skipped, 1197 subtests passed; build exit code 0**. Isolated real-package restart, manual reopen, new-directory migration, public download hashes, and extracted-EXE offscreen startup were verified. Physical touchscreens, Windows 11, multiple monitors/DPI, and long classroom sessions remain unverified. See the [6.0.1 validation record](docs/release-validation-6.0.1.md) and [release notes](release-notes-v6.0.1.md). The 6.0.0 figures below are historical only.
 
-### Moving from 6.0.0: use a new directory, not its in-app updater
+### Historical migration example: from 6.0.0 to 6.1.0 using a new directory
 
 **The running 6.0.0 updater has download/installation defects of its own. A new 6.1.0 package cannot retroactively repair update code executing in the old process. Do not rely on the 6.0.0 in-app updater for this upgrade.**
 
@@ -60,11 +72,11 @@ These changes are included in the stable 6.0.0 portable release. The older beta.
 - Settings dropdowns follow the light/dark theme. Click a preset color swatch for an alpha-aware color picker; the color code is read-only/copyable, and Cancel leaves the draft unchanged. Chalk uses a longer-period deterministic grain texture; visual acceptance remains with the user.
 - Pre-release offscreen regression: 1296 passed, 7 skipped, and 1184 subtests passed; the actual configuration stayed byte-identical. The release owner reported their checks complete. Automated EXE smoke remains offscreen and the build is unsigned; see the [validation record](docs/release-validation-6.0.0.md) for coverage and limits.
 
-## Quick start
+## Quick start (historical release package)
 
-These links and checksum examples refer to the published and verified **6.1.0 stable release**.
+These retained links and checksum examples refer to the published and verified **historical 6.1.0 release**, not a 6.2.0 package.
 
-**[Download Windows x64 portable v6.1.0 (stable; includes EXE, no installation)](https://github.com/wcr20140908/MyScreenDraw/releases/download/v6.1.0/MyScreenDraw-v6.1.0-windows-x64.zip)**
+**[Download historical Windows x64 portable v6.1.0 (includes EXE, no installation)](https://github.com/wcr20140908/MyScreenDraw/releases/download/v6.1.0/MyScreenDraw-v6.1.0-windows-x64.zip)**
 
 [Release page and notes](https://github.com/wcr20140908/MyScreenDraw/releases/tag/v6.1.0) · [SHA-256 checksum](https://github.com/wcr20140908/MyScreenDraw/releases/download/v6.1.0/MyScreenDraw-v6.1.0-windows-x64.zip.sha256). The public assets were downloaded again and hash-verified; the extracted EXE passed an offscreen startup check.
 
@@ -119,8 +131,8 @@ These links and checksum examples refer to the published and verified **6.1.0 st
 ### Settings & appearance
 The Settings button opens five sections — appearance, interface, drawing, system, and about:
 
-- The toolbar uses one icon-based layout; the mode button is labeled **Mouse**
-- In mouse mode, annotation tools and whiteboard controls are hidden; only mouse, annotation, settings, and close remain. Click **Annotation** to return to drawing mode and reveal the full annotation menu
+- The toolbar uses one icon-based layout; the mode button is labeled **Mouse** on the desktop and **Pan** on the whiteboard when infinite whiteboard is enabled
+- In desktop mouse mode, annotation tools and whiteboard controls are hidden; only mouse, annotation, settings, and close remain. Click **Annotation** to return to drawing mode and reveal the full annotation menu
 - **UI opacity** 35%–100%, applied to the control panels only. **The canvas and your ink are never faded**
 - **Corner radius** 0–24px, applied consistently across panels and controls
 - Light/dark theme, toolbar orientation, shape recognition, multi-touch drawing, and speed-to-width remain in Settings

@@ -785,8 +785,17 @@ from teaching.file_copy import FILE_COPY
 _BASE.update(FILE_COPY)
 from teaching.media_copy import MEDIA_COPY
 _BASE.update(MEDIA_COPY)
+from teaching.toolbox_copy import TOOLBOX_COPY
+_BASE.update(TOOLBOX_COPY)
+from teaching.interface_copy import INTERFACE_COPY
+_BASE.update(INTERFACE_COPY)
+from teaching.measurement_copy import MEASUREMENT_COPY
+_BASE.update(MEASUREMENT_COPY)
 from teaching.export_copy import EXPORT_COPY
 _BASE.update(EXPORT_COPY)
+
+from appearance_copy import APPEARANCE_COPY
+_BASE.update(APPEARANCE_COPY)
 
 # 每个条目都必须给全 8 种语言：漏一个就在导入时炸掉，而不是在课堂上显示成英文 key。
 for _key, _values in _BASE.items():

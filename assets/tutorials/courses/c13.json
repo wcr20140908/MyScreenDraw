@@ -1,0 +1,364 @@
+{
+  "schema_version": 1,
+  "id": "c13",
+  "revision": 1,
+  "compat_revision": 1,
+  "title_key": "teaching_interface_title",
+  "chapters": [
+    {
+      "id": "c13.layout_theme",
+      "title_key": "teaching_interface_layout_title",
+      "fixture": "interface.c13.layout_theme",
+      "steps": [
+        {
+          "id": "intro",
+          "kind": "information",
+          "title_key": "teaching_interface_layout_title",
+          "body_key": "teaching_interface_intro",
+          "next": "landscape"
+        },
+        {
+          "id": "landscape",
+          "title_key": "orient_landscape",
+          "body_key": "teaching_interface_landscape",
+          "target": "settings.orientation.landscape",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "settings.orientation_changed",
+            "outcome": "success",
+            "equals": {
+              "orientation": "landscape",
+              "saved": true
+            }
+          },
+          "next": "portrait"
+        },
+        {
+          "id": "portrait",
+          "title_key": "orient_portrait",
+          "body_key": "teaching_interface_portrait",
+          "target": "settings.orientation.portrait",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "settings.orientation_changed",
+            "outcome": "success",
+            "equals": {
+              "orientation": "portrait",
+              "saved": true
+            }
+          },
+          "next": "collapse"
+        },
+        {
+          "id": "collapse",
+          "title_key": "teaching_interface_layout_title",
+          "body_key": "teaching_interface_collapse",
+          "target": "toolbar.logo",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "toolbar.visibility_changed",
+            "outcome": "success",
+            "equals": {
+              "visible": false,
+              "logo_visible": true
+            }
+          },
+          "next": "expand"
+        },
+        {
+          "id": "expand",
+          "title_key": "teaching_interface_layout_title",
+          "body_key": "teaching_interface_expand",
+          "target": "toolbar.logo",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "toolbar.visibility_changed",
+            "outcome": "success",
+            "equals": {
+              "visible": true,
+              "logo_visible": true
+            }
+          },
+          "next": "dark"
+        },
+        {
+          "id": "dark",
+          "title_key": "dark_theme",
+          "body_key": "teaching_interface_dark",
+          "target": "settings.theme",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "settings.theme_changed",
+            "outcome": "success",
+            "equals": {
+              "theme": "dark",
+              "applied": true,
+              "saved": true
+            }
+          },
+          "next": "light"
+        },
+        {
+          "id": "light",
+          "title_key": "light_theme",
+          "body_key": "teaching_interface_light",
+          "target": "settings.theme",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "settings.theme_changed",
+            "outcome": "success",
+            "equals": {
+              "theme": "light",
+              "applied": true,
+              "saved": true
+            }
+          },
+          "next": "graphite"
+        },
+        {
+          "id": "graphite",
+          "title_key": "color_scheme_graphite_teal",
+          "body_key": "teaching_interface_graphite",
+          "target": "settings.color_scheme",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "settings.color_scheme_changed",
+            "outcome": "success",
+            "equals": {
+              "scheme": "graphite_teal",
+              "applied": true,
+              "saved": true
+            }
+          },
+          "next": "slate"
+        },
+        {
+          "id": "slate",
+          "title_key": "color_scheme_slate_blue",
+          "body_key": "teaching_interface_slate",
+          "target": "settings.color_scheme",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "settings.color_scheme_changed",
+            "outcome": "success",
+            "equals": {
+              "scheme": "slate_blue",
+              "applied": true,
+              "saved": true
+            }
+          },
+          "next": "warm"
+        },
+        {
+          "id": "warm",
+          "title_key": "color_scheme_warm_indigo",
+          "body_key": "teaching_interface_warm",
+          "target": "settings.color_scheme",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "settings.color_scheme_changed",
+            "outcome": "success",
+            "equals": {
+              "scheme": "warm_indigo",
+              "applied": true,
+              "saved": true
+            }
+          },
+          "next": "classic"
+        },
+        {
+          "id": "classic",
+          "title_key": "color_scheme_classic",
+          "body_key": "teaching_interface_classic",
+          "target": "settings.color_scheme",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "settings.color_scheme_changed",
+            "outcome": "success",
+            "equals": {
+              "scheme": "classic",
+              "applied": true,
+              "saved": true
+            }
+          },
+          "next": "opacity"
+        },
+        {
+          "id": "opacity",
+          "title_key": "teaching_interface_layout_title",
+          "body_key": "teaching_interface_opacity",
+          "target": "settings.opacity",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "settings.opacity_changed",
+            "outcome": "success",
+            "equals": {
+              "changed": true,
+              "applied": true,
+              "ink_unchanged": true,
+              "saved": true
+            }
+          },
+          "next": "done"
+        },
+        {
+          "id": "done",
+          "kind": "information",
+          "title_key": "teaching_interface_layout_title",
+          "body_key": "teaching_interface_done",
+          "next": "end_chapter"
+        }
+      ]
+    },
+    {
+      "id": "c13.monitor_audio",
+      "title_key": "teaching_interface_monitor_title",
+      "fixture": "interface.c13.monitor_audio",
+      "steps": [
+        {
+          "id": "intro",
+          "kind": "information",
+          "title_key": "teaching_interface_monitor_title",
+          "body_key": "teaching_interface_monitor_intro",
+          "next": "single_screen",
+          "branches": [
+            {
+              "condition": "multiple_monitors",
+              "equals": true,
+              "next": "select_monitor"
+            }
+          ]
+        },
+        {
+          "id": "single_screen",
+          "kind": "information",
+          "title_key": "annotation_monitor",
+          "body_key": "teaching_interface_single_monitor",
+          "next": "volume"
+        },
+        {
+          "id": "select_monitor",
+          "title_key": "annotation_monitor",
+          "body_key": "teaching_interface_select_monitor",
+          "target": "settings.monitor",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "settings.monitor_changed",
+            "outcome": "success",
+            "equals": {
+              "configured": true,
+              "applied": true,
+              "saved": true
+            }
+          },
+          "next": "volume"
+        },
+        {
+          "id": "volume",
+          "title_key": "teaching_interface_monitor_title",
+          "body_key": "teaching_interface_volume",
+          "target": "settings.timer_volume",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "settings.timer_volume_changed",
+            "outcome": "success",
+            "equals": {
+              "changed": true,
+              "saved": true
+            }
+          },
+          "next": "done"
+        },
+        {
+          "id": "done",
+          "kind": "information",
+          "title_key": "teaching_interface_monitor_title",
+          "body_key": "teaching_interface_done",
+          "next": "end_chapter"
+        }
+      ]
+    },
+    {
+      "id": "c13.lifecycle",
+      "title_key": "teaching_interface_lifecycle_title",
+      "fixture": "interface.c13.lifecycle",
+      "steps": [
+        {
+          "id": "intro",
+          "kind": "information",
+          "title_key": "teaching_interface_lifecycle_title",
+          "body_key": "teaching_interface_lifecycle_intro",
+          "next": "pause_resume"
+        },
+        {
+          "id": "pause_resume",
+          "title_key": "teaching_interface_lifecycle_title",
+          "body_key": "teaching_interface_pause_resume",
+          "input_policy": "free",
+          "wait": {
+            "event": "practice.resumed",
+            "outcome": "success",
+            "equals": {}
+          },
+          "next": "tray"
+        },
+        {
+          "id": "tray",
+          "kind": "information",
+          "title_key": "teaching_interface_lifecycle_title",
+          "body_key": "teaching_interface_tray",
+          "next": "exit"
+        },
+        {
+          "id": "exit",
+          "kind": "information",
+          "title_key": "teaching_interface_lifecycle_title",
+          "body_key": "teaching_interface_exit",
+          "next": "done"
+        },
+        {
+          "id": "done",
+          "kind": "information",
+          "title_key": "teaching_interface_lifecycle_title",
+          "body_key": "teaching_interface_done",
+          "next": "end_chapter"
+        }
+      ]
+    },
+    {
+      "id": "c13.system",
+      "title_key": "teaching_interface_system_title",
+      "fixture": "interface.c13.system",
+      "steps": [
+        {
+          "id": "intro",
+          "kind": "information",
+          "title_key": "teaching_interface_system_title",
+          "body_key": "teaching_interface_system_intro",
+          "next": "update"
+        },
+        {
+          "id": "update",
+          "kind": "information",
+          "title_key": "teaching_interface_system_title",
+          "body_key": "teaching_interface_update",
+          "next": "autostart"
+        },
+        {
+          "id": "autostart",
+          "kind": "information",
+          "title_key": "teaching_interface_system_title",
+          "body_key": "teaching_interface_autostart",
+          "next": "done"
+        },
+        {
+          "id": "done",
+          "kind": "information",
+          "title_key": "teaching_interface_system_title",
+          "body_key": "teaching_interface_done",
+          "next": "end_chapter"
+        }
+      ]
+    }
+  ]
+}

@@ -18,6 +18,8 @@ class TeachingWelcome(QDialog):
 
     def __init__(self, translate: Callable[[str], str], parent: QWidget | None = None) -> None:
         super().__init__(parent, Qt.WindowType.Tool)
+        self.setObjectName('TeachingSurface')
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setModal(False)

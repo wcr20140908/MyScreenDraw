@@ -23,9 +23,13 @@ from .presentation import TeachingPresenter
 from .targets import TargetRegistry
 from .transport import TeachingConnection
 from .session_view import PracticeProgressView, require_transaction_id
+from .toolbox_actions import (TOOLBOX_EVENTS, TOOLBOX_TARGETS, toolbox_bindings, reveal_toolbox_target)
+from .interface_actions import (INTERFACE_EVENTS, INTERFACE_TARGETS, interface_bindings, reveal_interface_target)
 
 # Grow this manifest only alongside a real, verified business adapter/target.
 APPLICATION_TARGETS = frozenset({
+    'aids.ruler', 'aids.protractor', 'aids.set_square_45', 'aids.set_square_30',
+    'aids.clear', 'aids.calibrate', 'aids.reset',
     'canvas.ink', 'toolbar.mode', 'toolbar.pen', 'toolbar.eraser', 'toolbar.select',
     'toolbar.undo', 'toolbar.redo', 'toolbar.whiteboard', 'toolbar.file', 'toolbar.tools',
     'pen.palette', 'pen.width', 'pen.marker.width', 'pen.marker.alpha', 'pen.laser.width',
@@ -48,7 +52,7 @@ APPLICATION_TARGETS = frozenset({
     'text.symbol.member', 'text.symbol.integral', 'text.structure.frac', 'text.structure.sup',
     'text.structure.sub', 'text.structure.sqrt', 'text.structure.sum', 'text.structure.int',
     'selection.width', 'selection.color', 'settings.autosave_preset', 'settings.autosave_custom',
-})
+}) | TOOLBOX_TARGETS | INTERFACE_TARGETS
 APPLICATION_EVENTS = frozenset({
     'ink.committed', 'ink.erased', 'project.saved', 'mode.changed', 'tool.changed',
     'pen.color_changed', 'pen.width_changed', 'history.undone', 'history.redone',
@@ -61,10 +65,11 @@ APPLICATION_EVENTS = frozenset({
     'page.copy_placement_changed', 'page.reordered', 'thumbnails.opened',
     'shape.type_changed', 'shape.committed', 'shape.point_added', 'shape.points_cancelled',
     'shape.recognized', 'shape.recognition_changed', 'shape.constructed',
+    'aid.added', 'aid.cleared', 'aid.transformed', 'aid.calibration_changed',
     'text.box_created', 'text.edit_started', 'text.changed', 'text.edit_finished',
     'text.formatted', 'formula.inserted', 'formula.slot_changed', 'formula.cursor_moved',
     'symbols.opened', 'media.imported', 'unsaved.decision', 'settings.autosave_changed', 'settings.autosave_custom_opened',
-})
+}) | TOOLBOX_EVENTS | INTERFACE_EVENTS
 
 
 APPLICATION_HINT_TOPICS = {
@@ -528,8 +533,21 @@ class ApplicationTeachingHost(QObject):
             bindings['text.symbol.'+key] = lambda entry=entry: self._symbol_target(entry)
         for kind in ('frac', 'sup', 'sub', 'sqrt', 'sum', 'int'):
             bindings['text.structure.'+kind] = lambda kind=kind: self._symbol_target(kind)
+        for kind in ('ruler', 'protractor', 'set_square_45', 'set_square_30'):
+            bindings['aids.'+kind] = lambda kind=kind: self.panel.aid_buttons[kind]
+        bindings.update({'aids.clear': lambda: self.panel.btn_aid_clear,
+                         'aids.calibrate': lambda: self.panel.btn_aid_calibrate,
+                         'aids.reset': lambda: self.panel.btn_aid_reset})
+        bindings.update(toolbox_bindings(self.panel))
+        bindings.update(interface_bindings(self.panel))
         for target_id, resolver in bindings.items():
-            if target_id in {'pen.palette', 'pen.width'}:
+            if target_id in TOOLBOX_TARGETS:
+                reveal = lambda target_id=target_id: reveal_toolbox_target(self.panel, target_id)
+            elif target_id in INTERFACE_TARGETS:
+                reveal = lambda target_id=target_id: reveal_interface_target(self.panel, target_id)
+            elif target_id.startswith('aids.'):
+                reveal = self.panel.open_aid_menu
+            elif target_id in {'pen.palette', 'pen.width'}:
                 reveal = self._reveal_pen
             elif target_id.startswith('pen.style.') or target_id in {'pen.marker', 'pen.laser'}:
                 reveal = self._reveal_annotations
@@ -579,10 +597,13 @@ class ApplicationTeachingHost(QObject):
                             'open_eraser_panel': self._reveal_eraser, 'open_settings': self._reveal_settings,
                             'open_tools_panel': self._reveal_tools},
             on_progress=self._record_progress,
+            condition_reader=lambda name, argument: name == 'multiple_monitors' and len(QApplication.screens()) > 1,
             pause_action=self.pause_requested.emit,
             layout_obstacles=self._layout_obstacles, restack_window=self.panel.raise_floating,
             manage_window=self.panel.lifecycle.register_teaching_window,
             unmanage_window=self.panel.lifecycle.unregister_tool_window)
+        self.presenter.controller.setStyleSheet(self.panel.styleSheet())
+        self.presenter.controller.setPalette(self.panel.palette())
         self.presenter.controller.set_practice_session(True)
         self.panel.teaching_events = self.presenter.events
         self.panel.teaching_presenter = self.presenter
@@ -923,6 +944,12 @@ class ApplicationTeachingHost(QObject):
         prepare_media_fixture(self.panel, self.loader, fixture, self.request.paths)
         from .export_fixtures import prepare_export_fixture
         prepare_export_fixture(self.panel, fixture, self.request.paths)
+        from .measurement_fixtures import prepare_measurement_fixture
+        prepare_measurement_fixture(self.panel, fixture, self.request.paths)
+        from .toolbox_fixtures import prepare_toolbox_fixture
+        prepare_toolbox_fixture(self.panel, fixture, self.request.paths)
+        from .interface_fixtures import prepare_interface_fixture
+        prepare_interface_fixture(self.panel, fixture, self.request.paths)
 
     def activate(self):
         if self._closed or not self.context.ui_active:

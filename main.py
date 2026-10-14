@@ -252,6 +252,10 @@ import os
 from pathlib import Path
 from runtime_paths import RuntimeContext, RuntimePaths
 from teaching.bootstrap import parse_practice_request
+from teaching.measurement_actions import measurement_action, measurement_drag
+from teaching.toolbox_actions import (toolbox_action, teaching_timer_toggle,
+    teaching_timer_finished, teaching_spotlight_move)
+from teaching.interface_actions import interface_action
 from teaching.file_actions import teaching_autosave_setting
 from teaching.text_actions import (teaching_text_change, teaching_input_change,
     teaching_text_input_action, teaching_text_panel_action, teaching_text_finish,
@@ -290,6 +294,9 @@ import copy
 import tempfile
 from export_pipeline import export_document, ExportResult, ExportFailure
 from stroke_cache import StrokeGeometryCache
+from board_view import BoardView, BoardGesture
+from custom_colors import (CustomColorsDialog, normalize_custom_schemes,
+                           palette_from_theme, resolved_theme)
 from recovery_dialog import RecoveryDialog
 import zipfile
 import shutil
@@ -331,7 +338,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QLabel, QPushButton,
                              QInputDialog, QMessageBox, QMenu, QFileDialog, QLineEdit, QTextEdit, QListWidget,
                              QAbstractItemView, QSizePolicy, QListWidgetItem, QDialog, QDoubleSpinBox,
                              QScroller, QToolTip, QScrollArea, QComboBox, QProgressBar, QProgressDialog)
-from PyQt6.QtCore import (Qt, QPoint, QPointF, QRectF, QTimer, QTranslator, QLibraryInfo, QLine, pyqtSignal, QLocale, QEvent,
+from PyQt6.QtCore import (Qt, QPoint, QPointF, QRect, QRectF, QTimer, QTranslator, QLibraryInfo, QLine, QLineF, pyqtSignal, QLocale, QEvent,
                           QSizeF, QMarginsF, QEventLoop, QSize, QUrl, QBuffer, QIODevice, QThread)
 from PyQt6.QtGui import (QPainter, QPen, QColor, QFont, QPainterPath, QFontMetricsF, QTransform, QPolygonF,
                          QPixmap, QPdfWriter, QPageSize, QCursor, QGuiApplication, QIcon, QImage, QImageReader,
@@ -649,7 +656,7 @@ def pen_width_value(pen):
 def clone_segment(seg, **overrides):
     """复制一段笔迹。只有这一处知道线段的字段表——此前七个地方各自逐字段构造 dict，
     新增 style/nib 时漏掉任何一处，撤销/复制/换页后笔形就悄悄变回普通笔。"""
-    clone = {"line": QLine(seg["line"]), "pen": QPen(seg["pen"]), "id": seg["id"],
+    clone = {"line": QLineF(seg["line"]), "pen": QPen(seg["pen"]), "id": seg["id"],
              "marker": seg.get("marker", False)}
     style = seg.get("style")
     if style and style != "pen":
@@ -844,8 +851,8 @@ def serialize_page(page):
         line = seg["line"]
         entry = {
             "id": str(seg["id"]),
-            "p1": [line.p1().x(), line.p1().y()],
-            "p2": [line.p2().x(), line.p2().y()],
+            "p1": [float(line.x1()), float(line.y1())],
+            "p2": [float(line.x2()), float(line.y2())],
             "color": _color_to_hex(seg["pen"].color()),
             "width": pen_width_value(seg["pen"]),
             "marker": bool(seg.get("marker", False)),
@@ -913,7 +920,7 @@ def serialize_page(page):
             shape_data["rotation"] = item["rotation"]
         serialized["shapes"].append(shape_data)
     serialized["images"] = [serialize_image(item) for item in page.get("images", [])]
-    for key in ("page_id", "name"):
+    for key in ("page_id", "name", "view"):
         if key in page:
             serialized[key] = page[key]
     return serialized
@@ -929,8 +936,7 @@ def deserialize_page(data):
         pen.setWidthF(max(0.5, min(200.0, _coerce_float(seg.get("width", 1), 1.0))))
         entry = {
             "id": _parse_id(seg.get("id", uuid.uuid4())),
-            "line": QLine(_coerce_qt_int(p1[0], 0), _coerce_qt_int(p1[1], 0),
-                          _coerce_qt_int(p2[0], 0), _coerce_qt_int(p2[1], 0)),
+            "line": QLineF(float(p1[0]), float(p1[1]), float(p2[0]), float(p2[1])),
             "pen": pen,
             "marker": bool(seg.get("marker", False)),
         }
@@ -1006,7 +1012,7 @@ def deserialize_page(data):
             shape["rotation"] = _coerce_float(item.get("rotation", 0), 0.0)
         page["shapes"].append(shape)
     page["images"] = [deserialize_image(item) for item in data.get("images", [])]
-    for key in ("page_id", "name"):
+    for key in ("page_id", "name", "view"):
         if key in data:
             page[key] = data[key]
     return page
@@ -3319,6 +3325,9 @@ class DrawingCanvas(QMainWindow):
         self.shape_items = []
         self.image_items = []     # 导入的图片/PDF 页：以 PNG→base64 内嵌进项目文件
         self.whiteboard_mode = False
+        self.board_view = BoardView()
+        self._board_gesture = BoardGesture()
+        self._pan_point = None
         self.board_style = "WHITE"
         self._page_id = str(uuid.uuid4())
         self._page_name = ""
@@ -3650,7 +3659,6 @@ class DrawingCanvas(QMainWindow):
             painter.drawEllipse(QRectF(rect.left(), rect.top(), rect.width(), h))
             painter.drawLine(QPointF(rect.left(), rect.top() + h / 2), QPointF(rect.left(), rect.bottom() - h / 2))
             painter.drawLine(QPointF(rect.right(), rect.top() + h / 2), QPointF(rect.right(), rect.bottom() - h / 2))
-            painter.drawEllipse(QRectF(rect.left(), rect.bottom() - h, rect.width(), h))
         elif shape == "CONE":
             h = rect.height() * 0.22
             apex = QPointF(rect.center().x(), rect.top())
@@ -3658,7 +3666,14 @@ class DrawingCanvas(QMainWindow):
             right = QPointF(rect.right(), rect.bottom() - h / 2)
             painter.drawLine(apex, left)
             painter.drawLine(apex, right)
-            painter.drawEllipse(QRectF(rect.left(), rect.bottom() - h, rect.width(), h))
+        if shape in ("CYLINDER", "CONE"):
+            base = QRectF(rect.left(), rect.bottom() - h, rect.width(), h)
+            hidden_pen = QPen(painter.pen())
+            hidden_pen.setStyle(Qt.PenStyle.DashLine)
+            painter.setPen(hidden_pen)
+            painter.drawArc(base, 0, 180 * 16)
+            painter.setPen(self.shape_pen(item))
+            painter.drawArc(base, 180 * 16, 180 * 16)
         painter.restore()
 
     def selection_bounds(self):
@@ -3808,11 +3823,49 @@ class DrawingCanvas(QMainWindow):
         transform.rotate(item["rotation"])
         return transform.mapRect(rect)
 
+    @property
+    def board_view_active(self):
+        return (getattr(self, "whiteboard_mode", False) and
+                (self.panel is None or self.panel.infinite_whiteboard))
+
+    @property
+    def is_roaming(self):
+        return self.board_view_active and not self.is_drawing_mode
+
+    def to_document(self, point):
+        return self.board_view.to_document(point) if self.board_view_active else QPointF(point)
+
+    def to_view(self, point):
+        return self.board_view.to_view(point) if self.board_view_active else QPointF(point)
+
+    def update(self, *args):
+        # Drawing paths report dirty rectangles in document coordinates.
+        if len(args) == 1 and isinstance(args[0], (QRect, QRectF)) and self.board_view_active:
+            rect = self.board_view.transform().mapRect(QRectF(args[0])).adjusted(-2, -2, 2, 2)
+            return super().update(rect.toAlignedRect())
+        return super().update(*args)
+
+    def view_changed(self):
+        if self.panel:
+            self.panel.project_dirty = True
+        self.update()
+
+    def reset_board_view(self):
+        if self.board_view_active:
+            self.board_view = BoardView()
+            self.view_changed()
+
+    def fit_board_view(self):
+        if self.board_view_active:
+            self.board_view.fit(self.page_content_bounds(self.live_page()), QRectF(self.rect()))
+            self.view_changed()
+
     def capture_page(self):
         return {
             "page_id": self._page_id,
             "name": self._page_name,
             "_revision": self._page_revision,
+            "view": self.board_view.to_data(),
             "segments": self.clone_segments(),
             "texts": self.clone_text_items(),
             "shapes": self.clone_shape_items(),
@@ -3826,6 +3879,7 @@ class DrawingCanvas(QMainWindow):
         但缩略图每 150ms 就要一次，深拷贝整页会在书写时抢走绘制线程的时间。
         """
         return {"page_id": self._page_id, "name": self._page_name,
+                "view": self.board_view.to_data(),
                 "_revision": self._page_revision, "segments": self.all_segments,
                 "shapes": self.shape_items, "texts": self.text_items, "images": self.image_items}
 
@@ -3847,7 +3901,8 @@ class DrawingCanvas(QMainWindow):
         segments = page.get("segments", [])
         last = segments[-1]["line"] if segments else None
         return (page.get("page_id", id(page)), page.get("_revision", 0),
-                page.get("name", ""), len(segments), len(page.get("texts", [])),
+                page.get("name", ""), tuple(page.get("view", {}).get(k, v)
+                    for k, v in (("x", 0.0), ("y", 0.0), ("zoom", 1.0))), len(segments), len(page.get("texts", [])),
                 len(page.get("shapes", [])), len(page.get("images", [])),
                 (last.x2(), last.y2()) if last is not None else None)
 
@@ -3904,6 +3959,9 @@ class DrawingCanvas(QMainWindow):
             self.text_drag_rect = None
             if self.panel:
                 self.panel.close_text_input()
+        self.board_view = BoardView.from_data(page.get("view"))
+        self._board_gesture.clear()
+        self._pan_point = None
         self._page_id = page.setdefault("page_id", str(uuid.uuid4()))
         self._page_name = page.get("name", "")
         self._page_revision = page.get("_revision", 0)
@@ -3971,7 +4029,9 @@ class DrawingCanvas(QMainWindow):
         self.current_stroke_widths = []
         self.current_stroke_segments = []
         self.last_point = None
+        view = self.board_view
         self.load_page(snapshot)        # 编辑态由 load_page 统一作废
+        self.board_view = view          # Undo changes content, never the viewing position.
         self.mark_content_changed()
         if self.whiteboard_mode:
             self.save_current_page()
@@ -4397,6 +4457,7 @@ class DrawingCanvas(QMainWindow):
         source = self.pages[index]
         duplicate = {
             "page_id": str(uuid.uuid4()), "_revision": 0,
+            "view": dict(source.get("view", BoardView().to_data())),
             "name": trf("page_copy_name", name=source.get("name") or trf("page_label", index=index + 1))[:256],
             "segments": [clone_segment(seg) for seg in source.get("segments", [])],
             "texts": [self.clone_text_item(item) for item in source.get("texts", [])],
@@ -6024,8 +6085,7 @@ class DrawingCanvas(QMainWindow):
                     line = seg["line"]
                     self.all_segments.append(clone_segment(
                         seg,
-                        line=QLine(round(line.p1().x() + dx), round(line.p1().y() + dy),
-                                   round(line.p2().x() + dx), round(line.p2().y() + dy)),
+                        line=QLineF(line.x1() + dx, line.y1() + dy, line.x2() + dx, line.y2() + dy),
                         id=stroke_map[seg["id"]]))
             new_ids.update(stroke_map.values())
             for item in list(self.text_items):
@@ -6358,7 +6418,7 @@ class DrawingCanvas(QMainWindow):
             "segments": [
                 {
                     "index": i,
-                    "line": QLine(seg["line"]),
+                    "line": QLineF(seg["line"]),
                     "pen": QPen(seg["pen"]),
                     "nib": seg.get("nib"),
                 }
@@ -6388,7 +6448,7 @@ class DrawingCanvas(QMainWindow):
     def restore_selection_state(self, state):
         self._stroke_geometry_cache.invalidate()
         for saved in state["segments"]:
-            self.all_segments[saved["index"]]["line"] = QLine(saved["line"])
+            self.all_segments[saved["index"]]["line"] = QLineF(saved["line"])
             self.all_segments[saved["index"]]["pen"] = QPen(saved["pen"])
             if saved.get("nib") is not None:
                 self.all_segments[saved["index"]]["nib"] = saved["nib"]
@@ -6408,9 +6468,9 @@ class DrawingCanvas(QMainWindow):
         for seg in self.all_segments:
             if seg["id"] in self.selected_ids:
                 line = seg["line"]
-                seg["line"] = QLine(
-                    round(line.p1().x() + delta.x()), round(line.p1().y() + delta.y()),
-                    round(line.p2().x() + delta.x()), round(line.p2().y() + delta.y()),
+                seg["line"] = QLineF(
+                    line.x1() + delta.x(), line.y1() + delta.y(),
+                    line.x2() + delta.x(), line.y2() + delta.y(),
                 )
         for item in self.text_items:
             if item["id"] in self.selected_ids:
@@ -6440,7 +6500,7 @@ class DrawingCanvas(QMainWindow):
             if seg["id"] in self.selected_ids:
                 p1 = self.transformed_point(seg["line"].p1(), center, scale=factor)
                 p2 = self.transformed_point(seg["line"].p2(), center, scale=factor)
-                seg["line"] = QLine(round(p1.x()), round(p1.y()), round(p2.x()), round(p2.y()))
+                seg["line"] = QLineF(p1.x(), p1.y(), p2.x(), p2.y())
                 pen = QPen(seg["pen"])
                 if seg.get("style"):
                     # 钢笔/毛笔的宽度本来就是小数渐变，取整会把收笔的尖锋磨平
@@ -6490,7 +6550,7 @@ class DrawingCanvas(QMainWindow):
             if seg["id"] in self.selected_ids:
                 p1 = self.transformed_point(seg["line"].p1(), center, rotation=degrees)
                 p2 = self.transformed_point(seg["line"].p2(), center, rotation=degrees)
-                seg["line"] = QLine(round(p1.x()), round(p1.y()), round(p2.x()), round(p2.y()))
+                seg["line"] = QLineF(p1.x(), p1.y(), p2.x(), p2.y())
                 if seg.get("nib") is not None:
                     # 书法笔的笔尖角度跟着转，否则旋转后粗细分布是错的（横画变竖画的粗细）
                     seg["nib"] = (seg["nib"] + degrees) % 360.0
@@ -6660,7 +6720,7 @@ class DrawingCanvas(QMainWindow):
         previous = self.last_point
         for step in range(1, steps + 1):
             t = step / steps
-            point = QPoint(round(self.last_point.x() + dx * t), round(self.last_point.y() + dy * t))
+            point = QPointF(self.last_point.x() + dx * t, self.last_point.y() + dy * t)
             if point != previous:
                 if is_marker:
                     # 荧光笔宽度恒定，不受压感和起笔渐变影响
@@ -6682,7 +6742,7 @@ class DrawingCanvas(QMainWindow):
                         # 压感、速度系数或相邻段阻尼，保证整笔严格恒定。
                         width = int(round(max(1, self.pen_width)))
                     pen = QPen(self.pen_color, width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
-                line = QLine(previous.x(), previous.y(), point.x(), point.y())
+                line = QLineF(previous.x(), previous.y(), point.x(), point.y())
                 seg = {"line": line, "pen": pen, "id": self.current_stroke_id, "marker": is_marker}
                 if style != "pen":
                     seg["style"] = style
@@ -6798,8 +6858,8 @@ class DrawingCanvas(QMainWindow):
         head = max(14.0, width * 4.0) * self._stroke_options.get("head_size", 40) / 40.0
         for side in (-1, 1):
             a = angle + math.pi - side * math.radians(self._stroke_options.get("head_angle", 28))
-            end = QPoint(round(tip.x() + head * math.cos(a)), round(tip.y() + head * math.sin(a)))
-            segment = clone_segment(last, line=QLine(tip.toPoint(), end))
+            end = QPointF(tip.x() + head * math.cos(a), tip.y() + head * math.sin(a))
+            segment = clone_segment(last, line=QLineF(QPointF(tip), end))
             self.all_segments.append(segment)
             segments.append(segment)
 
@@ -7483,6 +7543,32 @@ class DrawingCanvas(QMainWindow):
         painter.drawPath(path)
         painter.restore()
 
+    def page_content_bounds(self, page):
+        bounds = QRectF()
+        segments = page.get("segments", [])
+        if segments:
+            left = top = float("inf")
+            right = bottom = float("-inf")
+            for segment in segments:
+                line = segment["line"]
+                radius = self.segment_ink_radius(segment)
+                left = min(left, line.x1() - radius, line.x2() - radius)
+                right = max(right, line.x1() + radius, line.x2() + radius)
+                top = min(top, line.y1() - radius, line.y2() - radius)
+                bottom = max(bottom, line.y1() + radius, line.y2() + radius)
+            bounds = QRectF(left, top, right - left, bottom - top)
+        for key, measure in (("shapes", self.shape_bounds), ("texts", self.text_bounds),
+                             ("images", self.image_bounds)):
+            for item in page.get(key, []):
+                bounds = bounds.united(measure(item))
+        return bounds
+
+    def page_export_transform(self, page, width, height):
+        bounds = self.page_content_bounds(page).adjusted(-20, -20, 20, 20)
+        scale = min((max(1, width - 20)) / bounds.width(),
+                    (max(1, height - 20)) / bounds.height(), 20.0)
+        return scale, width / 2 - bounds.center().x() * scale, height / 2 - bounds.center().y() * scale
+
     def render_page_pixmap(self, page, size, *, board_style=None):
         """把一页页面数据渲染为缩略图或导出图，兼容 JSON 和运行时页面。"""
         width, height = self._page_px_size(size)
@@ -7531,43 +7617,9 @@ class DrawingCanvas(QMainWindow):
             texts = page.get("texts", [])
             images = page.get("images", [])
         if segments or shapes or texts or images:
-            bounds = QRectF()
-            # 笔迹很多时，逐段构造 QRectF/QPointF 再 united 是缩略图卡顿的主要来源；
-            # 用纯数值 min/max 一次扫完，结果相同但大幅减少 Python/Qt 对象创建。
-            min_x = min_y = float("inf")
-            max_x = max_y = float("-inf")
-            for seg in segments:
-                line = seg.get("line") if isinstance(seg, dict) else None
-                if line is None:
-                    continue
-                x1, y1, x2, y2 = line.x1(), line.y1(), line.x2(), line.y2()
-                min_x = min(min_x, x1, x2); max_x = max(max_x, x1, x2)
-                min_y = min(min_y, y1, y2); max_y = max(max_y, y1, y2)
-            if min_x <= max_x and min_y <= max_y:
-                bounds = QRectF(QPointF(min_x, min_y), QPointF(max_x, max_y))
-            for item in images:
-                try:
-                    bounds = bounds.united(self.image_bounds(item))
-                except Exception:
-                    continue
-            for item in shapes:
-                try:
-                    bounds = bounds.united(self.shape_bounds(item))
-                except Exception:
-                    continue
-            for item in texts:
-                try:
-                    bounds = bounds.united(self.text_bounds(item))
-                except Exception:
-                    continue
-            bounds = bounds.adjusted(-20, -20, 20, 20)
-            if not bounds.isNull() and bounds.width() > 0 and bounds.height() > 0:
-                margin = 10.0
-                scale = min((width - 2 * margin) / bounds.width(), (height - 2 * margin) / bounds.height())
-                scale = max(0.01, min(scale, 20.0))
-                painter.translate(width / 2, height / 2)
-                painter.scale(scale, scale)
-                painter.translate(-bounds.center())
+            scale, x, y = self.page_export_transform(page, width, height)
+            painter.translate(x, y)
+            painter.scale(scale, scale)
             self.draw_content(painter, segments, shapes, texts, images)
 
     def write_svg_page(self, path, page, size):
@@ -7588,6 +7640,7 @@ class DrawingCanvas(QMainWindow):
         finally:
             painter.end()
 
+    @toolbox_action('magnifier.zoom_changed')
     def step_magnifier_zoom(self, direction):
         zoom = round(self.magnifier_zoom + direction * self.MAGNIFIER_ZOOM_STEP, 2)
         self.magnifier_zoom = max(self.MAGNIFIER_ZOOM_MIN, min(self.MAGNIFIER_ZOOM_MAX, zoom))
@@ -7717,10 +7770,11 @@ class DrawingCanvas(QMainWindow):
             return None
         return ruler_mm_from_local_x(local.x(), geometry["length"], geometry["length_mm"])
 
+    @measurement_action("aid.added")
     def add_aid(self, kind):
         """放置一把辅助工具到屏幕中央。"""
         screen = self.rect()
-        center = QPointF(screen.center())
+        center = self.to_document(QPointF(screen.center()))
         screen_key_value, _, _ = self.current_screen_calibration()
         defaults = {
             "ruler": {
@@ -7742,6 +7796,7 @@ class DrawingCanvas(QMainWindow):
         self.update()
         return item
 
+    @measurement_action("aid.cleared")
     def clear_aids(self):
         self.aids.clear()
         self.active_aid_id = None
@@ -7931,17 +7986,19 @@ class DrawingCanvas(QMainWindow):
         geometry = self.ruler_geometry(aid)
         half = geometry["length"] / 2.0
         painter.save()
+        painter.resetTransform()
         painter.setFont(QFont("Microsoft YaHei", 8))
         major_count = int(math.floor(geometry["length_mm"] / geometry["major_tick_mm"] + 1e-9))
         min_label_gap = 34.0
-        step = max(1, int(math.ceil(min_label_gap / max(1.0, geometry["major_spacing"]))))
+        view_zoom = self.board_view.zoom if self.board_view_active else 1.0
+        step = max(1, int(math.ceil(min_label_gap / max(1.0, geometry["major_spacing"] * view_zoom))))
         occupied = []
         for major_index in range(major_count + 1):
             if major_index % step != 0 and major_index != major_count:
                 continue
             mm_value = major_index * geometry["major_tick_mm"]
             local_x = -half + mm_value * geometry["px_per_mm"]
-            anchor = self.aid_map(aid, local_x, geometry["bottom"] + 10.0)
+            anchor = self.to_view(self.aid_map(aid, local_x, geometry["bottom"] + 10.0))
             text = f"{mm_value / 10:g}cm"
             rect = self._screen_label_rect(painter, anchor, text, 4.0)
             collision_rect = rect.adjusted(-3.0, -2.0, 3.0, 2.0)
@@ -7958,7 +8015,7 @@ class DrawingCanvas(QMainWindow):
             if ok:
                 local = inv.map(self.aid_hover_pos)
                 local_x = max(-half, min(half, local.x()))
-                anchor = self.aid_map(aid, local_x, geometry["bottom"] + 34.0)
+                anchor = self.to_view(self.aid_map(aid, local_x, geometry["bottom"] + 34.0))
                 text = f"{reading:.1f} mm / {reading / 10:.2f} cm"
                 painter.setFont(QFont("Microsoft YaHei", 10, QFont.Weight.Bold))
                 rect = self._screen_label_rect(painter, anchor, text, 8.0)
@@ -8074,7 +8131,7 @@ class DrawingCanvas(QMainWindow):
             return
         dpr = self.magnifier_pixmap.devicePixelRatio() or 1.0
         radius = self.magnifier_size / 2
-        center = QPointF(self.mouse_pos)
+        center = self.to_view(self.mouse_pos)
         target = QRectF(center.x() - radius, center.y() - radius, self.magnifier_size, self.magnifier_size)
         src_side = self.magnifier_size / self.magnifier_zoom
         source = QRectF((center.x() - src_side / 2) * dpr, (center.y() - src_side / 2) * dpr, src_side * dpr, src_side * dpr)
@@ -8104,7 +8161,7 @@ class DrawingCanvas(QMainWindow):
         if w < 2 or h < 2:
             return
         radius = self.spotlight_radius
-        center = QPointF(self.mouse_pos)
+        center = self.to_view(self.mouse_pos)
         # HiDPI：按设备像素率创建 overlay，避免高分屏下暗化层/亮区边缘被放大模糊
         dpr = self.devicePixelRatio() or 1.0
         dev_w, dev_h = int(round(w * dpr)), int(round(h * dpr))
@@ -8140,6 +8197,9 @@ class DrawingCanvas(QMainWindow):
         clip = QRectF(event.rect())
         painter.setClipRect(clip)
         painter.fillRect(clip, self.board_background())
+        if self.board_view_active:
+            painter.setWorldTransform(self.board_view.transform())
+            clip = self.board_view.document_rect(clip)
         # 穿透模式下不画编辑 HUD，那时编辑中的框得走常态渲染，不能跳过。
         editing = self.editing_text_item() if self.is_drawing_mode else None
         self.draw_content(painter, clip=clip,
@@ -8208,10 +8268,14 @@ class DrawingCanvas(QMainWindow):
                 self.draw_hold_rings(painter)
             if self.draw_state == "LASER":
                 self.draw_laser(painter)
-            if self.draw_state == "MAGNIFIER":
-                self.draw_magnifier(painter)
-            if self.draw_state == "SPOTLIGHT":
-                self.draw_spotlight(painter)
+            if self.draw_state in ("MAGNIFIER", "SPOTLIGHT"):
+                painter.save()
+                painter.resetTransform()
+                if self.draw_state == "MAGNIFIER":
+                    self.draw_magnifier(painter)
+                else:
+                    self.draw_spotlight(painter)
+                painter.restore()
         if self.aids:
             self.draw_aids(painter)
 
@@ -8220,12 +8284,19 @@ class DrawingCanvas(QMainWindow):
         # 正常绘图/选择路径，不要求用户再点一次才能落墨。
         if self.panel and event.button() == Qt.MouseButton.LeftButton:
             self.panel.show_only_sub(None)
+        if self.is_roaming:
+            if not self._touch_synthesized(event) and event.button() == Qt.MouseButton.LeftButton:
+                self.cancel_page_pen_return()
+                self._pan_point = event.position()
+                self.setCursor(Qt.CursorShape.ClosedHandCursor)
+                event.accept()
+            return
         if event.button() == Qt.MouseButton.LeftButton and not self._touch_synthesized(event):
             self.consume_page_pen_return()
         if not self.is_drawing_mode: return
         if self._touch_synthesized(event):
             return          # 多指已接管，这是 Windows 为主接触点补发的鼠标消息
-        pos = event.position().toPoint()
+        pos = self.to_document(event.position())
         if event.button() == Qt.MouseButton.RightButton:
             if self.draw_state == "SHAPE":
                 self.cancel_pending_points()
@@ -8289,7 +8360,7 @@ class DrawingCanvas(QMainWindow):
             if events is not None:
                 self._teaching_laser_trace_operation = events.begin_operation("laser.trace")
             self._teaching_laser_moved = False
-            self._teaching_laser_start = QPoint(pos)
+            self._teaching_laser_start = QPointF(pos)
             self.laser_trail = []
             self.push_laser_point(pos)
             self.update()
@@ -8374,10 +8445,20 @@ class DrawingCanvas(QMainWindow):
             track_event("erase_start", eraser_type=self.eraser_type, size=self.eraser_size)
             self.execute_erase(pos)
 
+    @teaching_spotlight_move
     def mouseMoveEvent(self, event):
         if self._touch_synthesized(event):
             return
-        pos = event.position().toPoint()
+        if self.is_roaming:
+            if self._pan_point is not None and event.buttons() & Qt.MouseButton.LeftButton:
+                delta = event.position() - self._pan_point
+                self._pan_point = event.position()
+                self.board_view.x += delta.x()
+                self.board_view.y += delta.y()
+                self.view_changed()
+            event.accept()
+            return
+        pos = self.to_document(event.position())
         previous_mouse = self.mouse_pos
         first_new_segment = len(self.all_segments)
         self.mouse_pos = pos
@@ -8465,6 +8546,11 @@ class DrawingCanvas(QMainWindow):
             self.execute_erase_path(pos)
         if self.is_drawing_mode and self.draw_state in ("PEN", "MARKER") and not self.aids:
             self.repaint_ink(self.all_segments[first_new_segment:], previous_mouse)
+        elif self.is_drawing_mode and self.draw_state == "ERASER" and not self.aids:
+            reach = self.eraser_size / 2.0 + 3.0
+            for point in (previous_mouse, self.mouse_pos):
+                self.update(QRectF(point.x() - reach, point.y() - reach,
+                                   reach * 2, reach * 2).toAlignedRect())
         else:
             self.update()
 
@@ -8473,8 +8559,24 @@ class DrawingCanvas(QMainWindow):
         point = QPointF(pos)
         px, py = float(pos.x()), float(pos.y())
         r = self.eraser_size / 2.0
+        cache = self._stroke_geometry_cache
+        cache.sync(self.all_segments, GROUPED_STYLES, self.segment_ink_radius)
+        dirty = QRectF(px - r - 3, py - r - 3, 2 * r + 6, 2 * r + 6)
+        previous_items = (self.shape_items, self.text_items, self.image_items)
+        had_selection = bool(self.selected_ids)
+        candidates = cache.segments_in_rect(QRectF(px - r, py - r, 2 * r, 2 * r))
         if self.eraser_type == "CIRCLE":
-            self.all_segments = [s for s in self.all_segments if self.point_to_segment_distance_sq(pos, s["line"]) >= r_sq]
+            removed = [s for s in candidates if self.point_to_segment_distance_sq(pos, s["line"]) < r_sq]
+        else:
+            hit_id = next((s["id"] for s in candidates
+                           if self.point_to_segment_distance_sq(pos, s["line"]) < r_sq), None)
+            removed = [s for s in self.all_segments if s["id"] == hit_id] if hit_id else []
+        if removed:
+            removed_parts = {id(s) for s in removed}
+            self.all_segments = [s for s in self.all_segments if id(s) not in removed_parts]
+            dirty = dirty.united(cache.discard_segments(
+                self.all_segments, removed, GROUPED_STYLES, self.segment_ink_radius))
+        if self.eraser_type == "CIRCLE":
             # 形状只删除「轮廓真正进入擦除圆内」的，而不是外接包围盒被覆盖到的——
             # 后者会连空心矩形/圆等内部空白的图形一并删掉（见 _shape_outline_hit 注释）。
             self.shape_items = [item for item in self.shape_items
@@ -8482,8 +8584,6 @@ class DrawingCanvas(QMainWindow):
             self.text_items = [item for item in self.text_items if not self.text_bounds(item).contains(point)]
             self.image_items = [item for item in self.image_items if not self.image_bounds(item).contains(point)]
         else:
-            hit_id = next((s["id"] for s in self.all_segments if self.point_to_segment_distance_sq(pos, s["line"]) < r_sq), None)
-            if hit_id: self.all_segments = [s for s in self.all_segments if s["id"] != hit_id]
             hit_shape = next((item["id"] for item in self.shape_items
                               if self._shape_outline_hit(px, py, item, r)), None)
             if hit_shape: self.shape_items = [item for item in self.shape_items if item["id"] != hit_shape]
@@ -8501,7 +8601,18 @@ class DrawingCanvas(QMainWindow):
             if self.panel and len(self.selected_ids) != before:
                 self.panel.sync_selection_controls()
                 self.panel.position_selection_panel(self.selection_bounds())
-        self.update()
+        for previous, current, bounds in zip(previous_items,
+                (self.shape_items, self.text_items, self.image_items),
+                (self.shape_bounds, self.text_bounds, self.image_bounds)):
+            if len(previous) != len(current):
+                retained = {id(item) for item in current}
+                for item in previous:
+                    if id(item) not in retained:
+                        dirty = dirty.united(bounds(item).adjusted(-2, -2, 2, 2))
+        if had_selection:
+            self.update()  # Selection handles may span several disconnected objects.
+        else:
+            self.update(dirty.toAlignedRect())
 
     def execute_erase_path(self, pos):
         if not self.last_erase_point:
@@ -8513,11 +8624,17 @@ class DrawingCanvas(QMainWindow):
         start = self.last_erase_point
         for step in range(1, steps + 1):
             t = step / steps
-            point = QPoint(round(start.x() + dx * t), round(start.y() + dy * t))
+            point = QPointF(start.x() + dx * t, start.y() + dy * t)
             self.execute_erase(point)
         self.last_erase_point = pos
 
+    @measurement_drag
     def mouseReleaseEvent(self, event):
+        if self.is_roaming:
+            self._pan_point = None
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+            event.accept()
+            return
         if self._touch_synthesized(event):
             return
         # 与 mousePressEvent 对称：右键/中键释放不能结束仍按着的左键笔画、清掉停笔计时。
@@ -8624,6 +8741,11 @@ class DrawingCanvas(QMainWindow):
                 return True
             return False        # 不接受 → Qt 用主接触点合成鼠标事件，单指路径照旧
         if kind == QEvent.Type.TouchCancel:
+            self._board_gesture.clear()
+            self._pan_point = None
+            if self.is_roaming:
+                ev.accept()
+                return True
             self._discard_teaching_edit()
             if self._pointer_slots:
                 self._cancel_all_pointers()
@@ -8641,6 +8763,20 @@ class DrawingCanvas(QMainWindow):
         return handled
 
     def _dispatch_touch(self, ev):
+        if self.is_roaming:
+            self._touch_owns_input = True
+            self._pan_point = None
+            points = {point.id(): point.position() for point in ev.points()}
+            changed = self._board_gesture.update(self.board_view, points)
+            active = {point.id(): point.position() for point in ev.points()
+                      if point.state() != QEventPoint.State.Released}
+            if active.keys() != points.keys():
+                self._board_gesture.update(self.board_view, active)
+            if ev.type() == QEvent.Type.TouchEnd:
+                self._board_gesture.clear()
+            if changed:
+                self.view_changed()
+            return True
         if ev.type() == QEvent.Type.TouchBegin and ev.points():
             self.consume_page_pen_return()
         if not self.is_drawing_mode or self.draw_state not in self.TOUCH_TOOLS:
@@ -8662,7 +8798,7 @@ class DrawingCanvas(QMainWindow):
         for point in points:
             key = point.id()
             state = point.state()
-            pos = point.position().toPoint()
+            pos = self.to_document(point.position())
             if state == QEventPoint.State.Pressed:
                 self._pointer_press(key, pos, point.pressure())
                 touched = True
@@ -8747,6 +8883,7 @@ class DrawingCanvas(QMainWindow):
             anchor = self.current_stroke_points[-1] if self.current_stroke_points else None
         if anchor is None:
             return False
+        anchor = self.to_view(anchor)
         ax, ay = float(anchor.x()), float(anchor.y())
         for point in points:
             pos = point.position()
@@ -8848,6 +8985,13 @@ class DrawingCanvas(QMainWindow):
         self.update()
 
     def wheelEvent(self, event):
+        if self.is_roaming:
+            delta = event.angleDelta().y() or event.pixelDelta().y()
+            if delta:
+                self.board_view.zoom_at(event.position(), self.board_view.zoom * 1.2 ** (delta / 120.0))
+                self.view_changed()
+            event.accept()
+            return
         if self.is_drawing_mode and self.draw_state == "MAGNIFIER":
             self.step_magnifier_zoom(1 if event.angleDelta().y() > 0 else -1)
             event.accept()
@@ -8860,7 +9004,7 @@ class DrawingCanvas(QMainWindow):
             return
         # 滚轮只缩放指针下命中的辅助工具，避免活动工具与指针位置不一致。
         if self.is_drawing_mode and self.aids:
-            aid, _ = self.aid_hit(event.position().toPoint())
+            aid, _ = self.aid_hit(self.to_document(event.position()))
             if aid is not None:
                 direction = 1 if event.angleDelta().y() > 0 else -1
                 if aid.get("kind") == "ruler":
@@ -9322,10 +9466,12 @@ class ControlPanel(QWidget):
     }
 
     @classmethod
-    def theme_for(cls, theme_name, color_scheme="classic"):
+    def theme_for(cls, theme_name, color_scheme="classic", custom_schemes=None):
         """Resolve UI colors without changing the legacy light/dark config key."""
         if not isinstance(theme_name, str) or theme_name not in cls.THEMES:
             theme_name = "dark"
+        if isinstance(color_scheme, str) and color_scheme in (custom_schemes or {}):
+            return resolved_theme(custom_schemes[color_scheme]["colors"][theme_name])
         if not isinstance(color_scheme, str) or color_scheme not in cls.COLOR_SCHEME_TOKENS:
             return dict(cls.THEMES[theme_name])
         theme = dict(cls.COLOR_SCHEME_TOKENS[color_scheme][theme_name])
@@ -9365,8 +9511,9 @@ class ControlPanel(QWidget):
         QApplication.instance().aboutToQuit.connect(self.shutdown_autosave)
         self.color_buttons = []
         self.theme_name = "dark"
+        self.custom_color_schemes = {}
         self.color_scheme = "classic"
-        self.theme = self.theme_for(self.theme_name, self.color_scheme)
+        self.theme = self.theme_for(self.theme_name, self.color_scheme, self.custom_color_schemes)
         # --- 外观与系统设置（全部走 collect_settings / load_settings 持久化）---
         # 图标式分体界面是唯一界面（set_ui_mode 只会写 "icon"）。初值也必须是 icon：
         # 各处 `ui_mode == "icon"` 的判断在 load_settings 之前就会跑（白板区显隐后的
@@ -9377,6 +9524,7 @@ class ControlPanel(QWidget):
         self.update_check_enabled = True    # 默认自动检查；下载和安装始终需用户确认
         self.update_channel = "stable"
         self.whiteboard_auto_pen = True
+        self.infinite_whiteboard = True
         self.page_copy_placement = "after"
         self.autosave_interval_seconds = AUTOSAVE_INTERVAL
         self.timer_alarm_volume = 100
@@ -9752,6 +9900,12 @@ class ControlPanel(QWidget):
             QLabel#MiniTimer {{ background-color: {t["frame"]}; border: 2px solid {t["accent"]}; border-radius: {rad["mini"]}px; font-size: 20px; font-weight: bold; color: {t["accent"]}; font-family: Consolas, "Microsoft YaHei"; padding: 5px 16px; }}
             QLabel#SettingsSection {{ color: {t["accent"]}; font-size: 12px; font-weight: bold; padding: 6px 2px 2px 2px; }}
             QLabel#SettingsHint {{ color: {t["hint"]}; font-size: 10px; padding: 0px 2px 4px 2px; }}
+            QWidget#TeachingSurface {{ background-color: {t["panel"]}; color: {t["text"]}; }}
+            QWidget#TeachingSurface QLabel {{ color: {t["text"]}; font-size: 14px; padding: 0px; }}
+            QWidget#TeachingSurface QLabel#TeachingTitle {{ font-size: 16px; font-weight: bold; }}
+            QWidget#TeachingSurface QScrollArea,
+            QWidget#TeachingSurface QScrollArea > QWidget {{ background-color: {t["panel"]}; border: none; }}
+            QWidget#TeachingSurface QWidget#TeachingContent {{ background-color: {t["panel"]}; }}
             QMenu {{ background-color: {t["panel"]}; color: {t["text"]}; border: 1.5px solid {border}; border-radius: {rad["button"]}px; padding: 4px; }}
             QMenu::item {{ padding: 10px 24px; border-radius: {rad["item"]}px; }}
             QMenu::item:selected {{ background-color: {t["accent"]}; color: {t["active_text"]}; }}
@@ -9779,6 +9933,9 @@ class ControlPanel(QWidget):
             QColorDialog QPushButton, QColorDialog QLabel {{ font-size: 12px; }}
         """ + controls_stylesheet(t) + self.color_scheme_stylesheet())
         self.setPalette(theme_palette(t))
+        if self.teaching_presenter is not None:
+            self.teaching_presenter.controller.setStyleSheet(self.styleSheet())
+            self.teaching_presenter.controller.setPalette(self.palette())
         # 子菜单浮窗/选中面板/迷你计时器是独立顶层窗口，主面板的样式表覆盖不到，需各自下发
         for floating in (getattr(self, "menu_panel", None), getattr(self, "select_panel", None),
                          getattr(self, "mini_timer", None), getattr(self, "calc_panel", None),
@@ -10000,6 +10157,7 @@ class ControlPanel(QWidget):
         if (x, y) != (toolbar.x(), toolbar.y()):
             toolbar.move(x, y)
 
+    @interface_action('toolbar.visibility_changed')
     def toggle_toolbar_collapsed(self):
         """LOGO点击：折叠/展开工具栏窗口"""
         if self.toolbar_window.isVisible():
@@ -10171,7 +10329,8 @@ class ControlPanel(QWidget):
         if not buttons:
             return
         compact_keys = {"mode", "pen", "settings", "close"}
-        compact_mouse_mode = self.canvas is not None and not self.canvas.is_drawing_mode
+        compact_mouse_mode = (self.canvas is not None and not self.canvas.is_drawing_mode
+                              and not self.canvas.whiteboard_mode)
         layout_changed = False
         for key, icon_name, tip_key, handler_name, mirror_name in self.ICON_ACTIONS + self.ICON_WB_ACTIONS:
             btn = buttons.get(key)
@@ -10186,7 +10345,7 @@ class ControlPanel(QWidget):
             active = source.objectName() == "ActiveTool"
             # 鼠标模式下高亮的是「鼠标」本身：画布不接收输入，批注工具并没有在生效，
             # 高亮停在批注上会让人以为点了鼠标却没切过去。
-            if compact_mouse_mode:
+            if self.canvas is not None and not self.canvas.is_drawing_mode:
                 active = key == "mode"
             want = "IconBtnActive" if active else "IconBtn"
             if btn.objectName() != want:
@@ -10595,6 +10754,12 @@ class ControlPanel(QWidget):
     def update_whiteboard_ui(self):
         if not self.canvas:
             return
+        self.btn_mode.setText(tr("canvas_roam" if self.canvas.board_view_active else "mouse"))
+        if hasattr(self, "btn_view_home"):
+            self.btn_view_home.setEnabled(self.canvas.board_view_active)
+            self.btn_view_fit.setEnabled(self.canvas.board_view_active)
+        self.sync_canvas_input_mode()
+        self.sync_icon_buttons()
         total = max(1, len(self.canvas.pages))
         current = self.canvas.current_page + 1
         if hasattr(self, "page_label"):
@@ -10736,28 +10901,95 @@ class ControlPanel(QWidget):
                 events.emit_result(operation, "board.style_changed", "success", {
                     "style": self.canvas.board_style, "whiteboard_mode": self.canvas.whiteboard_mode})
 
+    @interface_action('settings.theme_changed')
     def toggle_theme(self):
         self.theme_name = "light" if self.theme_name == "dark" else "dark"
-        self.theme = self.theme_for(self.theme_name, self.color_scheme)
+        self.theme = self.theme_for(self.theme_name, self.color_scheme, self.custom_color_schemes)
         self.apply_theme(relayout=False)
         self.refresh_ui()
         self.sync_settings_panel()
         self.save_settings()
         track_event("theme_changed", theme=self.theme_name)
 
+    @interface_action('settings.color_scheme_changed')
     def set_color_scheme(self, color_scheme, *, persist=True):
-        if not isinstance(color_scheme, str) or color_scheme not in self.COLOR_SCHEMES:
+        if (not isinstance(color_scheme, str) or
+                color_scheme not in self.COLOR_SCHEMES and color_scheme not in self.custom_color_schemes):
             return
         if color_scheme == self.color_scheme:
             return
         self.color_scheme = color_scheme
-        self.theme = self.theme_for(self.theme_name, color_scheme)
+        self.theme = self.theme_for(self.theme_name, color_scheme, self.custom_color_schemes)
         self.apply_theme(relayout=False)
         self.refresh_ui()
         self.sync_settings_panel()
         if persist:
             self.save_settings()
 
+
+    def set_infinite_whiteboard(self, enabled):
+        self.canvas.finish_active_ink()
+        self.canvas._board_gesture.clear()
+        self.canvas._pan_point = None
+        self.infinite_whiteboard = bool(enabled)
+        self.sync_canvas_input_mode()
+        self.update_whiteboard_ui()
+        self.sync_settings_panel()
+        self.canvas.update()
+        self.save_settings()
+
+    def save_custom_color_scheme(self, name, colors, scheme_id=None):
+        scheme_id = scheme_id or "custom_" + uuid.uuid4().hex
+        preset = normalize_custom_schemes({scheme_id: {"name": name, "colors": colors}})
+        if not preset:
+            return None
+        self.custom_color_schemes.update(preset)
+        self.color_scheme = scheme_id
+        self.theme = self.theme_for(self.theme_name, scheme_id, self.custom_color_schemes)
+        self.apply_theme(relayout=False)
+        self.refresh_ui()
+        self.sync_settings_panel()
+        self.save_settings()
+        return scheme_id
+
+    def edit_custom_color_scheme(self, *, new=False):
+        scheme_id = None if new else self.color_scheme
+        if not new and scheme_id not in self.custom_color_schemes:
+            return
+        preset = self.custom_color_schemes.get(scheme_id)
+        colors = preset["colors"] if preset else {
+            mode: palette_from_theme(self.theme_for(mode, self.color_scheme, self.custom_color_schemes))
+            for mode in ("light", "dark")}
+        dialog = CustomColorsDialog(preset["name"] if preset else tr("custom_scheme_default"),
+                                    colors, tr, self.settings_panel or self)
+        dialog.findChild(QScrollArea).widget().setObjectName("CustomColorFields")
+        dialog.setPalette(theme_palette(self.theme))
+        dialog.setStyleSheet(
+            f"QDialog {{background-color: {self.theme['panel']}; color: {self.theme['text']};}}"
+            f"QLabel {{color: {self.theme['text']};}}"
+            f"QWidget#CustomColorFields {{background-color: {self.theme['panel']};}}"
+            + controls_stylesheet(self.theme))
+        apply_combo_theme(dialog.mode_combo, self.theme)
+        heartbeat_active = self.timer.isActive()
+        self.timer.stop()
+        try:
+            with teaching_native_dialog(self):
+                if dialog.exec() == QDialog.DialogCode.Accepted:
+                    data = dialog.preset()
+                    self.save_custom_color_scheme(data["name"], data["colors"], scheme_id)
+        finally:
+            dialog.deleteLater()
+            if heartbeat_active:
+                self.timer.start(self.HEARTBEAT_MS)
+
+    def delete_custom_color_scheme(self, scheme_id):
+        if scheme_id not in self.custom_color_schemes:
+            return
+        del self.custom_color_schemes[scheme_id]
+        if self.color_scheme == scheme_id:
+            self.set_color_scheme("classic", persist=False)
+        self.sync_settings_panel()
+        self.save_settings()
 
     def on_global_key_press(self, key):
         if not self.runtime_context.global_keyboard:
@@ -10877,7 +11109,9 @@ class ControlPanel(QWidget):
             grid.addWidget(btn, index // 3, index % 3)
         self.btn_ann_pen = self.pen_style_buttons["pen"]
         self.annotate_sub_layout.addLayout(grid)
-        self.annotate_sub_layout.addWidget(QLabel(tr("annotate_hint")))
+        hint = QLabel(tr("annotate_hint"))
+        hint.setWordWrap(True)
+        self.annotate_sub_layout.addWidget(hint)
 
     def _scheme_icon(self, icon_name, size, *, active=False, disabled=False,
                      badge_color=None, rainbow=False):
@@ -11028,7 +11262,9 @@ class ControlPanel(QWidget):
         btn_u = QPushButton("▲"); btn_u.setObjectName("ArrowBtn"); btn_u.clicked.connect(lambda: self.laser_width_slider.setValue(self.laser_width_slider.value() + 1))
         row.addWidget(btn_d); row.addWidget(self.laser_width_slider); row.addWidget(btn_u)
         self.laser_sub_layout.addLayout(row)
-        self.laser_sub_layout.addWidget(QLabel(tr("laser_hint")))
+        hint = QLabel(tr("laser_hint"))
+        hint.setWordWrap(True)
+        self.laser_sub_layout.addWidget(hint)
 
     def setup_tools_sub(self):
         self.tools_sub_layout.addWidget(QLabel(tr("tools")))
@@ -11040,8 +11276,10 @@ class ControlPanel(QWidget):
             (tr("magnifier"), self.handle_magnifier_click),
             (tr("spotlight"), self.handle_spotlight_click),
         ]
+        self.tool_menu_buttons = {}
         for label, handler in items:
             btn = QPushButton(label)
+            self.tool_menu_buttons[handler.__name__] = btn
             btn.clicked.connect(handler)
             self.tools_sub_layout.addWidget(btn)
         self.btn_teaching = QPushButton(tr("teaching_entry"))
@@ -11136,23 +11374,27 @@ class ControlPanel(QWidget):
             (tr("aid_set_square_30"), "set_square_30"),
             (tr("aid_protractor"), "protractor"),
         ]
+        self.aid_buttons = {}
         for i, (label, kind) in enumerate(aids):
             btn = QPushButton(label)
+            self.aid_buttons[kind] = btn
             btn.clicked.connect(lambda _=False, k=kind: self.spawn_aid(k))
             grid.addWidget(btn, i // 2, i % 2)
         self.aid_sub_layout.addLayout(grid)
         self.aid_calibration_label = QLabel(tr("ruler_scale_dpi"))
         self.aid_sub_layout.addWidget(self.aid_calibration_label)
-        calibrate_btn = QPushButton(tr("calibrate_screen"))
-        calibrate_btn.clicked.connect(self.calibrate_ruler)
+        calibrate_btn = self.btn_aid_calibrate = QPushButton(tr("calibrate_screen"))
+        calibrate_btn.clicked.connect(lambda _checked=False: self.calibrate_ruler())
         self.aid_sub_layout.addWidget(calibrate_btn)
-        reset_calibration_btn = QPushButton(tr("reset_to_dpi"))
-        reset_calibration_btn.clicked.connect(self.reset_ruler_calibration)
+        reset_calibration_btn = self.btn_aid_reset = QPushButton(tr("reset_to_dpi"))
+        reset_calibration_btn.clicked.connect(lambda _checked=False: self.reset_ruler_calibration())
         self.aid_sub_layout.addWidget(reset_calibration_btn)
-        clear_btn = QPushButton(tr("aid_clear_all"))
+        clear_btn = self.btn_aid_clear = QPushButton(tr("aid_clear_all"))
         clear_btn.clicked.connect(self.clear_aids)
         self.aid_sub_layout.addWidget(clear_btn)
-        self.aid_sub_layout.addWidget(QLabel(tr("aid_hint")))
+        hint = QLabel(tr("aid_hint"))
+        hint.setWordWrap(True)
+        self.aid_sub_layout.addWidget(hint)
 
     def on_smart_toggle(self):
         """智能识别开关已移至设置页面，此处不再使用"""
@@ -11247,6 +11489,7 @@ class ControlPanel(QWidget):
         total = max(0, int(round(secs)))
         return f"{min(99, total // 60):02d}:{total % 60:02d}"
 
+    @toolbox_action('timer.mode_changed')
     def set_timer_mode(self, mode):
         self.timer_mode = mode
         self.timer_alerting = False
@@ -11275,6 +11518,7 @@ class ControlPanel(QWidget):
         track_event("timer_preset", seconds=secs)
         self.update_timer_ui()
 
+    @teaching_timer_toggle
     def toggle_timer_running(self):
         if self.timer_running:
             self.timer_running = False
@@ -11292,6 +11536,7 @@ class ControlPanel(QWidget):
         track_event("timer_toggled", running=self.timer_running, mode=self.timer_mode)
         self.update_timer_ui()
 
+    @toolbox_action('timer.reset')
     def reset_timer(self):
         self.timer_running = False
         self.timer_alerting = False
@@ -11315,6 +11560,7 @@ class ControlPanel(QWidget):
             self.timer_left = min(99 * 60 + 59, self.timer_left + delta)
         self.update_timer_ui()
 
+    @teaching_timer_finished
     def _timer_finished(self):
         """倒计时到点：按设置音量响铃并闪烁，不改变系统音量。"""
         self.timer_running = False
@@ -11364,6 +11610,7 @@ class ControlPanel(QWidget):
         elif not want_mini and hasattr(self, "mini_timer") and self.mini_timer.isVisible():
             self.mini_timer.hide()
 
+    @toolbox_action('timer.panel_opened')
     def handle_timer_click(self):
         self.show_only_sub(None if self.timer_sub.isVisible() else self.timer_sub)
         self.refresh_ui()
@@ -11425,7 +11672,7 @@ class ControlPanel(QWidget):
         self.magnifier_sub_layout.addWidget(self.mag_zoom_label)
         z_row = QHBoxLayout(); z_row.setSpacing(2)
         btn_out = QPushButton("－"); btn_out.setObjectName("ArrowBtn"); btn_out.clicked.connect(lambda: self.canvas.step_magnifier_zoom(-1))
-        btn_in = QPushButton("＋"); btn_in.setObjectName("ArrowBtn"); btn_in.clicked.connect(lambda: self.canvas.step_magnifier_zoom(1))
+        btn_in = self.btn_mag_zoom_in = QPushButton("＋"); btn_in.setObjectName("ArrowBtn"); btn_in.clicked.connect(lambda: self.canvas.step_magnifier_zoom(1))
         z_row.addWidget(btn_out); z_row.addWidget(QLabel(tr("zoom_step"))); z_row.addWidget(btn_in)
         self.magnifier_sub_layout.addLayout(z_row)
 
@@ -11436,10 +11683,12 @@ class ControlPanel(QWidget):
         self.mag_size_slider.valueChanged.connect(self.on_magnifier_size_changed)
         self.magnifier_sub_layout.addWidget(self.mag_size_slider)
 
-        refresh_btn = QPushButton(tr("refresh_frame"))
+        refresh_btn = self.btn_mag_refresh = QPushButton(tr("refresh_frame"))
         refresh_btn.clicked.connect(self.refresh_magnifier)
         self.magnifier_sub_layout.addWidget(refresh_btn)
-        self.magnifier_sub_layout.addWidget(QLabel(tr("wheel_zoom_hint")))
+        hint = QLabel(tr("wheel_zoom_hint"))
+        hint.setWordWrap(True)
+        self.magnifier_sub_layout.addWidget(hint)
 
     def on_marker_color_clicked(self):
         btn = self.sender()
@@ -11488,13 +11737,19 @@ class ControlPanel(QWidget):
         self.mag_zoom_label.setText(trf("zoom_value", value=int(self.canvas.magnifier_zoom * 100)))
         self.mag_size_label.setText(trf("lens_value", value=self.canvas.magnifier_size))
 
+    @toolbox_action('magnifier.size_changed')
     def on_magnifier_size_changed(self, v):
         self.canvas.magnifier_size = v
         self.update_magnifier_ui()
         self.canvas.update()
 
+    @toolbox_action('magnifier.refreshed')
     def refresh_magnifier(self):
-        self.canvas.magnifier_pixmap = self.grab_screen()
+        if self.runtime_context.paths.practice:
+            from teaching.toolbox_fixtures import render_private_magnifier_frame
+            self.canvas.magnifier_pixmap = render_private_magnifier_frame(self)
+        else:
+            self.canvas.magnifier_pixmap = self.grab_screen()
         self.canvas.update()
         track_event("magnifier_refreshed", zoom=self.canvas.magnifier_zoom)
 
@@ -11798,6 +12053,7 @@ class ControlPanel(QWidget):
             for operation in (mode_operation, tool_operation, style_operation, preset_operation):
                 events.discard_operation(operation)
 
+    @toolbox_action('spotlight.changed')
     def set_tool(self, state, button):
         was_drawing, previous_tool = self.canvas.is_drawing_mode, self.canvas.draw_state
         operation = (self.canvas._begin_teaching_operation("tool.changed")
@@ -12045,6 +12301,7 @@ class ControlPanel(QWidget):
         source = tr("calibrated_source") if calibrated else tr("dpi_source")
         self.aid_calibration_label.setText(trf("ruler_scale_value", source=source, ratio=f"{px_per_mm:.3f}"))
 
+    @measurement_action("aid.calibration_changed")
     def calibrate_ruler(self):
         if not self.canvas:
             return
@@ -12053,8 +12310,9 @@ class ControlPanel(QWidget):
         track_event("ruler_calibration_started", screen=current_key)
         self.timer.stop()
         try:
-            dialog = RulerCalibrationDialog(screen, estimated, self)
-            accepted = dialog.exec() == QDialog.DialogCode.Accepted
+            with teaching_native_dialog(self):
+                dialog = RulerCalibrationDialog(screen, estimated, self)
+                accepted = dialog.exec() == QDialog.DialogCode.Accepted
         finally:
             self.timer.start(self.HEARTBEAT_MS)
         if not accepted:
@@ -12083,6 +12341,7 @@ class ControlPanel(QWidget):
         self.save_settings()
         track_event("ruler_calibrated", px_per_mm=round(px_per_mm, 5), length_mm=known_mm)
 
+    @measurement_action("aid.calibration_changed")
     def reset_ruler_calibration(self):
         if not self.canvas:
             return
@@ -12140,6 +12399,7 @@ class ControlPanel(QWidget):
                 self.show_only_sub(None if self.eraser_sub.isVisible() else self.eraser_sub)
             self.refresh_ui()
 
+    @toolbox_action('magnifier.opened')
     def handle_magnifier_click(self):
         self.canvas.cancel_page_pen_return()
         self.set_drawing_mode(True)
@@ -12154,6 +12414,7 @@ class ControlPanel(QWidget):
         self.refresh_ui()
         track_event("tool_changed", tool="MAGNIFIER")
 
+    @toolbox_action('spotlight.changed')
     def handle_spotlight_click(self):
         self.canvas.cancel_page_pen_return()
         """演示聚光灯：暗化全屏，只留跟随鼠标的圆形亮区。再次点击即退出。
@@ -12365,6 +12626,9 @@ class ControlPanel(QWidget):
             if hasattr(self, "select_panel"):
                 self.select_panel.hide()
             return
+        if self.canvas.board_view_active:
+            rect = self.canvas.board_view.transform().mapRect(QRectF(rect))
+        rect = rect.translated(QPointF(self.canvas.mapToGlobal(QPoint(0, 0))))
         was_visible = self.select_panel.isVisible()
         self.select_panel.adjustSize()
         screen = self.screen_geometry(self.canvas, self) or QApplication.primaryScreen().availableGeometry()
@@ -12417,9 +12681,10 @@ class ControlPanel(QWidget):
         cv = self.canvas
         if cv is None:
             return
-        passthrough = not cv.is_drawing_mode and not (cv.whiteboard_mode and cv._page_return_pending)
+        passthrough = not cv.is_drawing_mode and not cv.is_roaming and not (cv.whiteboard_mode and cv._page_return_pending)
         cv.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, passthrough)
         cv._mouse_passthrough = passthrough
+        cv.setCursor(Qt.CursorShape.OpenHandCursor if cv.is_roaming else Qt.CursorShape.ArrowCursor)
         set_canvas_passthrough(cv.winId(), passthrough)
 
     def set_drawing_mode(self, enabled):
@@ -12427,6 +12692,8 @@ class ControlPanel(QWidget):
         if not cv:
             return
         cv.cancel_page_pen_return()
+        cv._pan_point = None
+        cv._board_gesture.clear()
         if cv.is_drawing_mode == enabled:
             self.sync_canvas_input_mode()
             self.sync_icon_buttons()
@@ -12463,7 +12730,7 @@ class ControlPanel(QWidget):
         # 白板/批注切换不会触发 Windows 分层窗口重新合成。
         cv.show()
         self.sync_canvas_input_mode()
-        self.btn_mode.setText(tr("mouse"))
+        self.btn_mode.setText(tr("canvas_roam" if cv.board_view_active else "mouse"))
         self._apply_mode_button_theme()
         track_event("mode_changed", drawing_mode=enabled)
         self.bind_topmost_stack()
@@ -13013,6 +13280,7 @@ class ControlPanel(QWidget):
         # ---------- 外观 ----------
         section("settings_appearance")
         form.addWidget(self.btn_theme)          # 主题按钮从主栏搬到这里
+        self.btn_theme.show()
         self.color_scheme_label = QLabel(tr("color_scheme"))
         form.addWidget(self.color_scheme_label)
         self.color_scheme_combo = QComboBox()
@@ -13024,6 +13292,17 @@ class ControlPanel(QWidget):
         self.color_scheme_combo.currentIndexChanged.connect(
             lambda _index: self.set_color_scheme(self.color_scheme_combo.currentData()))
         form.addWidget(self.color_scheme_combo)
+        self.btn_color_new = QPushButton(tr("custom_scheme_new"))
+        self.btn_color_new.clicked.connect(lambda: self.edit_custom_color_scheme(new=True))
+        form.addWidget(self.btn_color_new)
+        color_row = QHBoxLayout()
+        self.btn_color_edit = QPushButton(tr("custom_scheme_edit"))
+        self.btn_color_edit.clicked.connect(lambda: self.edit_custom_color_scheme())
+        self.btn_color_delete = QPushButton(tr("custom_scheme_delete"))
+        self.btn_color_delete.clicked.connect(lambda: self.delete_custom_color_scheme(self.color_scheme))
+        color_row.addWidget(self.btn_color_edit)
+        color_row.addWidget(self.btn_color_delete)
+        form.addLayout(color_row)
 
         # UI模式统一为图标式，不再提供切换选项
 
@@ -13054,6 +13333,19 @@ class ControlPanel(QWidget):
         orient_row.addWidget(self.btn_orient_portrait)
         orient_row.addWidget(self.btn_orient_landscape)
         form.addLayout(orient_row)
+
+        section("canvas_navigation")
+        self.infinite_checkbox = QCheckBox(tr("canvas_infinite"))
+        self.infinite_checkbox.setChecked(self.infinite_whiteboard)
+        self.infinite_checkbox.toggled.connect(self.set_infinite_whiteboard)
+        form.addWidget(self.infinite_checkbox)
+        hint(tr("canvas_infinite_hint"))
+        self.btn_view_home = QPushButton(tr("canvas_home"))
+        self.btn_view_home.clicked.connect(lambda: self.canvas.reset_board_view())
+        form.addWidget(self.btn_view_home)
+        self.btn_view_fit = QPushButton(tr("canvas_fit_all"))
+        self.btn_view_fit.clicked.connect(lambda: self.canvas.fit_board_view())
+        form.addWidget(self.btn_view_fit)
 
         # ---------- 绘制 ----------
         section("settings_drawing")
@@ -13145,6 +13437,7 @@ class ControlPanel(QWidget):
         self.settings_panel.setStyleSheet(self.styleSheet())
         self._apply_color_scheme_controls()
 
+    @interface_action('settings.orientation_changed')
     def _set_orientation_from_settings(self, orientation):
         self.set_orientation(orientation)
         self.sync_settings_panel()
@@ -13169,8 +13462,21 @@ class ControlPanel(QWidget):
         self.release_notice.set_theme(self.theme_name)
         self.release_notice.setVisible(self._notice_visible)
         blocked = self.color_scheme_combo.blockSignals(True)
+        self.color_scheme_combo.clear()
+        for scheme, key in self.COLOR_SCHEMES.items():
+            self.color_scheme_combo.addItem(tr(key), scheme)
+        for scheme, preset in self.custom_color_schemes.items():
+            self.color_scheme_combo.addItem(preset["name"], scheme)
+        is_custom = self.color_scheme in self.custom_color_schemes
+        self.btn_color_edit.setEnabled(is_custom)
+        self.btn_color_delete.setEnabled(is_custom)
         self.color_scheme_combo.setCurrentIndex(self.color_scheme_combo.findData(self.color_scheme))
         self.color_scheme_combo.blockSignals(blocked)
+        self.infinite_checkbox.blockSignals(True)
+        self.infinite_checkbox.setChecked(self.infinite_whiteboard)
+        self.infinite_checkbox.blockSignals(False)
+        self.btn_view_home.setEnabled(bool(self.canvas and self.canvas.board_view_active))
+        self.btn_view_fit.setEnabled(bool(self.canvas and self.canvas.board_view_active))
         self.auto_pen_checkbox.blockSignals(True)
         self.auto_pen_checkbox.setChecked(self.whiteboard_auto_pen)
         self.auto_pen_checkbox.blockSignals(False)
@@ -13602,6 +13908,7 @@ class ControlPanel(QWidget):
             except RuntimeError:
                 continue      # 窗口已被回收（懒建面板可能已经析构）
 
+    @interface_action('settings.opacity_changed')
     def set_ui_opacity(self, value, persist=True):
         self.ui_opacity = max(self.OPACITY_MIN, min(self.OPACITY_MAX, int(value)))
         self.apply_window_opacity()
@@ -13896,6 +14203,7 @@ class ControlPanel(QWidget):
         return {
             "notice_state": normalize_notice_state(self.notice_state),
             "whiteboard_auto_pen": bool(self.whiteboard_auto_pen),
+            "infinite_whiteboard": self.infinite_whiteboard,
             "autosave_interval_seconds": self.autosave_interval_seconds,
             "page_copy_placement": self.page_copy_placement,
             "timer_alarm_volume": self.timer_alarm_volume,
@@ -13905,6 +14213,7 @@ class ControlPanel(QWidget):
             "last_annotate_tool": self.last_annotate_tool,
             "theme": self.theme_name,
             "color_scheme": self.color_scheme,
+            "custom_color_schemes": copy.deepcopy(self.custom_color_schemes),
             "pen_color": cv.pen_color.name(),
             "pen_width": int(cv.pen_width),
             "pen_profiles": {style: dict(cv.pen_profile(style)) for style in PEN_STYLES},
@@ -14114,6 +14423,7 @@ class ControlPanel(QWidget):
         self.set_annotation_screen(settings.get("annotation_screen", ""), persist=False, apply=False)
         self.notice_state = normalize_notice_state(settings.get("notice_state"))
         self.whiteboard_auto_pen = settings.get("whiteboard_auto_pen") if isinstance(settings.get("whiteboard_auto_pen"), bool) else True
+        self.infinite_whiteboard = settings.get("infinite_whiteboard", True) is not False
         self.pen_defaults_enabled = settings.get("pen_defaults_enabled") if isinstance(settings.get("pen_defaults_enabled"), bool) else False
         self.pen_defaults = normalize_presets(settings.get("pen_defaults"), PEN_STYLES, PEN_STYLE_OPTIONS)
         remembered = settings.get("last_annotate_tool")
@@ -14122,12 +14432,14 @@ class ControlPanel(QWidget):
             mode = settings.get("theme")
             if not isinstance(mode, str) or mode not in self.THEMES:
                 mode = self.theme_name
+            self.custom_color_schemes = normalize_custom_schemes(settings.get("custom_color_schemes"))
             scheme = settings.get("color_scheme")
-            if not isinstance(scheme, str) or scheme not in self.COLOR_SCHEMES:
+            if (not isinstance(scheme, str) or
+                    scheme not in self.COLOR_SCHEMES and scheme not in self.custom_color_schemes):
                 scheme = "classic"
             if (mode, scheme) != (self.theme_name, self.color_scheme):
                 self.theme_name, self.color_scheme = mode, scheme
-                self.theme = self.theme_for(mode, scheme)
+                self.theme = self.theme_for(mode, scheme, self.custom_color_schemes)
                 self.apply_theme()
 
             # 旧配置的共享值迁移为独立副本，新配置逐笔验证，损坏的一项不影响其他笔。
@@ -15111,6 +15423,7 @@ class ControlPanel(QWidget):
             if self.canvas is not None:
                 self.canvas._discard_teaching_operation(operation)
 
+    @interface_action('settings.timer_volume_changed')
     def set_timer_alarm_volume(self, value, persist=True):
         self.timer_alarm_volume = bounded_int(value, 100, 0, 100)
         self._sync_document_preferences()
@@ -15118,6 +15431,7 @@ class ControlPanel(QWidget):
             self.save_settings()
         return self.timer_alarm_volume
 
+    @interface_action('settings.monitor_changed')
     def set_annotation_screen(self, preference, persist=True, apply=True):
         self.annotation_screen = preference if isinstance(preference, str) and len(preference) <= 512 else ""
         if apply and self.canvas:
@@ -15341,7 +15655,8 @@ class ControlPanel(QWidget):
                             raise ValueError("EPS image decode failed")
                         decoded[image.get("id")] = pixels
                     eps_export.write_eps(runtime_file_path(temporary, write=True), data, size.width(), size.height(),
-                                         board_style=self.canvas.board_style, decoded_images=decoded)
+                                         board_style=self.canvas.board_style, decoded_images=decoded,
+                                         content_transform=self.canvas.page_export_transform(page, size.width(), size.height()))
                     with open(runtime_file_path(temporary), "rb") as handle:
                         if not handle.read(16).startswith(b"%!PS-Adobe"):
                             raise OSError("EPS read-back validation failed")
@@ -15799,6 +16114,7 @@ class ControlPanel(QWidget):
         if self.canvas:
             self.canvas.end_text_edit()
 
+    @toolbox_action('calculator.opened')
     def open_calculator(self):
         self.show_only_sub(None)
         if self.calc_panel is None:
@@ -15818,8 +16134,10 @@ class ControlPanel(QWidget):
                 ("±", "N"), ("0", "0"), (".", "."), ("=", "="),
             ]
             grid = QGridLayout(); grid.setSpacing(3)
+            self.calc_buttons = {}
             for i, (label, code) in enumerate(keys):
                 btn = QPushButton(label)
+                self.calc_buttons[code] = btn
                 btn.setFixedSize(52, TOUCH_MIN_BUTTON)
                 btn.clicked.connect(lambda _=False, c=code: self._calc_input(c))
                 grid.addWidget(btn, i // 4, i % 4)
@@ -15836,6 +16154,7 @@ class ControlPanel(QWidget):
         self.heartbeat_refresh()
         track_event("calculator_opened")
 
+    @toolbox_action('calculator.input')
     def _calc_input(self, code):
         exp = self._calc_expr
         if code == "C":
@@ -15938,6 +16257,7 @@ class ControlPanel(QWidget):
         except Exception as e:
             track_event("roster_save_failed", error=str(e))
 
+    @toolbox_action('roster.opened')
     def open_roster_panel(self):
         self.show_only_sub(None)
         if self.roster_panel is None:
@@ -15954,10 +16274,10 @@ class ControlPanel(QWidget):
             self.roster_list.setMinimumHeight(140)
             layout.addWidget(self.roster_list)
             row1 = QHBoxLayout()
-            btn_draw = QPushButton(tr("roster_draw"))
+            btn_draw = self.btn_roster_draw = QPushButton(tr("roster_draw"))
             btn_draw.clicked.connect(self.draw_random_name)
             row1.addWidget(btn_draw)
-            btn_reset = QPushButton(tr("roster_reset"))
+            btn_reset = self.btn_roster_reset = QPushButton(tr("roster_reset"))
             btn_reset.clicked.connect(self.reset_drawn_names)
             row1.addWidget(btn_reset)
             layout.addLayout(row1)
@@ -15992,6 +16312,7 @@ class ControlPanel(QWidget):
             self.roster_list.addItem(f"{mark}{name}")
         self.roster_stats.setText(trf("roster_stats", total=len(self.roster), drawn=len(self.roster_drawn)))
 
+    @toolbox_action('roster.drawn')
     def draw_random_name(self):
         pool = [n for n in self.roster if n not in self.roster_drawn]
         if not pool:
@@ -16007,7 +16328,7 @@ class ControlPanel(QWidget):
         self.save_roster()
         self.refresh_roster_ui()
         self._show_name_projection(name)
-        track_event("roster_draw", name=name, left=len(self.roster) - len(self.roster_drawn))
+        track_event("roster_draw", selected_name=name, left=len(self.roster) - len(self.roster_drawn))
 
     # --- 抽中结果大字投影 / 临时全屏展示 ---
     NAME_PROJECTION_MS = 3000      # 投影自动消失时间
@@ -16055,7 +16376,7 @@ class ControlPanel(QWidget):
         force_topmost(self._name_projection.winId())
         self._name_projection.activateWindow()
         self._name_projection_timer.start(self.NAME_PROJECTION_MS)
-        track_event("name_projection_shown", name=name)
+        track_event("name_projection_shown", selected_name=name)
 
     def _close_name_projection(self):
         if self._name_projection_timer is not None:
@@ -16064,6 +16385,7 @@ class ControlPanel(QWidget):
             self._name_projection.hide()
         track_event("name_projection_closed")
 
+    @toolbox_action('roster.reset')
     def reset_drawn_names(self):
         self.roster_drawn.clear()
         self.save_roster()
@@ -16294,7 +16616,7 @@ class ControlPanel(QWidget):
         if incoming_pixels <= 0 or resident_pixels + incoming_pixels > self.MAX_PDF_TOTAL_PIXELS:
             raise ValueError(tr("import_failed"))
         if pos is None:
-            pos = QPointF(cv.width() / 2.0, cv.height() / 2.0)
+            pos = cv.to_document(QPointF(cv.width() / 2.0, cv.height() / 2.0))
         item = {
             "id": uuid.uuid4(),
             "pos": QPointF(pos),

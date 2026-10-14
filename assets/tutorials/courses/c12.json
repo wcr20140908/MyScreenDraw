@@ -1,0 +1,500 @@
+{
+  "schema_version": 1,
+  "id": "c12",
+  "revision": 1,
+  "compat_revision": 1,
+  "title_key": "teaching_toolbox_title",
+  "chapters": [
+    {
+      "id": "c12.calculator",
+      "title_key": "calculator",
+      "fixture": "toolbox.c12.calculator",
+      "steps": [
+        {
+          "id": "intro",
+          "kind": "information",
+          "title_key": "calculator",
+          "body_key": "teaching_calc_intro",
+          "next": "open"
+        },
+        {
+          "id": "open",
+          "title_key": "calculator",
+          "body_key": "teaching_calc_open",
+          "target": "tools.calculator",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "calculator.opened",
+            "outcome": "success",
+            "equals": {
+              "visible": true
+            }
+          },
+          "next": "two"
+        },
+        {
+          "id": "two",
+          "title_key": "calculator",
+          "body_key": "teaching_calc_two",
+          "target": "calculator.two",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "calculator.input",
+            "outcome": "success",
+            "equals": {
+              "key": "2",
+              "expression": "2",
+              "display": "2"
+            }
+          },
+          "next": "plus"
+        },
+        {
+          "id": "plus",
+          "title_key": "calculator",
+          "body_key": "teaching_calc_plus",
+          "target": "calculator.plus",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "calculator.input",
+            "outcome": "success",
+            "equals": {
+              "key": "+",
+              "expression": "2+",
+              "display": "2+"
+            }
+          },
+          "next": "three"
+        },
+        {
+          "id": "three",
+          "title_key": "calculator",
+          "body_key": "teaching_calc_three",
+          "target": "calculator.three",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "calculator.input",
+            "outcome": "success",
+            "equals": {
+              "key": "3",
+              "expression": "2+3",
+              "display": "2+3"
+            }
+          },
+          "next": "equals"
+        },
+        {
+          "id": "equals",
+          "title_key": "calculator",
+          "body_key": "teaching_calc_equals",
+          "target": "calculator.equals",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "calculator.calculated",
+            "outcome": "success",
+            "equals": {
+              "expression": "2+3",
+              "result": "5",
+              "display": "5"
+            }
+          },
+          "next": "done"
+        },
+        {
+          "id": "done",
+          "kind": "information",
+          "title_key": "calculator",
+          "body_key": "teaching_toolbox_done",
+          "next": "end_chapter"
+        }
+      ]
+    },
+    {
+      "id": "c12.roster",
+      "title_key": "roster",
+      "fixture": "toolbox.c12.roster",
+      "steps": [
+        {
+          "id": "intro",
+          "kind": "information",
+          "title_key": "roster",
+          "body_key": "teaching_roster_intro",
+          "next": "open"
+        },
+        {
+          "id": "open",
+          "title_key": "roster",
+          "body_key": "teaching_roster_open",
+          "target": "tools.roster",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "roster.opened",
+            "outcome": "success",
+            "equals": {
+              "visible": true
+            }
+          },
+          "next": "draw"
+        },
+        {
+          "id": "draw",
+          "title_key": "roster",
+          "body_key": "teaching_roster_draw",
+          "target": "roster.draw",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "roster.drawn",
+            "outcome": "success",
+            "equals": {
+              "drawn": 1,
+              "total": 6,
+              "unique": true,
+              "fictional": true,
+              "saved": true,
+              "displayed": true
+            }
+          },
+          "next": "draw_again"
+        },
+        {
+          "id": "draw_again",
+          "title_key": "roster",
+          "body_key": "teaching_roster_second",
+          "target": "roster.draw",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "roster.drawn",
+            "outcome": "success",
+            "equals": {
+              "drawn": 2,
+              "total": 6,
+              "unique": true,
+              "fictional": true,
+              "saved": true,
+              "displayed": true
+            }
+          },
+          "next": "reset"
+        },
+        {
+          "id": "reset",
+          "title_key": "roster_reset",
+          "body_key": "teaching_roster_reset",
+          "target": "roster.reset",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "roster.reset",
+            "outcome": "success",
+            "equals": {
+              "drawn": 0,
+              "total": 6,
+              "saved": true
+            }
+          },
+          "next": "done"
+        },
+        {
+          "id": "done",
+          "kind": "information",
+          "title_key": "roster",
+          "body_key": "teaching_toolbox_done",
+          "next": "end_chapter"
+        }
+      ]
+    },
+    {
+      "id": "c12.timer",
+      "title_key": "timer",
+      "fixture": "toolbox.c12.timer",
+      "steps": [
+        {
+          "id": "intro",
+          "kind": "information",
+          "title_key": "timer",
+          "body_key": "teaching_timer_intro",
+          "next": "open"
+        },
+        {
+          "id": "open",
+          "title_key": "timer",
+          "body_key": "teaching_timer_open",
+          "target": "tools.timer",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "timer.panel_opened",
+            "outcome": "success",
+            "equals": {
+              "visible": true
+            }
+          },
+          "next": "up"
+        },
+        {
+          "id": "up",
+          "title_key": "timer_up",
+          "body_key": "teaching_timer_up",
+          "target": "timer.up",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "timer.mode_changed",
+            "outcome": "success",
+            "equals": {
+              "mode": "UP"
+            }
+          },
+          "next": "start_up"
+        },
+        {
+          "id": "start_up",
+          "title_key": "timer_start",
+          "body_key": "teaching_timer_start",
+          "target": "timer.start_pause",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "timer.running_changed",
+            "outcome": "success",
+            "equals": {
+              "mode": "UP",
+              "running": true,
+              "clock_active": true
+            }
+          },
+          "next": "pause_up"
+        },
+        {
+          "id": "pause_up",
+          "title_key": "timer_pause",
+          "body_key": "teaching_timer_pause",
+          "target": "timer.start_pause",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "timer.running_changed",
+            "outcome": "success",
+            "equals": {
+              "mode": "UP",
+              "running": false,
+              "clock_active": false
+            },
+            "min_count": {
+              "seconds": 0.01
+            }
+          },
+          "next": "reset_up"
+        },
+        {
+          "id": "reset_up",
+          "title_key": "timer_reset",
+          "body_key": "teaching_timer_reset",
+          "target": "timer.reset",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "timer.reset",
+            "outcome": "success",
+            "equals": {
+              "mode": "UP",
+              "seconds": 0,
+              "running": false,
+              "clock_stopped": true
+            }
+          },
+          "next": "down"
+        },
+        {
+          "id": "down",
+          "title_key": "timer_down",
+          "body_key": "teaching_timer_down",
+          "target": "timer.down",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "timer.mode_changed",
+            "outcome": "success",
+            "equals": {
+              "mode": "DOWN",
+              "target": 2,
+              "seconds": 2
+            }
+          },
+          "next": "finish_down"
+        },
+        {
+          "id": "finish_down",
+          "title_key": "timer_start",
+          "body_key": "teaching_timer_finish",
+          "target": "timer.start_pause",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "timer.finished",
+            "outcome": "success",
+            "equals": {
+              "mode": "DOWN",
+              "target": 2,
+              "seconds": 0,
+              "running": false,
+              "alerting": true
+            }
+          },
+          "next": "done"
+        },
+        {
+          "id": "done",
+          "kind": "information",
+          "title_key": "timer",
+          "body_key": "teaching_toolbox_done",
+          "next": "end_chapter"
+        }
+      ]
+    },
+    {
+      "id": "c12.magnifier",
+      "title_key": "magnifier",
+      "fixture": "toolbox.c12.magnifier",
+      "steps": [
+        {
+          "id": "intro",
+          "kind": "information",
+          "title_key": "magnifier",
+          "body_key": "teaching_magnifier_intro",
+          "next": "open"
+        },
+        {
+          "id": "open",
+          "title_key": "magnifier",
+          "body_key": "teaching_magnifier_open",
+          "target": "tools.magnifier",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "magnifier.opened",
+            "outcome": "success",
+            "equals": {
+              "active": true,
+              "source": "private_canvas",
+              "frame": true
+            }
+          },
+          "next": "zoom"
+        },
+        {
+          "id": "zoom",
+          "title_key": "magnifier",
+          "body_key": "teaching_magnifier_zoom",
+          "target": "magnifier.zoom_in",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "magnifier.zoom_changed",
+            "outcome": "success",
+            "equals": {
+              "increased": true
+            }
+          },
+          "next": "size"
+        },
+        {
+          "id": "size",
+          "title_key": "magnifier",
+          "body_key": "teaching_magnifier_size",
+          "target": "magnifier.size",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "magnifier.size_changed",
+            "outcome": "success",
+            "equals": {
+              "changed": true
+            }
+          },
+          "next": "refresh"
+        },
+        {
+          "id": "refresh",
+          "title_key": "refresh_frame",
+          "body_key": "teaching_magnifier_refresh",
+          "target": "magnifier.refresh",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "magnifier.refreshed",
+            "outcome": "success",
+            "equals": {
+              "source": "private_canvas",
+              "frame": true
+            }
+          },
+          "next": "done"
+        },
+        {
+          "id": "done",
+          "kind": "information",
+          "title_key": "magnifier",
+          "body_key": "teaching_toolbox_done",
+          "next": "end_chapter"
+        }
+      ]
+    },
+    {
+      "id": "c12.spotlight",
+      "title_key": "spotlight",
+      "fixture": "toolbox.c12.spotlight",
+      "steps": [
+        {
+          "id": "intro",
+          "kind": "information",
+          "title_key": "spotlight",
+          "body_key": "teaching_spotlight_intro",
+          "next": "open"
+        },
+        {
+          "id": "open",
+          "title_key": "spotlight",
+          "body_key": "teaching_spotlight_on",
+          "target": "tools.spotlight",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "spotlight.changed",
+            "outcome": "success",
+            "equals": {
+              "active": true,
+              "tool": "SPOTLIGHT"
+            }
+          },
+          "next": "move"
+        },
+        {
+          "id": "move",
+          "title_key": "spotlight",
+          "body_key": "teaching_spotlight_move",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "spotlight.moved",
+            "outcome": "success",
+            "equals": {
+              "moved": true
+            }
+          },
+          "next": "exit"
+        },
+        {
+          "id": "exit",
+          "title_key": "spotlight",
+          "body_key": "teaching_spotlight_off",
+          "target": "tools.spotlight",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "spotlight.changed",
+            "outcome": "success",
+            "equals": {
+              "active": false,
+              "tool": "PEN"
+            }
+          },
+          "next": "done"
+        },
+        {
+          "id": "done",
+          "kind": "information",
+          "title_key": "spotlight",
+          "body_key": "teaching_toolbox_done",
+          "next": "end_chapter"
+        }
+      ]
+    }
+  ]
+}

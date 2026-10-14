@@ -46,10 +46,12 @@ class _HintLabel(QLabel):
         )
 
     def heightForWidth(self, width: int) -> int:
+        margins = self.contentsMargins()
+        text_width = max(1, width - margins.left() - margins.right())
         text_rect = self.fontMetrics().boundingRect(
-            QRect(0, 0, max(1, width), 16777215), self._text_flags(), self.text()
+            QRect(0, 0, text_width, 16777215), self._text_flags(), self.text()
         )
-        return text_rect.height()
+        return text_rect.height() + margins.top() + margins.bottom()
 
     def sizeHint(self) -> QSize:
         return QSize(360, self.heightForWidth(360))
@@ -59,6 +61,7 @@ class _HintLabel(QLabel):
 
     def paintEvent(self, event: QPaintEvent) -> None:
         painter = QStylePainter(self)
+        painter.setFont(self.font())
         painter.drawItemText(
             self.contentsRect(), self._text_flags(), self.palette(),
             self.isEnabled(), self.text(), self.foregroundRole(),
@@ -112,6 +115,7 @@ class _HintButton(QPushButton):
         text = option.text
         option.text = ""
         painter = QStylePainter(self)
+        painter.setFont(self.font())
         painter.drawControl(QStyle.ControlElement.CE_PushButton, option)
         contents = self.style().subElementRect(
             QStyle.SubElement.SE_PushButtonContents, option, self
@@ -146,6 +150,8 @@ class ContextTeachingHint(QFrame):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent, Qt.WindowType.Tool)
+        self.setObjectName('TeachingSurface')
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setWindowModality(Qt.WindowModality.NonModal)
@@ -154,9 +160,11 @@ class ContextTeachingHint(QFrame):
         self._decision: Decision | None = None
 
         self.title_label = _HintLabel(title)
+        self.title_label.setObjectName('TeachingTitle')
         self.body_label = _HintLabel(body)
 
         content = QWidget(self)
+        content.setObjectName('TeachingContent')
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSizeConstraint(QLayout.SizeConstraint.SetMinAndMaxSize)
@@ -171,6 +179,7 @@ class ContextTeachingHint(QFrame):
         self.body_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.body_scroll.setMinimumSize(0, 0)
         self.body_scroll.setWidget(content)
+        self.body_scroll.viewport().setObjectName('TeachingContent')
 
         self.start_button = _HintButton(start_label, self)
         self.close_button = _HintButton(close_label, self)

@@ -494,3 +494,17 @@ for name in ("main", "i18n", "teaching.application", "teaching.widgets",
         env=os.environ.copy(), capture_output=True, text=True, timeout=15,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_wrapped_text_height_includes_inherited_stylesheet_padding(qt_app):
+    parent = QWidget()
+    parent.setStyleSheet('QLabel { font-size: 18px; padding: 6px; }')
+    hint = make_hint(parent=parent, body='可以通过这个章节练习功能，结束后回到当前工作。' * 4)
+    hint.show()
+    qt_app.processEvents()
+    label = hint.body_label
+    margins = label.contentsMargins()
+    text_rect = label.fontMetrics().boundingRect(
+        QRect(0, 0, label.contentsRect().width(), 16777215), label._text_flags(), label.text())
+    assert label.height() >= text_rect.height() + margins.top() + margins.bottom()
+    assert hint.body_scroll.horizontalScrollBar().maximum() == 0

@@ -45,6 +45,8 @@ class TeachingCenter(QDialog):
         from PyQt6.QtWidgets import QLineEdit
 
         super().__init__(parent)
+        self.setObjectName('TeachingSurface')
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.setWindowTitle(translate('teaching_center_title'))
         self._catalog = catalog
@@ -420,6 +422,8 @@ class TutorialController(QWidget):
     def __init__(self, translate: Translate, parent: QWidget | None = None) -> None:
         super().__init__(parent, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint
                          | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.WindowDoesNotAcceptFocus)
+        self.setObjectName('TeachingSurface')
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setWindowTitle(translate('teaching_controller_title'))
@@ -434,6 +438,7 @@ class TutorialController(QWidget):
         self.practice_label.setToolTip(translate('teaching_practice_notice'))
         self.practice_label.hide()
         self.title_label = QLabel(self)
+        self.title_label.setObjectName('TeachingTitle')
         self.body_label = QLabel(self)
         self.progress_label = QLabel(self)
         self.status_label = QLabel(self)
@@ -447,6 +452,8 @@ class TutorialController(QWidget):
         body_scroll.setWidgetResizable(True)
         body_scroll.setFrameShape(QFrame.Shape.NoFrame)
         body_scroll.setWidget(self.body_label)
+        self.body_label.setObjectName('TeachingContent')
+        body_scroll.viewport().setObjectName('TeachingContent')
         body_scroll.setMinimumSize(0, 60)
         actions = QGridLayout()
         for index, name in enumerate(('previous', 'next', 'pause', 'skip', 'retry', 'exit')):

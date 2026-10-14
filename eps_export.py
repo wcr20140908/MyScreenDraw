@@ -234,7 +234,6 @@ def _emit_shape(L, item, height: int, board_style: str):
         top = _sample_ellipse((x + w / 2.0, y + hh / 2.0), w / 2.0, hh / 2.0)
         bottom = _sample_ellipse((x + w / 2.0, y + h - hh / 2.0), w / 2.0, hh / 2.0)
         _emit_path(L, [_rotate(p, cx, cy, rot) for p in top], height, closed=True, color=color, width=width)
-        _emit_path(L, [_rotate(p, cx, cy, rot) for p in bottom], height, closed=True, color=color, width=width)
         for sx in (x, x + w):
             a = (sx, y + hh / 2.0)
             b = (sx, y + h - hh / 2.0)
@@ -250,7 +249,12 @@ def _emit_shape(L, item, height: int, board_style: str):
                    closed=False, color=color, width=width)
         _emit_path(L, [_rotate(apex, cx, cy, rot), _rotate(right, cx, cy, rot)], height,
                    closed=False, color=color, width=width)
-        _emit_path(L, [_rotate(p, cx, cy, rot) for p in bottom], height, closed=True, color=color, width=width)
+
+    if shape_type in ("CYLINDER", "CONE"):
+        middle = len(bottom) // 2
+        for arc, hidden in ((bottom[middle:], True), (bottom[:middle + 1], False)):
+            _emit_path(L, [_rotate(p, cx, cy, rot) for p in arc], height,
+                       closed=False, color=color, width=width, dashed=hidden)
 
 
 def _emit_text_at(L, x, y, text, size, color, height: int):
@@ -311,7 +315,7 @@ def _emit_image(L, img, height: int, decoded_images: dict):
     L.append("grestore")
 
 
-def _eps_lines(page, width: int, height: int, board_style: str, decoded_images: dict):
+def _eps_lines(page, width: int, height: int, board_style: str, decoded_images: dict, content_transform=None):
     L = []
     bg = _background(board_style)
     L.append("%!PS-Adobe-3.0 EPSF-3.0")
@@ -325,6 +329,11 @@ def _eps_lines(page, width: int, height: int, board_style: str, decoded_images: 
     L.append(f"{width} {height} lineto")
     L.append(f"0 {height} lineto")
     L.append("closepath fill")
+    L.append("gsave")
+    if content_transform is not None:
+        scale, x, y = content_transform
+        L.append(f"{_fmt(x)} {_fmt(height * (1 - scale) - y)} translate")
+        L.append(f"{_fmt(scale)} {_fmt(scale)} scale")
     dash_positions = {}
     for seg in page.get("segments", []):
         key = seg.get("id")
@@ -341,16 +350,17 @@ def _eps_lines(page, width: int, height: int, board_style: str, decoded_images: 
         _emit_image(L, img, height, decoded_images)
     for item in page.get("texts", []):
         _emit_text(L, item, height, board_style)
+    L.append("grestore")
     L.append("%%EOF")
     return L
 
 
 def write_eps(path, page, width: int, height: int, board_style: str = "WHITE",
-              decoded_images: dict | None = None) -> None:
+              decoded_images: dict | None = None, content_transform=None) -> None:
     """把一页序列化页面写成矢量 EPS 文件（latin-1 编码，含 BoundingBox）。"""
     width = max(1, int(width))
     height = max(1, int(height))
-    lines = _eps_lines(page, width, height, board_style, decoded_images or {})
+    lines = _eps_lines(page, width, height, board_style, decoded_images or {}, content_transform)
     with open(path, "w", encoding="latin-1", newline="\n") as handle:
         handle.write("\n".join(lines))
         handle.write("\n")

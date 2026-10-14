@@ -10,7 +10,10 @@
     "courses/c07.json",
     "courses/c08.json",
     "courses/c09.json",
-    "courses/c10.json"
+    "courses/c10.json",
+    "courses/c11.json",
+    "courses/c12.json",
+    "courses/c13.json"
   ],
   "fixtures": {
     "core.interface": "fixtures/core.interface.msd",
@@ -47,7 +50,18 @@
     "media.c09.pdf_pages": "fixtures/media.c09.pdf_pages.msd",
     "export.c10.formats": "fixtures/export.c10.formats.msd",
     "export.c10.progress_cancel": "fixtures/export.c10.progress_cancel.msd",
-    "export.c10.result": "fixtures/export.c10.result.msd"
+    "export.c10.result": "fixtures/export.c10.result.msd",
+    "measurement.c11.instruments": "fixtures/measurement.c11.instruments.msd",
+    "measurement.c11.calibration": "fixtures/measurement.c11.calibration.msd",
+    "toolbox.c12.calculator": "fixtures/toolbox.c12.calculator.msd",
+    "toolbox.c12.roster": "fixtures/toolbox.c12.roster.msd",
+    "toolbox.c12.timer": "fixtures/toolbox.c12.timer.msd",
+    "toolbox.c12.magnifier": "fixtures/toolbox.c12.magnifier.msd",
+    "toolbox.c12.spotlight": "fixtures/toolbox.c12.spotlight.msd",
+    "interface.c13.layout_theme": "fixtures/interface.c13.layout_theme.msd",
+    "interface.c13.monitor_audio": "fixtures/interface.c13.monitor_audio.msd",
+    "interface.c13.lifecycle": "fixtures/interface.c13.lifecycle.msd",
+    "interface.c13.system": "fixtures/interface.c13.system.msd"
   },
   "groups": [
     {
@@ -82,6 +96,15 @@
         "c08",
         "c09",
         "c10"
+      ]
+    },
+    {
+      "id": "tools",
+      "title_key": "tools",
+      "courses": [
+        "c11",
+        "c12",
+        "c13"
       ]
     }
   ]

@@ -85,7 +85,7 @@ BRIDGE = BRIDGE.replace(anchor, r'''        elif chapter.startswith('c10.'):
         elif chapter.startswith('c09.'):''')
 
 
-def test_ten_courses_314_steps_one_process_preserves_parent_files_and_cleans_up(parent_coordinator, tmp_path, monkeypatch):
+def run_course_process(parent_coordinator, tmp_path, monkeypatch, *, chapters, bridge_source, expected_steps):
     import main
     panel, coordinator = parent_coordinator
     def forbidden(*args, **kwargs):
@@ -98,7 +98,7 @@ def test_ten_courses_314_steps_one_process_preserves_parent_files_and_cleans_up(
     monkeypatch.setattr(QProcess, 'setStandardErrorFile', lambda process, _: original_stderr(process, str(stderr)))
     # A file avoids Windows' command-line limit for the existing nine-course bridge.
     bridge = tmp_path/'export-child.py'
-    bridge.write_text(BRIDGE, encoding='utf-8')
+    bridge.write_text(bridge_source, encoding='utf-8')
     coordinator.session.command_factory = lambda request: (sys.executable, ['-B', str(bridge), str(ROOT), str(ROOT),
         *practice_arguments(request.paths, request.channel, request.course_id, request.chapter_id)])
     coordinator.session.suspend = Mock(wraps=coordinator.session.suspend)
@@ -121,7 +121,7 @@ def test_ten_courses_314_steps_one_process_preserves_parent_files_and_cleans_up(
     history, redo = panel.canvas.undo_stack, panel.canvas.redo_stack
     before = (panel.project_path, panel.project_dirty, panel.canvas.draw_state, panel.canvas.current_page,
               set(panel.canvas.selected_ids), panel.lifecycle.state, len(history), len(redo))
-    assert coordinator.start('c01', 'c01.interface')
+    assert coordinator.start(chapters[0].split('.')[0], chapters[0])
     process = coordinator.session.process
     until(lambda: coordinator.session.phase == 'running')
     exits=[]
@@ -129,16 +129,17 @@ def test_ten_courses_314_steps_one_process_preserves_parent_files_and_cleans_up(
     token, root = coordinator.session._token, coordinator.session.paths.runtime_root
     def diagnostic():
         return (coordinator.session.phase, coordinator.session.last_error, exits,
-                {key: coordinator.state_store.chapter_status(key) for key in CHAPTERS},
+                {key: coordinator.state_store.chapter_status(key) for key in chapters},
                 stderr.read_text(encoding='utf-8', errors='replace')[-4000:] if stderr.exists() else '')
-    until(lambda: all(coordinator.state_store.chapter_status(key) == 'completed' for key in CHAPTERS)
+    until(lambda: all(coordinator.state_store.chapter_status(key) == 'completed' for key in chapters)
           or coordinator.session.phase == 'stopped',
           timeout=90000, diagnostic=diagnostic)
-    assert all(coordinator.state_store.chapter_status(key) == 'completed' for key in CHAPTERS), diagnostic()
+    assert all(coordinator.state_store.chapter_status(key) == 'completed' for key in chapters), diagnostic()
     proof = json.loads((coordinator.session.paths.data_dir/'formal-core-proof.json').read_text(encoding='utf-8'))
-    assert proof['completed'] == list(CHAPTERS) and proof['all_complete'] and len(proof['steps']) == 314
-    assert len(proof['c10_exports']) == 7 and proof['c10_progress_dialogs'] == 7
-    assert proof['c10_cancel_clicked']
+    assert proof['completed'] == list(chapters) and proof['all_complete'] and len(proof['steps']) == expected_steps
+    if 'c10.formats' in chapters:
+        assert len(proof['c10_exports']) == 7 and proof['c10_progress_dialogs'] == 7
+        assert proof['c10_cancel_clicked']
     assert len(set(proof['pids'])) == 1 and proof['pids'][0] == process.processId()
     assert coordinator.session.process is process and coordinator.session._token is token
     assert coordinator.session.suspend.call_count == 1 and coordinator.session.restore.call_count == 0
@@ -146,7 +147,7 @@ def test_ten_courses_314_steps_one_process_preserves_parent_files_and_cleans_up(
     assert hashes() == original_hashes
     proof['parent_original_hashes'] = original_hashes
     proof['private_root'] = str(root)
-    coordinator.session.request_stop('C10 accepted')
+    coordinator.session.request_stop('Tutorial chapters accepted')
     until(lambda: coordinator.session.phase == 'stopped', diagnostic=diagnostic)
     assert exits == [(0, str(QProcess.ExitStatus.NormalExit))] and coordinator.session.process is None
     assert coordinator.session.restore.call_count == 1 and not root.exists()
@@ -157,3 +158,9 @@ def test_ten_courses_314_steps_one_process_preserves_parent_files_and_cleans_up(
     assert hashes() == original_hashes and not panel._teaching_suspended and not coordinator.restore_errors
     proof.update(parent_restored=True, parent_hashes_unchanged=True, child_stopped=True, private_root_removed=True)
     (tmp_path/'c10-proof.json').write_text(json.dumps(proof, ensure_ascii=False, indent=2), encoding='utf-8')
+    return proof
+
+
+def test_ten_courses_314_steps_one_process_preserves_parent_files_and_cleans_up(parent_coordinator, tmp_path, monkeypatch):
+    run_course_process(parent_coordinator, tmp_path, monkeypatch,
+                       chapters=CHAPTERS, bridge_source=BRIDGE, expected_steps=314)
