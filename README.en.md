@@ -11,20 +11,23 @@ MyScreenDraw is a fullscreen annotation / whiteboard / math-teaching tool built 
 - **Random name picker, timer, presentation spotlight, calculator** — a whole lesson without switching apps
 - **No account; drawings, rosters and logs are not uploaded**. Automatic update checks are enabled by default and can be disabled in Settings. Downloads and installation each require separate confirmation; neither happens silently
 
-Current source version: **v6.2.0 — in development, awaiting user testing; not packaged or released**. The UI follows the system language in 8 languages: English, 中文, Français, Español, Deutsch, Русский, 한국어, 日本語.
+Current version **v6.2.0** — stable release. The UI follows the system language in 8 languages: English, 中文, Français, Español, Deutsch, Русский, 한국어, 日本語.
 
 > Product screenshots are not included in the public release yet; the current local captures contain development-environment details and must not be committed to GitHub.
 
-Stable 6.1.1 was published from a separate release tree. This 6.2.0 source tree has no release package. The 6.1.0 download links and validation records below are historical; they do not describe the current source version or validate 6.2.0.
+Stable 6.2.0 is published with a Windows x64 portable package. The download and checksum instructions below refer to the current release.
 
-## 6.2.0 development progress (awaiting user testing)
+## 6.2.0 features and fixes
 
-- Software tutorials now cover **C01–C13: 13 courses, 46 chapters and 390 defined steps**. The single-display route has **389 steps**; the complete route passed in one real QProcess, including original-work, undo/redo and configuration-hash restoration checks.
+- Software tutorials now cover **C01–C13: 13 courses, 47 chapters and 400 defined steps**. The single-display route has **399 steps**; the complete route passed in one real QProcess, including original-work, undo/redo and configuration-hash restoration checks. Windows native mouse/keyboard acceptance is tracked separately from offscreen tests.
+- A new **whiteboard navigation tutorial** covers entering Pan mode, panning, zooming in/out, fitting all content on the current page, resetting the view, and returning to ink. Progress follows actual view and document results.
+- **Full multi-column page thumbnails** adapt to 1–4 columns, with page labels, scrolling, reordering and a close button. Correct staged reorders now advance the lesson, while incorrect remaining page order is rejected.
+- Cubes and cuboids show three hidden edges as dashed lines consistently in the preview, canvas and all four export formats. Cube bounds include the projected rear face and stroke width to prevent clipping.
 - Fixed tutorial text clipping, contrast and several help-text wrapping issues. Rear base arcs of cylinders and cones are dashed, including in EPS output.
 - Custom UI palettes now support creation, editing, deletion, separate light/dark colours and persistence. All 96 supplemental palette, view and built-in theme checks passed.
 - **Infinite whiteboard is on by default**. In **Pan** mode, drag with one finger or the mouse; zoom with two fingers or the wheel. Settings offers **Reset view (100%)** and **Fit all content**.
 - Per-page views are saved with the document and restored on reopen, page switch and copy. Ink retains floating-point coordinates; PNG/PDF/SVG/EPS exports include all content, including negative coordinates and content outside the viewport.
-- Erasing now updates the spatial index locally. See the [6.2.0 development checkpoint](docs/6.2.0-development-checkpoint.md) for benchmark scope and targeted test results. Private Windows native touch-injection checks passed (not physical-touchscreen testing). Follow-up captures confirm readable, complete text after the palette-editor contrast fix; user testing is not complete.
+- Erasing now updates the spatial index locally. See the [6.2.0 development checkpoint](docs/6.2.0-development-checkpoint.md) for benchmark scope and targeted test results. Private Windows native touch-injection checks passed (not physical-touchscreen testing). Follow-up captures confirm readable, complete text after the palette-editor contrast fix.
 - Additional interactive 3D prisms/pyramids and in-app text feedback remain research only, **not implemented**. See the [feedback feasibility note](docs/feedback-feasibility-2026-10-14.md).
 
 ## 6.1.0: document safety, streaming exports and recovery previews (historical release)
@@ -72,13 +75,13 @@ These changes are included in the stable 6.0.0 portable release. The older beta.
 - Settings dropdowns follow the light/dark theme. Click a preset color swatch for an alpha-aware color picker; the color code is read-only/copyable, and Cancel leaves the draft unchanged. Chalk uses a longer-period deterministic grain texture; visual acceptance remains with the user.
 - Pre-release offscreen regression: 1296 passed, 7 skipped, and 1184 subtests passed; the actual configuration stayed byte-identical. The release owner reported their checks complete. Automated EXE smoke remains offscreen and the build is unsigned; see the [validation record](docs/release-validation-6.0.0.md) for coverage and limits.
 
-## Quick start (historical release package)
+## Quick start
 
-These retained links and checksum examples refer to the published and verified **historical 6.1.0 release**, not a 6.2.0 package.
+**[Download Windows x64 portable v6.2.0 (includes EXE, no installation)](https://github.com/wcr20140908/MyScreenDraw/releases/download/v6.2.0/MyScreenDraw-v6.2.0-windows-x64.zip)**
 
-**[Download historical Windows x64 portable v6.1.0 (includes EXE, no installation)](https://github.com/wcr20140908/MyScreenDraw/releases/download/v6.1.0/MyScreenDraw-v6.1.0-windows-x64.zip)**
+[Release page and notes](https://github.com/wcr20140908/MyScreenDraw/releases/tag/v6.2.0) · [SHA-256 checksum](https://github.com/wcr20140908/MyScreenDraw/releases/download/v6.2.0/MyScreenDraw-v6.2.0-windows-x64.zip.sha256)
 
-[Release page and notes](https://github.com/wcr20140908/MyScreenDraw/releases/tag/v6.1.0) · [SHA-256 checksum](https://github.com/wcr20140908/MyScreenDraw/releases/download/v6.1.0/MyScreenDraw-v6.1.0-windows-x64.zip.sha256). The public assets were downloaded again and hash-verified; the extracted EXE passed an offscreen startup check.
+The historical version sections below remain for migration and traceability.
 
 > Do not download GitHub's automatic **Source code (zip)** / **Source code (tar.gz)** assets or **Code → Download ZIP**. Those contain source code, not the runnable application.
 

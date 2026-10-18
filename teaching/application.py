@@ -11,7 +11,7 @@ import uuid
 from types import ModuleType
 
 from PyQt6 import sip
-from PyQt6.QtCore import QObject, QTimer, pyqtSignal
+from PyQt6.QtCore import QObject, QPoint, QRect, QRectF, QTimer, pyqtSignal
 from PyQt6.QtNetwork import QLocalSocket
 from PyQt6.QtWidgets import QApplication, QMessageBox
 from PyQt6.QtCore import Qt
@@ -52,6 +52,7 @@ APPLICATION_TARGETS = frozenset({
     'text.symbol.member', 'text.symbol.integral', 'text.structure.frac', 'text.structure.sup',
     'text.structure.sub', 'text.structure.sqrt', 'text.structure.sum', 'text.structure.int',
     'selection.width', 'selection.color', 'settings.autosave_preset', 'settings.autosave_custom',
+    'settings.view_fit', 'settings.view_home',
 }) | TOOLBOX_TARGETS | INTERFACE_TARGETS
 APPLICATION_EVENTS = frozenset({
     'ink.committed', 'ink.erased', 'project.saved', 'mode.changed', 'tool.changed',
@@ -61,7 +62,7 @@ APPLICATION_EVENTS = frozenset({
     'center.visited', 'practice.resumed', 'pen.style_changed', 'eraser.type_changed',
     'eraser.size_changed', 'history.cleared', 'laser.trace', 'pen.default_saved',
     'pen.defaults_changed', 'pen.default_applied', 'selection.duplicated', 'selection.deleted',
-    'board.style_changed', 'page.renamed', 'page.deleted', 'page.copied',
+    'board.style_changed', 'board.view_changed', 'page.renamed', 'page.deleted', 'page.copied',
     'page.copy_placement_changed', 'page.reordered', 'thumbnails.opened',
     'shape.type_changed', 'shape.committed', 'shape.point_added', 'shape.points_cancelled',
     'shape.recognized', 'shape.recognition_changed', 'shape.constructed',
@@ -87,6 +88,21 @@ APPLICATION_HINT_TOPICS = {
     'tools.timer': ('c12', 'c12.timer'),
     'interface.settings': ('c13', 'c13.layout_theme'),
 }
+
+
+def _canvas_region(canvas, bounds):
+    """Map bounded document content to the visible Qt logical/global workspace."""
+    viewport = QRectF(canvas.rect())
+    region = QRectF()
+    for rect in bounds:
+        if rect.isEmpty():
+            continue
+        view_rect = QRectF(canvas.to_view(rect.topLeft()), canvas.to_view(rect.bottomRight()))
+        # Logical-pixel clearance, independent of document zoom and OS DPR.
+        visible = view_rect.adjusted(-20, -20, 20, 20).intersected(viewport)
+        if not visible.isEmpty():
+            region = region.united(visible)
+    return region.toAlignedRect().translated(canvas.mapToGlobal(QPoint())) if not region.isEmpty() else QRect()
 
 
 def application_catalog(module: ModuleType, resource_dir: Path):
@@ -425,6 +441,9 @@ class ApplicationTeachingHost(QObject):
         if not self.context.paths.practice or self.context.ui_active or self.context.paths != request.paths:
             raise ValueError('application must be bound to the hidden private runtime')
         self._closed, self._hidden_token = False, None
+        self._example_ids = {}
+        self._example_snapshot, self._example_bounds = None, ()
+        self._obstacle_snapshot, self._obstacle_rects = None, ()
         self._on_progress, self._progress_warning_shown = on_progress, False
         self.center = None
         self._center_token = None
@@ -495,6 +514,8 @@ class ApplicationTeachingHost(QObject):
             'selection.color': lambda: self.panel.selection_color_button,
             'shape.cancel_points': lambda: self.panel.btn_cancel_points,
             'settings.smart_shapes': lambda: getattr(self.panel, 'btn_settings_smart', None),
+            'settings.view_fit': lambda: getattr(self.panel, 'btn_view_fit', None),
+            'settings.view_home': lambda: getattr(self.panel, 'btn_view_home', None),
             'toolbar.board_style': lambda: self.panel.icon_buttons.get('board_style'),
             'pages.thumbnails_button': lambda: self.panel.rail_count,
             'pages.thumbnail_list': lambda: self.panel.thumbnail_list,
@@ -561,6 +582,10 @@ class ApplicationTeachingHost(QObject):
                 reveal = self._reveal_shapes
             elif target_id == 'settings.smart_shapes':
                 reveal = self._reveal_geometry_settings
+            elif target_id in {'settings.view_fit', 'settings.view_home'}:
+                reveal = lambda target_id=target_id: self._reveal_board_view(target_id)
+            elif target_id in {'toolbar.pen', 'toolbar.mode', 'canvas.ink'}:
+                reveal = self._leave_board_view_settings
             elif target_id == 'pages.thumbnails_button':
                 reveal = self._reveal_thumbnail_button
             elif target_id in {'pages.add', 'pages.previous', 'pages.next'}:
@@ -599,7 +624,8 @@ class ApplicationTeachingHost(QObject):
             on_progress=self._record_progress,
             condition_reader=lambda name, argument: name == 'multiple_monitors' and len(QApplication.screens()) > 1,
             pause_action=self.pause_requested.emit,
-            layout_obstacles=self._layout_obstacles, restack_window=self.panel.raise_floating,
+            layout_obstacles=self._placement_obstacles, interaction_region=self._interaction_region,
+            restack_window=self.panel.raise_floating,
             manage_window=self.panel.lifecycle.register_teaching_window,
             unmanage_window=self.panel.lifecycle.unregister_tool_window)
         self.presenter.controller.setStyleSheet(self.panel.styleSheet())
@@ -607,6 +633,7 @@ class ApplicationTeachingHost(QObject):
         self.presenter.controller.set_practice_session(True)
         self.panel.teaching_events = self.presenter.events
         self.panel.teaching_presenter = self.presenter
+        self.panel.teaching_text_region = self._text_region
         self.presenter.exit_requested.connect(self.exit_requested)
         self.presenter.failed.connect(self.failed)
         self.panel.exit_requested.disconnect(module.QApplication.quit)
@@ -623,6 +650,81 @@ class ApplicationTeachingHost(QObject):
                      if window is not None and not sip.isdeleted(window)
                      and window.isWindow() and window.isVisible()
                      and not window.frameGeometry().isEmpty())
+
+    def _text_region(self):
+        canvas = self.panel.canvas
+        if (self.presenter.engine.phase not in ('running', 'paused') or not canvas.isVisible()
+                or canvas.editing_text_item() is None):
+            return QRect()
+        return _canvas_region(canvas, (canvas.text_bounds(item) for item in canvas.text_items))
+
+    def _placement_obstacles(self):
+        canvas, engine = self.panel.canvas, self.presenter.engine
+        editor = getattr(self.panel, 'text_panel', None)
+        if editor is not None and editor.isVisible() and editor.frameGeometry().intersects(self._text_region()):
+            self.panel._position_text_panel()
+        key = (engine.run_id, engine.step_epoch, canvas._page_id)
+        # A pen press closes temporary menus. Defer that placement opportunity
+        # until release, rather than move the instruction card during a stroke.
+        # Selection keeps its live layout, including marquee/handle movement.
+        drawing = canvas.draw_state != 'SELECT' and (canvas.last_point is not None or canvas._pointer_slots)
+        if key != self._obstacle_snapshot or not drawing:
+            self._obstacle_snapshot = key
+            self._obstacle_rects = self._layout_obstacles()
+        return self._obstacle_rects
+
+    def _selection_region(self):
+        """Protect the live selection workspace, not a course-specific sample box.
+
+        Object/handle/marquee bounds are document coordinates. Convert each to
+        the current view before clipping and uniting: offscreen objects must not
+        reserve the whole infinite board. The union also keeps the blank space
+        between objects available for a mandatory rectangle-selection gesture.
+        """
+        canvas = self.panel.canvas
+        step = self.presenter.engine.current_step
+        if step is None or not canvas.isVisible():
+            return QRect()
+        events = {clause.event for clause in step.wait.clauses} if step.wait else set()
+        if canvas.draw_state != 'SELECT' and not any(event.startswith('selection.') for event in events):
+            return QRect()
+        choosing = 'selection.changed' in events
+        ids = (set(canvas.selected_ids) if canvas.selected_ids and not choosing else
+               {item['id'] for items in (canvas.all_segments, canvas.shape_items,
+                                        canvas.text_items, canvas.image_items) for item in items})
+        bounds = [canvas.object_bounds(object_id) for object_id in ids]
+        bounds.extend(canvas.selection_handles().values())
+        if canvas.selection_rect is not None:
+            bounds.append(canvas.selection_rect.normalized())
+        return _canvas_region(canvas, bounds)
+
+    def _interaction_region(self):
+        text = self._text_region()
+        if not text.isEmpty():
+            return text
+        selection = self._selection_region()
+        canvas, engine = self.panel.canvas, self.presenter.engine
+        step = engine.current_step
+        if (not selection.isEmpty() or step is None or not canvas.isVisible()
+                or canvas.draw_state == 'SELECT' or step.input_policy != 'canvas'):
+            return selection
+        # Capture existing examples once, before the user can start this step.
+        # Epoch changes also cover Previous, Retry and resume; a page switch or
+        # new run cannot reuse another document's protected rectangle.
+        key = (engine.run_id, engine.step_epoch, canvas._page_id)
+        if key != self._example_snapshot:
+            ids = {item['id'] for items in (canvas.all_segments, canvas.shape_items,
+                                           canvas.text_items, canvas.image_items) for item in items}
+            examples = self._example_ids.get(canvas._page_id, set()) & ids
+            if not examples:
+                examples = ids
+                self._example_ids[canvas._page_id] = set(examples)
+            # Prefer the original examples over accumulating new practice ink.
+            # Copy bounds, not mutable objects: even a partial erase or an
+            # uncommitted stroke must not make the card chase the user's pen.
+            self._example_bounds = tuple(QRectF(canvas.object_bounds(object_id)) for object_id in examples)
+            self._example_snapshot = key
+        return _canvas_region(canvas, self._example_bounds)
 
     def _reveal_tools(self):
         self.panel.show_only_sub(self.panel.tools_sub)
@@ -647,6 +749,22 @@ class ApplicationTeachingHost(QObject):
         if settings is not None and not sip.isdeleted(settings):
             settings.hide()
         self.panel.show_only_sub(self.panel.shape_sub)
+
+    def _reveal_board_view(self, target_id):
+        settings = getattr(self.panel, 'settings_panel', None)
+        if settings is None or sip.isdeleted(settings) or not settings.isVisible():
+            self.panel.open_settings_panel()
+        self._board_view_settings_revealed = True
+        widget = getattr(self.panel, 'btn_' + target_id.split('.', 1)[1])
+        self.panel.settings_scroll.ensureWidgetVisible(widget)
+
+    def _leave_board_view_settings(self):
+        if not getattr(self, '_board_view_settings_revealed', False):
+            return
+        self._board_view_settings_revealed = False
+        settings = getattr(self.panel, 'settings_panel', None)
+        if settings is not None and not sip.isdeleted(settings):
+            settings.hide()
 
     def _reveal_geometry_settings(self):
         self.panel.close_thumbnail_panel()
@@ -813,6 +931,7 @@ class ApplicationTeachingHost(QObject):
         if self._closed or self._center_token is None:
             raise ValueError('no private center session')
         self._switch_pending = True
+        self._cancel_roaming_gesture()
         if self._center_batch is not None: self._center_batch.close()
         self.presenter.engine.stop()
 
@@ -913,6 +1032,9 @@ class ApplicationTeachingHost(QObject):
             self.panel.handle_file_click()
 
     def _prepare_fixture(self, fixture):
+        self._example_ids.clear()
+        self._example_snapshot, self._example_bounds = None, ()
+        self._obstacle_snapshot, self._obstacle_rects = None, ()
         # The catalog maps IDs to bounded bundled data only, never executable code.
         source = self.loader.asset_path(self.loader.fixtures[fixture])
         directory = self.request.paths.require_directory_path(self.request.paths.data_dir / 'fixtures')
@@ -962,7 +1084,14 @@ class ApplicationTeachingHost(QObject):
         self.panel.resume_callbacks()
         self.panel.bind_topmost_stack()
 
+    def _cancel_roaming_gesture(self):
+        canvas = self.panel.canvas
+        canvas._cancel_teaching_roam()
+        canvas._pan_point = None
+        canvas._board_gesture.clear()
+
     def pause(self, *, hidden=False):
+        self._cancel_roaming_gesture()
         self.presenter.pause()
         if self._center_ending:
             self._center_end_control = 'hide' if hidden else 'pause'
@@ -1022,6 +1151,7 @@ class ApplicationTeachingHost(QObject):
         if self._closed:
             return
         self._closed = True
+        self._cancel_roaming_gesture()
         failure = None
         if not self._center_ending and (self._center_token is not None or self._center_native is not None):
             if self._center_batch is not None:
@@ -1034,6 +1164,7 @@ class ApplicationTeachingHost(QObject):
         self.panel.teaching_host = None
         self.panel.teaching_events = None
         self.panel.teaching_presenter = None
+        self.panel.teaching_text_region = None
         self.panel._teaching_suspended = True
         for cleanup in (self.presenter.close, self.registry.close, self.panel.pause_callbacks,
                         self.panel.stop_update_worker, self.panel.shutdown_autosave,

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "id": "c05",
-  "revision": 1,
+  "revision": 2,
   "compat_revision": 1,
   "title_key": "teaching_c05_title",
   "chapters": [
@@ -481,7 +481,7 @@
             "outcome": "success",
             "equals": {
               "page_id": "1e585f16-158e-5825-9fb1-5a9650035e6d",
-              "source": 2,
+              "next_page_id": "4002658d-2623-5043-8bda-b298be3ba36e",
               "destination": 0,
               "current_page_id": "1e585f16-158e-5825-9fb1-5a9650035e6d",
               "page": 1,
@@ -501,6 +501,162 @@
           "id": "done",
           "title_key": "teaching_c05_reorder_done_title",
           "body_key": "teaching_c05_reorder_done_body",
+          "kind": "information",
+          "next": "end_chapter"
+        }
+      ]
+    },
+    {
+      "id": "c05.roam",
+      "title_key": "teaching_c05_roam_title",
+      "fixture": "pages.c05.roam",
+      "steps": [
+        {
+          "id": "intro",
+          "title_key": "teaching_c05_roam_intro_title",
+          "body_key": "teaching_c05_roam_intro_body",
+          "kind": "information",
+          "next": "enter_roam"
+        },
+        {
+          "id": "enter_roam",
+          "title_key": "teaching_c05_roam_enter_roam_title",
+          "body_key": "teaching_c05_roam_enter_roam_body",
+          "target": "toolbar.mode",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "mode.changed",
+            "outcome": "success",
+            "equals": {
+              "drawing_mode": false,
+              "whiteboard_mode": true,
+              "board_view_active": true,
+              "roaming": true,
+              "mouse_passthrough": false
+            }
+          },
+          "next": "pan"
+        },
+        {
+          "id": "pan",
+          "title_key": "teaching_c05_roam_pan_title",
+          "body_key": "teaching_c05_roam_pan_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "board.view_changed",
+            "outcome": "success",
+            "equals": {
+              "action": "pan",
+              "changed": true,
+              "content_unchanged": true,
+              "history_unchanged": true,
+              "roaming": true,
+              "mouse_passthrough": false
+            },
+            "min_count": {"distance": 40}
+          },
+          "next": "zoom_in"
+        },
+        {
+          "id": "zoom_in",
+          "title_key": "teaching_c05_roam_zoom_in_title",
+          "body_key": "teaching_c05_roam_zoom_in_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "board.view_changed",
+            "outcome": "success",
+            "equals": {
+              "action": "zoom", "direction": "in", "anchor_preserved": true,
+              "changed": true, "content_unchanged": true, "history_unchanged": true,
+              "roaming": true, "mouse_passthrough": false
+            }
+          },
+          "next": "zoom_out"
+        },
+        {
+          "id": "zoom_out",
+          "title_key": "teaching_c05_roam_zoom_out_title",
+          "body_key": "teaching_c05_roam_zoom_out_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "board.view_changed",
+            "outcome": "success",
+            "equals": {
+              "action": "zoom", "direction": "out", "anchor_preserved": true,
+              "changed": true, "content_unchanged": true, "history_unchanged": true,
+              "roaming": true, "mouse_passthrough": false
+            }
+          },
+          "next": "fit"
+        },
+        {
+          "id": "fit",
+          "title_key": "teaching_c05_roam_fit_title",
+          "body_key": "teaching_c05_roam_fit_body",
+          "target": "settings.view_fit",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "board.view_changed",
+            "outcome": "success",
+            "equals": {
+              "action": "fit", "changed": true, "nonempty": true, "fitted": true,
+              "content_unchanged": true, "history_unchanged": true
+            }
+          },
+          "next": "home"
+        },
+        {
+          "id": "home",
+          "title_key": "teaching_c05_roam_home_title",
+          "body_key": "teaching_c05_roam_home_body",
+          "target": "settings.view_home",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "board.view_changed",
+            "outcome": "success",
+            "equals": {
+              "action": "home", "changed": true, "x": 0, "y": 0, "zoom": 1,
+              "content_unchanged": true, "history_unchanged": true
+            }
+          },
+          "next": "pen"
+        },
+        {
+          "id": "pen",
+          "title_key": "teaching_c05_roam_pen_title",
+          "body_key": "teaching_c05_roam_pen_body",
+          "target": "toolbar.pen",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "mode.changed",
+            "outcome": "success",
+            "equals": {
+              "drawing_mode": true, "whiteboard_mode": true,
+              "board_view_active": true, "roaming": false, "mouse_passthrough": false
+            }
+          },
+          "next": "ink"
+        },
+        {
+          "id": "ink",
+          "title_key": "teaching_c05_roam_ink_title",
+          "body_key": "teaching_c05_roam_ink_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "ink.committed", "outcome": "success",
+            "equals": {"tool": "PEN", "style": "pen"},
+            "min_count": {"segments": 1}
+          },
+          "next": "done"
+        },
+        {
+          "id": "done",
+          "title_key": "teaching_c05_roam_done_title",
+          "body_key": "teaching_c05_roam_done_body",
           "kind": "information",
           "next": "end_chapter"
         }

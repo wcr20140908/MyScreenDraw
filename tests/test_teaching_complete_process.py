@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""All 46 chapters share a private process, real controls and restored parent work."""
+"""All 47 chapters share a private process, real controls and restored parent work."""
 from test_teaching_export_process import (
     BRIDGE as EXPORT_BRIDGE, CHAPTERS as EXPORT_CHAPTERS,
     parent_coordinator, practice_request, run_course_process,
@@ -120,5 +120,5 @@ BRIDGE = BRIDGE.replace("        elif chapter.startswith('c10.'):", r"""        
 
 def test_all_courses_one_process_restores_parent_and_cleans_private_files(parent_coordinator, tmp_path, monkeypatch):
     proof = run_course_process(parent_coordinator, tmp_path, monkeypatch,
-        chapters=CHAPTERS, bridge_source=BRIDGE, expected_steps=389)
+        chapters=CHAPTERS, bridge_source=BRIDGE, expected_steps=399)
     assert proof['c13_paused'] and proof['c13_resumed']

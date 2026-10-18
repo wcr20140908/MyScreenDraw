@@ -660,7 +660,6 @@
                   "slot": "root",
                   "depth": 0,
                   "at_end": true,
-                  "navigation": "end",
                   "item_id": "204fce49-86e9-59fa-829d-1c63ea8287ce"
                 }
               },
@@ -778,7 +777,6 @@
                   "slot": "root",
                   "depth": 0,
                   "at_end": true,
-                  "navigation": "end",
                   "item_id": "204fce49-86e9-59fa-829d-1c63ea8287ce"
                 }
               },
@@ -896,7 +894,6 @@
                   "slot": "root",
                   "depth": 0,
                   "at_end": true,
-                  "navigation": "end",
                   "item_id": "204fce49-86e9-59fa-829d-1c63ea8287ce"
                 }
               },
@@ -1034,7 +1031,6 @@
                   "slot": "root",
                   "depth": 0,
                   "at_end": true,
-                  "navigation": "end",
                   "item_id": "204fce49-86e9-59fa-829d-1c63ea8287ce"
                 }
               },
@@ -1175,7 +1171,6 @@
                   "slot": "root",
                   "depth": 0,
                   "at_end": true,
-                  "navigation": "end",
                   "item_id": "204fce49-86e9-59fa-829d-1c63ea8287ce"
                 }
               },

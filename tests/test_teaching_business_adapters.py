@@ -330,8 +330,8 @@ def test_rectangle_selection_reports_committed_object_selection(application_host
 def test_object_move_only_completes_after_undoable_transform_is_committed(application_host):
     host, _ = application_host
     canvas = prepare_edit(host.panel, 'transform')
-    from PyQt6.QtCore import QLine
-    before = QLine(canvas.all_segments[0]['line'])
+    from PyQt6.QtCore import QLineF
+    before = QLineF(canvas.all_segments[0]['line'])
     undo_depth = len(canvas.undo_stack)
     engine = attach_wait(host.panel, 'selection.transformed', equals={'action': 'move', 'count': 1})
     mouse(canvas, 'press', (130, 70)); mouse(canvas, 'move', (170, 100))

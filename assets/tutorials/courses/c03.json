@@ -73,11 +73,11 @@
             "outcome": "success",
             "equals": {
               "eraser_type": "CIRCLE",
+              "eraser_size": 60,
               "stroke_id": "dadb8e81-cea9-76ac-79e5-d213276df443"
             },
             "min_count": {
-              "removed_segments": 1,
-              "remaining_segments": 1
+              "removed_segments": 1
             }
           },
           "next": "stroke_mode"

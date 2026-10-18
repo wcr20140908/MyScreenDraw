@@ -163,4 +163,4 @@ def run_course_process(parent_coordinator, tmp_path, monkeypatch, *, chapters, b
 
 def test_ten_courses_314_steps_one_process_preserves_parent_files_and_cleans_up(parent_coordinator, tmp_path, monkeypatch):
     run_course_process(parent_coordinator, tmp_path, monkeypatch,
-                       chapters=CHAPTERS, bridge_source=BRIDGE, expected_steps=314)
+                       chapters=CHAPTERS, bridge_source=BRIDGE, expected_steps=324)

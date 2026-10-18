@@ -121,6 +121,10 @@ def test_marker_stays_in_document_while_laser_does_not(writing_host):
 @pytest.mark.parametrize('writing_host',['c03.erase'],indirect=True)
 def test_circle_size_and_whole_stroke_modes_erase_two_separate_samples(writing_host):
     host,progress=writing_host;panel=host.panel;next_info(host)
+    upper_before = sum(segment['id'].hex == 'dadb8e81cea976ac79e5d213276df443'
+                       for segment in panel.canvas.all_segments)
+    lower_before = sum(segment['id'].hex == '72c2ee1f9618e1eae59dcb7eb9931a99'
+                       for segment in panel.canvas.all_segments)
     panel.handle_eraser_click();assert_step(host,'circle')
     panel.btn_circ.click();assert_step(host,'size');panel.e_slider.setValue(60)
     assert_step(host,'circle_erase')
@@ -128,9 +132,9 @@ def test_circle_size_and_whole_stroke_modes_erase_two_separate_samples(writing_h
     assert_step(host,'stroke_mode')
     upper_count = sum(segment['id'].hex == 'dadb8e81cea976ac79e5d213276df443'
                       for segment in panel.canvas.all_segments)
-    assert 0 < upper_count < 3
+    assert 0 < upper_count < upper_before
     assert sum(segment['id'].hex == '72c2ee1f9618e1eae59dcb7eb9931a99'
-               for segment in panel.canvas.all_segments) == 3
+               for segment in panel.canvas.all_segments) == lower_before
     panel.btn_stroke.click()
     assert_step(host,'stroke_erase')
     mouse(panel.canvas,'press',(170,390));mouse(panel.canvas,'move',(220,420));mouse(panel.canvas,'release',(220,420))
@@ -194,7 +198,7 @@ def test_whole_stroke_erasing_upper_remainder_does_not_complete_lower_sample_ste
 
 
 @pytest.mark.parametrize('writing_host', ['c03.erase'], indirect=True)
-def test_circle_erasing_entire_upper_sample_does_not_teach_partial_erasure(writing_host):
+def test_circle_erasing_entire_upper_sample_meets_visible_instruction(writing_host):
     host, _ = writing_host
     panel = host.panel
     next_info(host)
@@ -203,11 +207,12 @@ def test_circle_erasing_entire_upper_sample_does_not_teach_partial_erasure(writi
     panel.e_slider.setValue(60)
     assert_step(host, 'circle_erase')
 
-    mouse(panel.canvas, 'press', (170, 150))
-    mouse(panel.canvas, 'move', (370, 150))
-    mouse(panel.canvas, 'release', (370, 150))
+    mouse(panel.canvas, 'press', (120, 120))
+    for point in ((220, 180), (320, 120), (420, 180)):
+        mouse(panel.canvas, 'move', point)
+    mouse(panel.canvas, 'release', (420, 180))
 
     assert {segment['id'].hex for segment in panel.canvas.all_segments} == {
         '72c2ee1f9618e1eae59dcb7eb9931a99'}
-    assert_step(host, 'circle_erase')
+    assert_step(host, 'stroke_mode')
     assert not host.presenter.engine._issued

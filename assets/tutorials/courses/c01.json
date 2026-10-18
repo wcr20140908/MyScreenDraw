@@ -56,7 +56,7 @@
           "input_policy": "target_only",
           "allowed_targets": [
             "toolbar.mode",
-            "toolbar.mode"
+            "toolbar.pen"
           ],
           "wait": {
             "sequence": [
@@ -325,7 +325,7 @@
             "event": "project.saved",
             "outcome": "success",
             "equals": {
-              "path": "practice.msd"
+              "path": "1.msd"
             }
           },
           "next": "open"
@@ -343,7 +343,7 @@
             "event": "project.opened",
             "outcome": "success",
             "equals": {
-              "path": "practice.msd",
+              "path": "1.msd",
               "reopened_saved": true
             }
           },

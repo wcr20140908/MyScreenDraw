@@ -404,6 +404,53 @@ def controller_geometry(anchor: QRect, size: QSize, available: QRect, *, gap: in
     return min((QRect(x, y, width, height) for x in xs for y in ys), key=score)
 
 
+def interaction_controller_geometry(anchor: QRect, size: QSize, minimum: QSize, available: QRect,
+                                    region: QRect, obstacles: Iterable[QRect] = ()) -> QRect:
+    """Keep a selection workspace clear, reducing only the instruction viewport.
+
+    Search maximal empty rectangles at the interaction/chrome edges. A smaller
+    card must still fit its translated labels and action buttons; the existing
+    body scroll area handles long copy. On an impossibly crowded display keep
+    those controls usable at the least-overlapping position, never hide the
+    controller or waive the required operation.
+    """
+    obstacles = tuple(obstacles)
+    blockers = obstacles + (region,)
+    size = size.expandedTo(minimum).boundedTo(available.size())
+    minimum = minimum.boundedTo(size)
+    normal = controller_geometry(anchor, size, available, obstacles=blockers)
+    if not _overlap_area(normal, blockers):
+        return normal
+    slots = [available]
+    for blocker in blockers:
+        remaining = []
+        for slot in slots:
+            part = slot.intersected(blocker)
+            if part.isEmpty():
+                remaining.append(slot)
+                continue
+            remaining.extend((
+                QRect(slot.left(), slot.top(), part.left() - slot.left(), slot.height()),
+                QRect(part.right() + 1, slot.top(), slot.right() - part.right(), slot.height()),
+                QRect(slot.left(), slot.top(), slot.width(), part.top() - slot.top()),
+                QRect(slot.left(), part.bottom() + 1, slot.width(), slot.bottom() - part.bottom()),
+            ))
+        slots = []
+        for slot in remaining:
+            if (slot.width() < minimum.width() or slot.height() < minimum.height()
+                    or any(other.contains(slot) for other in slots)):
+                continue
+            slots = [other for other in slots if not slot.contains(other)]
+            slots.append(slot)
+    candidates = [controller_geometry(anchor, size.boundedTo(slot.size()), slot) for slot in slots]
+    # Even if no readable clear slot exists, reducing to the readable minimum
+    # is better than leaving the old full-size panel over most of the canvas.
+    candidates.append(controller_geometry(region, minimum, available, obstacles=obstacles))
+    return min(candidates, key=lambda rect: (
+        _overlap_area(rect, blockers), -rect.width() * rect.height(),
+        abs(rect.x() - normal.x()) + abs(rect.y() - normal.y()), rect.y(), rect.x()))
+
+
 class TutorialController(QWidget):
     """Independent tool window; zero-based present() never executes a step.
 
@@ -418,6 +465,7 @@ class TutorialController(QWidget):
     skip_requested = pyqtSignal()
     exit_requested = pyqtSignal()
     retry_requested = pyqtSignal()
+    resized = pyqtSignal()
 
     def __init__(self, translate: Translate, parent: QWidget | None = None) -> None:
         super().__init__(parent, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint
@@ -432,6 +480,8 @@ class TutorialController(QWidget):
         self._finished: str | None = None
         self._can_previous = self._can_next = False
         self._paused = self._missing = self._exit_emitted = False
+        self._requested_size: QSize | None = None
+        self._placed_size: QSize | None = None
         self.practice_label = QLabel(translate('teaching_practice_badge'), self)
         self.practice_label.setTextFormat(Qt.TextFormat.PlainText)
         self.practice_label.setWordWrap(True)
@@ -545,11 +595,29 @@ class TutorialController(QWidget):
             key = None
         self.status_label.setText(self._translate(key) if key else '')
 
-    def place(self, anchor: QRect, available: QRect, obstacles: Iterable[QRect] = ()) -> QRect:
-        geometry = controller_geometry(anchor, self.size(), available, obstacles=obstacles)
+    def placement_size(self) -> QSize:
+        # Auto-fit is temporary. Restore the user's size when objects move, the
+        # camera zooms out, or the next step no longer needs the interaction zone.
+        if self._requested_size is None or self.size() != self._placed_size:
+            self._requested_size = self.size()
+        return QSize(self._requested_size)
+
+    def place(self, anchor: QRect, available: QRect, obstacles: Iterable[QRect] = (), *,
+              interaction_region: QRect | None = None) -> QRect:
+        size = self.placement_size()
+        if interaction_region is not None and not interaction_region.isEmpty():
+            geometry = interaction_controller_geometry(anchor, size, self.layout().minimumSize(),
+                                                       available, interaction_region, obstacles)
+        else:
+            geometry = controller_geometry(anchor, size, available, obstacles=obstacles)
+        self._placed_size = geometry.size()
         if geometry != self.geometry():
             self.setGeometry(geometry)
         return geometry
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self.resized.emit()
 
     def closeEvent(self, event: QCloseEvent) -> None:
         if not self._exit_emitted:

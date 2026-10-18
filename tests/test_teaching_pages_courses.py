@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""All 39 formal C05 steps through real owned offscreen controls."""
+"""All 49 formal C05 steps through real owned offscreen controls (roam in test_teaching_roam)."""
 from pathlib import Path
 from string import Formatter
 
@@ -19,9 +19,9 @@ def test_pages_catalog_and_eight_language_resources_are_complete():
     catalog,loader=application_catalog(main,ROOT)
     course=catalog.course_by_id('c05')
     assert [chapter.id for chapter in course.chapters]==[
-        'c05.board','c05.add_switch','c05.rename_delete','c05.copy_position','c05.reorder']
-    assert [len(chapter.steps) for chapter in course.chapters]==[7,6,7,12,7]
-    assert len(PAGES_COPY)==84
+        'c05.board','c05.add_switch','c05.rename_delete','c05.copy_position','c05.reorder','c05.roam']
+    assert [len(chapter.steps) for chapter in course.chapters]==[7,6,7,12,7,10]
+    assert len(PAGES_COPY)==105
     for key,values in PAGES_COPY.items():
         assert len(values)==8
         for language,value in zip(i18n._LANGS,values):

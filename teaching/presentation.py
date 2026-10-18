@@ -42,9 +42,12 @@ class TeachingPresenter(QObject):
     Retry/Skip/Exit remain available without an application-wide lock. The host
     must wrap real native file choosers in native_dialog(); this is not a native
     dialog test or an OS hook. layout_obstacles supplies the host's currently
-    visible toolbar/panel rectangles in Qt logical/global coordinates. Its
-    presence enables periodic placement refreshes without watching the desktop.
-    restack_window is a separate trusted hook for visible teaching windows.
+    visible toolbar/panel rectangles in Qt logical/global coordinates. The
+    optional interaction_region protects live canvas objects and gesture space
+    in the same coordinates, allowing the card to shrink to a readable size.
+    Either hook enables periodic refreshes (including document-camera changes)
+    without watching the desktop. restack_window is a separate trusted hook for
+    visible teaching windows.
     """
 
     exit_requested = pyqtSignal()
@@ -61,6 +64,7 @@ class TeachingPresenter(QObject):
                  pause_action: Callable[[], object] | None = None,
                  available_geometry: Callable[[QWidget | None], QRect] = _work_area,
                  layout_obstacles: Callable[[], Iterable[QRect]] | None = None,
+                 interaction_region: Callable[[], QRect] | None = None,
                  restack_window: Callable[[QWidget], None] | None = None,
                  manage_window: Callable[[QWidget], None] | None = None,
                  unmanage_window: Callable[[QWidget], None] | None = None,
@@ -72,6 +76,8 @@ class TeachingPresenter(QObject):
             raise ValueError('pause action must be a trusted callable')
         if layout_obstacles is not None and not callable(layout_obstacles):
             raise ValueError('layout obstacle source must be a trusted callable')
+        if interaction_region is not None and not callable(interaction_region):
+            raise ValueError('interaction region source must be a trusted callable')
         if restack_window is not None and not callable(restack_window):
             raise ValueError('window restack hook must be a trusted callable')
         actions = dict(reveal_actions or {})
@@ -82,7 +88,7 @@ class TeachingPresenter(QObject):
         self.registry, self._canvas = registry, canvas
         self._prepare_fixture, self._prepare_step = prepare_fixture, prepare_step
         self._reveal_actions, self._available_geometry = actions, available_geometry
-        self._layout_obstacles = layout_obstacles
+        self._layout_obstacles, self._interaction_region = layout_obstacles, interaction_region
         self._restack_window = restack_window
         self._placing_layout = False
         self._layout_signature: tuple | None = None
@@ -98,6 +104,7 @@ class TeachingPresenter(QObject):
         self._chapter = None
         self.active_target_id: str | None = None
         self.controller = TutorialController(translate)
+        self.controller.resized.connect(self.refresh_layout)
         self.highlight = HighlightOverlay()
         self.barrier = InputBarrier(owns, self)
         self.engine = TutorialEngine(catalog, session_id=session_id, on_step=self._present,
@@ -324,11 +331,18 @@ class TeachingPresenter(QObject):
                 return None
             if any(not isinstance(rect, QRect) for rect in obstacles):
                 raise TypeError('layout obstacles must be QRect values')
-            size = self.controller.size()
+            region = self._interaction_region() if self._interaction_region is not None else QRect()
+            if not self._still_current(snapshot):
+                return None
+            if not isinstance(region, QRect):
+                raise TypeError('interaction region must be a QRect value')
+            size = self.controller.placement_size()
+            minimum = self.controller.layout().minimumSize()
             signature = (anchor.getRect(), area.getRect(), size.width(), size.height(),
+                         minimum.width(), minimum.height(), region.getRect(),
                          tuple(sorted(rect.getRect() for rect in obstacles)))
             if signature != self._layout_signature or self.controller.geometry() != self._layout_geometry:
-                geometry = self.controller.place(anchor, area, obstacles=obstacles)
+                geometry = self.controller.place(anchor, area, obstacles=obstacles, interaction_region=region)
                 self._layout_signature, self._layout_geometry = signature, QRect(geometry)
                 self._restack_floating(self.controller)
                 if not self._still_current(snapshot):
@@ -360,7 +374,8 @@ class TeachingPresenter(QObject):
         if not self._closed and not self._dialog_depth:
             self.controller.show()
             self._restack_floating(self.controller)
-            if not self._closed and not self._dialog_depth and self._layout_obstacles is not None:
+            if (not self._closed and not self._dialog_depth
+                    and (self._layout_obstacles is not None or self._interaction_region is not None)):
                 self._layout_timer.start()
 
     def _missing_expired(self) -> None:

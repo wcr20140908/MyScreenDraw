@@ -9,7 +9,7 @@ from teaching.bootstrap import practice_arguments
 from test_teaching_application import parent_coordinator,until
 from test_teaching_selection_process import ROOT,practice_request,BRIDGE as SELECTION_BRIDGE,CHAPTERS as SELECTION_CHAPTERS
 
-CHAPTERS=SELECTION_CHAPTERS+('c05.board','c05.add_switch','c05.rename_delete','c05.copy_position','c05.reorder','c06.plane','c06.solid','c06.points','c06.recognition_snap')
+CHAPTERS=SELECTION_CHAPTERS+('c05.board','c05.add_switch','c05.rename_delete','c05.copy_position','c05.reorder','c05.roam','c06.plane','c06.solid','c06.points','c06.recognition_snap')
 assert 'chapters = '+repr(SELECTION_CHAPTERS) in SELECTION_BRIDGE
 BRIDGE=SELECTION_BRIDGE.replace('chapters = '+repr(SELECTION_CHAPTERS),'chapters = '+repr(CHAPTERS))
 BRIDGE=BRIDGE.replace('time.monotonic() + 50','time.monotonic() + 75')
@@ -76,6 +76,27 @@ BRIDGE=BRIDGE.replace("        elif chapter.startswith('c04.'):", """        eli
                 panel.btn_more.click()
             else:
                 raise AssertionError('unexpected C06 action: '+name)
+        elif chapter == 'c05.roam':
+            if name == 'enter_roam':
+                panel.icon_buttons['mode'].click()
+            elif name in ('pan', 'ink'):
+                mouse(canvas, 'press', 360, 420)
+                mouse(canvas, 'move', 460, 470)
+                mouse(canvas, 'release', 460, 470)
+            elif name in ('zoom_in', 'zoom_out'):
+                from PyQt6.QtGui import QWheelEvent
+                point = QPointF(360, 280)
+                event = QWheelEvent(point, QPointF(canvas.mapToGlobal(point.toPoint())),
+                    QPoint(), QPoint(0, 120 if name == 'zoom_in' else -120),
+                    Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+                    Qt.ScrollPhase.NoScrollPhase, False)
+                self.module.QApplication.sendEvent(canvas, event)
+            elif name in ('fit', 'home'):
+                getattr(panel, 'btn_view_' + name).click()
+            elif name == 'pen':
+                panel.icon_buttons['pen'].click()
+            else:
+                raise AssertionError('unexpected C05 roaming action: ' + name)
         elif chapter.startswith('c05.'):
             if name in ('enter','exit'):
                 panel.icon_buttons['whiteboard'].click()
@@ -136,7 +157,7 @@ BRIDGE=BRIDGE.replace("        chapter, name = engine.chapter_id, current.id", "
         if key not in trace.setdefault('steps',[]):
             trace['steps'].append(key)""")
 
-def test_six_courses_192_steps_share_one_process_and_restore_once(parent_coordinator,tmp_path,monkeypatch):
+def test_six_courses_202_steps_share_one_process_and_restore_once(parent_coordinator,tmp_path,monkeypatch):
     panel,coordinator=parent_coordinator
     stderr=tmp_path/'pages-child.stderr'
     original_stderr=QProcess.setStandardErrorFile
@@ -154,11 +175,12 @@ def test_six_courses_192_steps_share_one_process_and_restore_once(parent_coordin
         return(coordinator.session.phase,coordinator.session.last_error,
                {id:coordinator.state_store.chapter_status(id) for id in CHAPTERS},
                stderr.read_text(encoding='utf-8',errors='replace')[-3000:] if stderr.exists() else '')
-    until(lambda:all(coordinator.state_store.chapter_status(id)=='completed' for id in CHAPTERS),
-          timeout=90000,diagnostic=diagnostic)
+    until(lambda:all(coordinator.state_store.chapter_status(id)=='completed' for id in CHAPTERS)
+          or coordinator.session.phase=='stopped', timeout=90000,diagnostic=diagnostic)
+    assert all(coordinator.state_store.chapter_status(id)=='completed' for id in CHAPTERS), diagnostic()
     proof=json.loads((coordinator.session.paths.data_dir/'formal-core-proof.json').read_text(encoding='utf-8'))
     assert proof['completed']==list(CHAPTERS) and proof['all_complete']
-    assert len(proof['steps'])==192 and proof['hold_elapsed']>=0.65
+    assert len(proof['steps'])==202 and proof['hold_elapsed']>=0.65
     assert len(set(proof['pids']))==1 and proof['pids'][0]==process.processId()
     assert coordinator.session._token is token and coordinator.session.process is process
     assert coordinator.session.suspend.call_count==1 and coordinator.session.restore.call_count==0

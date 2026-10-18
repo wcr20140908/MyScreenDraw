@@ -737,10 +737,8 @@
               "type": "LINE",
               "count": 1,
               "snapped": true,
-              "start_x": 240,
-              "start_y": 340,
-              "end_x": 240,
-              "end_y": 150
+              "snap_target_id": "83ed9223-1658-5c07-ae30-c0b1f9058dce",
+              "snap_target_endpoint": 1
             }
           },
           "next": "midpoint"

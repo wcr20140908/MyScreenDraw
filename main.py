@@ -256,6 +256,8 @@ from teaching.measurement_actions import measurement_action, measurement_drag
 from teaching.toolbox_actions import (toolbox_action, teaching_timer_toggle,
     teaching_timer_finished, teaching_spotlight_move)
 from teaching.interface_actions import interface_action
+from teaching.roam_actions import (begin_roam_action, finish_roam_action,
+                                   cancel_roam_action, observe_roam_touch)
 from teaching.file_actions import teaching_autosave_setting
 from teaching.text_actions import (teaching_text_change, teaching_input_change,
     teaching_text_input_action, teaching_text_panel_action, teaching_text_finish,
@@ -329,6 +331,7 @@ import eps_export
 from app_lifecycle import AppLifecycleManager, LifecycleState
 import toolbar_windows
 from release_notice import ReleaseNoticeCard, begin_notice_session, normalize_notice_state
+from update_notes import NotesController, ReleaseNotesSection, UpdateHistoryDialog, release_body, version_tag
 from chalk_texture import make_chalk_texture
 from themed_controls import apply_combo_theme, controls_stylesheet, theme_palette
 from pen_defaults import PenDefaultsEditor, normalize_presets, capture_current, apply_preset
@@ -342,7 +345,7 @@ from PyQt6.QtCore import (Qt, QPoint, QPointF, QRect, QRectF, QTimer, QTranslato
                           QSizeF, QMarginsF, QEventLoop, QSize, QUrl, QBuffer, QIODevice, QThread)
 from PyQt6.QtGui import (QPainter, QPen, QColor, QFont, QPainterPath, QFontMetricsF, QTransform, QPolygonF,
                          QPixmap, QPdfWriter, QPageSize, QCursor, QGuiApplication, QIcon, QImage, QImageReader,
-                         QEventPoint, QInputDevice, QPaintEngine, QBrush, QConicalGradient)
+                         QEventPoint, QInputDevice, QPaintEngine, QBrush, QConicalGradient, QDesktopServices)
 from pynput import keyboard
 
 TELEMETRY_MAX_BYTES = 1024 * 1024   # 单个日志文件上限：1MB
@@ -1697,8 +1700,10 @@ def fetch_release(channel="stable", url=UPDATE_RELEASES_URL, timeout=UPDATE_TIME
                     continue
                 download_url = asset.get("browser_download_url")
                 if _official_asset_url(download_url, tag, name):
+                    body, notes_error = release_body(release)
                     candidates.append((version, {"tag": tag, "download_url": download_url,
-                                                 "asset_name": name, "prerelease": prerelease}))
+                                                 "asset_name": name, "prerelease": prerelease,
+                                                 "body": body, "notes_error": notes_error}))
         if candidates:
             return max(candidates, key=lambda item: item[0])[1], None
         return None, "no_release"
@@ -1714,6 +1719,38 @@ def fetch_release(channel="stable", url=UPDATE_RELEASES_URL, timeout=UPDATE_TIME
         return None, f"net_{getattr(exc, 'reason', 'unknown')}"
     except json.JSONDecodeError:
         return None, "bad_json"
+    except Exception as exc:
+        return None, f"error_{type(exc).__name__}"
+
+
+def fetch_release_notes(tag, timeout=UPDATE_TIMEOUT_S):
+    """Fetch an exact tag, independently of asset selection or the latest channel."""
+    tag = version_tag(tag)
+    if tag is None:
+        return None, "bad_release_notes"
+    url = UPDATE_API_URL.rsplit("/", 1)[0] + "/tags/" + urllib.parse.quote(tag, safe="")
+    request = urllib.request.Request(url, headers={
+        "Accept": "application/vnd.github+json", "User-Agent": f"MyScreenDraw/{APP_VERSION}",
+    })
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            _https_response(response)
+            payload = _read_limited(response, 1024 * 1024)
+        release = json.loads(payload.decode("utf-8"))
+        if (not isinstance(release, dict) or release.get("tag_name") != tag
+                or release.get("draft")):
+            return None, "bad_release_notes"
+        return release_body(release)
+    except urllib.error.HTTPError as exc:
+        if exc.code in (403, 429) and (exc.headers is None or exc.headers.get("X-RateLimit-Remaining") in (None, "0")):
+            return None, "rate_limited"
+        return None, f"http_{exc.code}"
+    except urllib.error.URLError as exc:
+        return None, f"net_{getattr(exc, 'reason', 'unknown')}"
+    except (json.JSONDecodeError, UnicodeError):
+        return None, "bad_json"
+    except ValueError as exc:
+        return None, "notes_too_large" if str(exc) == "response_too_large" else str(exc)
     except Exception as exc:
         return None, f"error_{type(exc).__name__}"
 
@@ -3310,6 +3347,7 @@ class DrawingCanvas(QMainWindow):
         self._teaching_stroke_operation = None
         self._teaching_recognition_operation = None
         self._teaching_recognition_shape_id = None
+        self._teaching_recognized_ink = None
         self._teaching_stroke_tool = None
         self._teaching_edit = None
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -3328,6 +3366,8 @@ class DrawingCanvas(QMainWindow):
         self.board_view = BoardView()
         self._board_gesture = BoardGesture()
         self._pan_point = None
+        self._teaching_roam_action = None
+        self._teaching_roam_anchor = None
         self.board_style = "WHITE"
         self._page_id = str(uuid.uuid4())
         self._page_name = ""
@@ -3565,7 +3605,21 @@ class DrawingCanvas(QMainWindow):
         transform.translate(center.x(), center.y())
         transform.rotate(item["rotation"])
         transform.translate(-center.x(), -center.y())
-        return transform.mapRect(item["rect"].normalized())
+        rect = item["rect"].normalized()
+        if item.get("type") in ("CUBE", "CUBOID"):
+            front, back = self.box_faces(item["type"], rect)
+            margin = max(4, item["width"])
+            return transform.mapRect(front.united(back)).adjusted(-margin, -margin, margin, margin)
+        return transform.mapRect(rect)
+
+    @staticmethod
+    def box_faces(shape, rect):
+        if shape == "CUBE":
+            offset = min(rect.width(), rect.height()) * 0.18
+            return QRectF(rect), rect.translated(offset, -offset)
+        offset = min(rect.width(), rect.height()) * 0.2
+        return (QRectF(rect.left(), rect.top() + offset, rect.width() - offset, rect.height() - offset),
+                QRectF(rect.left() + offset, rect.top(), rect.width() - offset, rect.height() - offset))
 
     @staticmethod
     def shape_pen(item):
@@ -3639,21 +3693,20 @@ class DrawingCanvas(QMainWindow):
         painter.setPen(self.shape_pen(item))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         shape = item["type"]
-        if shape == "CUBE":
-            painter.drawRect(rect)
-            offset = min(rect.width(), rect.height()) * 0.18
-            back = rect.translated(offset, -offset)
-            painter.drawRect(back)
-            for a, b in [(rect.topLeft(), back.topLeft()), (rect.topRight(), back.topRight()), (rect.bottomLeft(), back.bottomLeft()), (rect.bottomRight(), back.bottomRight())]:
-                painter.drawLine(a, b)
-        elif shape == "CUBOID":
-            offset = min(rect.width(), rect.height()) * 0.2
-            front = QRectF(rect.left(), rect.top() + offset, rect.width() - offset, rect.height() - offset)
-            back = QRectF(rect.left() + offset, rect.top(), rect.width() - offset, rect.height() - offset)
-            painter.drawRect(front)
-            painter.drawRect(back)
-            for a, b in [(front.topLeft(), back.topLeft()), (front.topRight(), back.topRight()), (front.bottomLeft(), back.bottomLeft()), (front.bottomRight(), back.bottomRight())]:
-                painter.drawLine(a, b)
+        if shape in ("CUBE", "CUBOID"):
+            front, back = self.box_faces(shape, rect)
+            points = [point for face in (front, back) for point in
+                      (face.topLeft(), face.topRight(), face.bottomRight(), face.bottomLeft())]
+            solid_pen = self.shape_pen(item)
+            hidden_pen = QPen(solid_pen)
+            hidden_pen.setStyle(Qt.PenStyle.DashLine)
+            hidden_edges = {(6, 7), (7, 4), (3, 7)}
+            edges = ((0, 1), (1, 2), (2, 3), (3, 0),
+                     (4, 5), (5, 6), (6, 7), (7, 4),
+                     (0, 4), (1, 5), (2, 6), (3, 7))
+            for edge in edges:
+                painter.setPen(hidden_pen if edge in hidden_edges else solid_pen)
+                painter.drawLine(points[edge[0]], points[edge[1]])
         elif shape == "CYLINDER":
             h = rect.height() * 0.2
             painter.drawEllipse(QRectF(rect.left(), rect.top(), rect.width(), h))
@@ -3850,15 +3903,38 @@ class DrawingCanvas(QMainWindow):
             self.panel.project_dirty = True
         self.update()
 
+    def _cancel_teaching_roam(self):
+        token = getattr(self, "_teaching_roam_action", None)
+        self._teaching_roam_action = None
+        self._teaching_roam_anchor = None
+        cancel_roam_action(token)
+
+    def _teaching_mode_details(self):
+        return {"drawing_mode": self.is_drawing_mode,
+                "whiteboard_mode": bool(self.whiteboard_mode),
+                "board_view_active": bool(self.board_view_active),
+                "roaming": bool(self.is_roaming),
+                "mouse_passthrough": bool(self._mouse_passthrough)}
+
     def reset_board_view(self):
         if self.board_view_active:
-            self.board_view = BoardView()
-            self.view_changed()
+            token = begin_roam_action(self, "home", "button")
+            try:
+                self.board_view = BoardView()
+                self.view_changed()
+                finish_roam_action(self, token)
+            finally:
+                cancel_roam_action(token)
 
     def fit_board_view(self):
         if self.board_view_active:
-            self.board_view.fit(self.page_content_bounds(self.live_page()), QRectF(self.rect()))
-            self.view_changed()
+            token = begin_roam_action(self, "fit", "button")
+            try:
+                self.board_view.fit(self.page_content_bounds(self.live_page()), QRectF(self.rect()))
+                self.view_changed()
+                finish_roam_action(self, token)
+            finally:
+                cancel_roam_action(token)
 
     def capture_page(self):
         return {
@@ -3945,6 +4021,7 @@ class DrawingCanvas(QMainWindow):
                 (last.x2(), last.y2()) if last is not None else None)
 
     def load_page(self, page):
+        self._cancel_teaching_roam()
         self._discard_teaching_edit()
         self._ink_page_pending = False
         # 整页替换会让「正在编辑的那一框」失去意义（它可能属于上一页）。放在这里而不是
@@ -4155,14 +4232,16 @@ class DrawingCanvas(QMainWindow):
             if operation is None:
                 name = "shape.point_added"
                 operation = self._begin_teaching_operation(name)
+            target = (self._line_endpoint_target(pos) if operation is not None and pos is not None
+                      and self.shape_type in ("LINE", "DASHED_LINE") and len(self.pending_points) == 1 else None)
             before = (self.shape_type, frozenset(item["id"] for item in self.shape_items),
-                      len(self.pending_points), QPointF(pos) if pos is not None else None) if operation is not None else None
+                      len(self.pending_points), QPointF(pos) if pos is not None else None, target) if operation is not None else None
         elif self.draw_state == "ERASER":
             name = "ink.erased"
             operation = self._begin_teaching_operation(name)
             before = (len(self.all_segments), len(self.shape_items), len(self.text_items),
                       len(self.image_items), self.eraser_type,
-                      Counter(s["id"] for s in self.all_segments)) if operation is not None else None
+                      Counter(s["id"] for s in self.all_segments), self.eraser_size) if operation is not None else None
         else:
             return None
         return (operation, name, before) if operation is not None else None
@@ -4244,12 +4323,18 @@ class DrawingCanvas(QMainWindow):
                 if not content_changed or len(added) != 1 or added[0]["type"] != before[0] or not self._teaching_shape_nonempty(added[0]):
                     return
                 item = added[0]
-                snapped = (item["type"] in ("LINE", "DASHED_LINE") and before[3] is not None
-                           and item["points"][-1] != before[3])
-                details = {"type": item["type"], "count": 1, "snapped": bool(snapped)}
+                details = {"type": item["type"], "count": 1, "snapped": False}
                 if item["type"] in ("LINE", "DASHED_LINE"):
                     first, last = item["points"]
                     details.update(start_x=first.x(), start_y=first.y(), end_x=last.x(), end_y=last.y())
+                    target = before[4]
+                    source = next((shape for shape in self.shape_items if target is not None
+                                   and shape["id"] == target[1]), None)
+                    # Use the actual snap target, including an exact hit. The
+                    # first endpoint and the anchor's document position are free.
+                    if source is not None and last == target[0] and last in source["points"]:
+                        details.update(snapped=True, snap_target_id=str(source["id"]),
+                                       snap_target_endpoint=source["points"].index(last))
             else:
                 if not content_changed:
                     return
@@ -4262,7 +4347,7 @@ class DrawingCanvas(QMainWindow):
                             if remaining[stroke_id] < count]
                 stroke_id = affected[0] if len(affected) == 1 else None
                 details = {"removed_segments": removed_segments, "removed_objects": removed_objects,
-                           "eraser_type": before[4],
+                           "eraser_type": before[4], "eraser_size": before[6],
                            "stroke_id": str(stroke_id) if stroke_id is not None else None,
                            "remaining_segments": remaining[stroke_id] if stroke_id is not None else 0}
             accepted = self._emit_teaching_result(operation, name, details)
@@ -4542,6 +4627,12 @@ class DrawingCanvas(QMainWindow):
     def select_objects_in_rect(self, rect):
         normalized = QRectF(rect).normalized()
         self.selected_ids.clear()
+        for stroke_id in {segment["id"] for segment in self.all_segments}:
+            if normalized.intersects(self.object_bounds(stroke_id)):
+                self.selected_ids.add(stroke_id)
+        for item in self.text_items:
+            if normalized.intersects(self.text_bounds(item)):
+                self.selected_ids.add(item["id"])
         for item in self.shape_items:
             if normalized.intersects(self.shape_bounds(item)):
                 self.selected_ids.add(item["id"])
@@ -5401,6 +5492,7 @@ class DrawingCanvas(QMainWindow):
         "_teaching_stroke_operation": None,
         "_teaching_recognition_operation": None,
         "_teaching_recognition_shape_id": None,
+        "_teaching_recognized_ink": None,
         "_teaching_stroke_tool": None,
         # 速度→宽度：每指一份，否则两根手指的速度会互相污染。
         "_speed_mm_s": None,      # 平滑后的笔速（mm/s）；None 表示这一笔还没测到
@@ -5580,11 +5672,16 @@ class DrawingCanvas(QMainWindow):
     def _commit_hold_recognition(self):
         """停笔到时：就地把这一笔换成标准图形，笔不需要抬起。"""
         operation, self._teaching_recognition_operation = self._teaching_recognition_operation, None
-        before = frozenset(item["id"] for item in self.shape_items) if operation is not None else None
+        ink_operation = self._teaching_stroke_operation
+        before = (frozenset(item["id"] for item in self.shape_items)
+                  if operation is not None or ink_operation is not None else None)
         staged = False
         try:
             stroke_id = self.current_stroke_id
             points = [(p.x(), p.y()) for p in self.current_stroke_points]
+            ink_details = ({"tool": self._teaching_stroke_tool, "style": self._stroke_style,
+                            "segments": sum(seg.get("id") == stroke_id for seg in self.all_segments)}
+                           if ink_operation is not None else None)
             self._cancel_smart_recognition()
             if stroke_id is None or len(points) < 2:
                 return
@@ -5598,12 +5695,17 @@ class DrawingCanvas(QMainWindow):
             self.current_stroke_segments = []
             self.last_point = None
             self.update()
-            if operation is not None:
+            if before is not None:
                 added = [item for item in self.shape_items if item["id"] not in before]
                 if len(added) == 1 and self._teaching_shape_nonempty(added[0]):
                     self._teaching_recognition_operation = operation
                     self._teaching_recognition_shape_id = added[0]["id"]
                     staged = True
+                    if ink_details is not None and ink_details["segments"] > 0:
+                        # This is still the user's pen stroke, now stored as a
+                        # shape. Keep its entry-time context until a real release.
+                        self._teaching_recognized_ink = (ink_operation, added[0]["id"], ink_details)
+                        self._teaching_stroke_operation = None
         finally:
             if not staged:
                 self._discard_teaching_operation(operation)
@@ -5618,7 +5720,10 @@ class DrawingCanvas(QMainWindow):
         self.current_stroke_id = uuid.uuid4()
         self._discard_teaching_operation(self._teaching_stroke_operation)
         events = getattr(self.panel, "teaching_events", None)
-        self._teaching_stroke_operation = events.begin_operation("ink.committed") if events else None
+        # Continuing to move after dwell starts fresh raw ink, not a second
+        # teaching gesture before the same contact has been released.
+        self._teaching_stroke_operation = (events.begin_operation("ink.committed")
+                                           if events and self._teaching_recognized_ink is None else None)
         self._discard_teaching_operation(self._teaching_recognition_operation)
         self._teaching_recognition_operation = events.begin_operation("shape.recognized") if events else None
         self._teaching_recognition_shape_id = None
@@ -5654,17 +5759,27 @@ class DrawingCanvas(QMainWindow):
     def _take_teaching_recognition(self):
         operation = self._teaching_recognition_operation
         shape_id = self._teaching_recognition_shape_id
+        ink, self._teaching_recognized_ink = self._teaching_recognized_ink, None
         self._teaching_recognition_operation = None
         self._teaching_recognition_shape_id = None
-        return operation, shape_id
+        return operation, shape_id, ink
+
+    def _discard_teaching_recognition(self, recognition):
+        self._discard_teaching_operation(recognition[0])
+        if recognition[2] is not None:
+            self._discard_teaching_operation(recognition[2][0])
 
     def _finish_teaching_recognition(self, recognition):
-        operation, shape_id = recognition
-        if operation is None or shape_id is None:
-            return
-        item = next((shape for shape in self.shape_items if shape["id"] == shape_id), None)
-        if item is not None and self._teaching_shape_nonempty(item):
-            self._emit_teaching_result(operation, "shape.recognized", {"type": item["type"], "count": 1})
+        operation, shape_id, ink = recognition
+        if operation is not None and shape_id is not None:
+            item = next((shape for shape in self.shape_items if shape["id"] == shape_id), None)
+            if item is not None and self._teaching_shape_nonempty(item):
+                self._emit_teaching_result(operation, "shape.recognized", {"type": item["type"], "count": 1})
+        if ink is not None:
+            ink_operation, ink_shape_id, details = ink
+            item = next((shape for shape in self.shape_items if shape["id"] == ink_shape_id), None)
+            if item is not None and self._teaching_shape_nonempty(item):
+                self._emit_teaching_result(ink_operation, "ink.committed", details)
 
     def _finish_pointer_stroke(self):
         """一笔结束（抬笔/抬指）时按完成时间入栈。
@@ -5674,8 +5789,7 @@ class DrawingCanvas(QMainWindow):
         if not self._stroke_uses_delta:
             return False
         operation, self._teaching_stroke_operation = self._teaching_stroke_operation, None
-        recognition, self._teaching_recognition_operation = self._teaching_recognition_operation, None
-        self._teaching_recognition_shape_id = None
+        recognition = self._take_teaching_recognition()
         try:
             stroke_id = self.current_stroke_id
             self._stroke_uses_delta = False
@@ -5706,7 +5820,7 @@ class DrawingCanvas(QMainWindow):
             return True
         finally:
             self._discard_teaching_operation(operation)
-            self._discard_teaching_operation(recognition)
+            self._discard_teaching_recognition(recognition)
 
     def draw_hold_ring(self, painter, center=None, progress=None):
         """笔尖停留进度环：转满一圈这一笔就定形。
@@ -5904,15 +6018,19 @@ class DrawingCanvas(QMainWindow):
                 points.extend(item["points"])
         return points
 
-    def snap_to_line_endpoint(self, pos, exclude_ids=frozenset()):
+    def _line_endpoint_target(self, pos, exclude_ids=frozenset()):
         best = None
         best_dist = self.LINE_SNAP_RADIUS
-        for p in self.line_endpoints(exclude_ids):
-            d = math.hypot(p.x() - pos.x(), p.y() - pos.y())
-            if d < best_dist:
-                best_dist = d
-                best = p
-        return QPointF(best) if best is not None else QPointF(pos)
+        for point, owner, _ in self._line_snap_candidates(exclude_ids):
+            distance = math.hypot(point.x() - pos.x(), point.y() - pos.y())
+            if distance < best_dist:
+                best_dist = distance
+                best = (QPointF(point), owner)
+        return best
+
+    def snap_to_line_endpoint(self, pos, exclude_ids=frozenset()):
+        target = self._line_endpoint_target(pos, exclude_ids)
+        return QPointF(target[0]) if target is not None else QPointF(pos)
 
     def _line_snap_candidates(self, exclude_ids=frozenset()):
         """吸附候选：(端点, 所属直线 id, 所属直线方向角)。"""
@@ -8196,7 +8314,12 @@ class DrawingCanvas(QMainWindow):
         # 只处理这块，draw_content 里再按包围盒把画不到的对象跳过。
         clip = QRectF(event.rect())
         painter.setClipRect(clip)
-        painter.fillRect(clip, self.board_background())
+        # Fill a stable canvas rectangle, not the dirty rectangle itself. At
+        # fractional devicePixelRatio (125%/150%), antialiasing a dirty edge at
+        # a partial device pixel leaves translucent seams in the backing store.
+        # On this translucent window those seams reveal the desktop as boxes or
+        # stray lines. The clip still limits rasterization to the dirty region.
+        painter.fillRect(self.rect(), self.board_background())
         if self.board_view_active:
             painter.setWorldTransform(self.board_view.transform())
             clip = self.board_view.document_rect(clip)
@@ -8248,7 +8371,7 @@ class DrawingCanvas(QMainWindow):
                     painter.drawRect(handles["scale"])
                     painter.drawEllipse(handles["rotate"])
                     painter.drawLine(QPointF(rect.center().x(), rect.top()), handles["rotate"].center())
-            if self.selection_rect:
+            if self.selection_rect is not None:
                 painter.setPen(QPen(QColor(255, 255, 255, 220), 1, Qt.PenStyle.DashLine))
                 painter.setBrush(QColor(0, 206, 201, 35))
                 painter.drawRect(QRectF(self.selection_rect).normalized())
@@ -8286,10 +8409,16 @@ class DrawingCanvas(QMainWindow):
             self.panel.show_only_sub(None)
         if self.is_roaming:
             if not self._touch_synthesized(event) and event.button() == Qt.MouseButton.LeftButton:
-                self.cancel_page_pen_return()
-                self._pan_point = event.position()
-                self.setCursor(Qt.CursorShape.ClosedHandCursor)
-                event.accept()
+                self._cancel_teaching_roam()
+                self._teaching_roam_action = begin_roam_action(self, "pan", "mouse")
+                try:
+                    self.cancel_page_pen_return()
+                    self._pan_point = event.position()
+                    self.setCursor(Qt.CursorShape.ClosedHandCursor)
+                    event.accept()
+                except Exception:
+                    self._cancel_teaching_roam()
+                    raise
             return
         if event.button() == Qt.MouseButton.LeftButton and not self._touch_synthesized(event):
             self.consume_page_pen_return()
@@ -8450,13 +8579,17 @@ class DrawingCanvas(QMainWindow):
         if self._touch_synthesized(event):
             return
         if self.is_roaming:
-            if self._pan_point is not None and event.buttons() & Qt.MouseButton.LeftButton:
-                delta = event.position() - self._pan_point
-                self._pan_point = event.position()
-                self.board_view.x += delta.x()
-                self.board_view.y += delta.y()
-                self.view_changed()
-            event.accept()
+            try:
+                if self._pan_point is not None and event.buttons() & Qt.MouseButton.LeftButton:
+                    delta = event.position() - self._pan_point
+                    self._pan_point = event.position()
+                    self.board_view.x += delta.x()
+                    self.board_view.y += delta.y()
+                    self.view_changed()
+                event.accept()
+            except Exception:
+                self._cancel_teaching_roam()
+                raise
             return
         pos = self.to_document(event.position())
         previous_mouse = self.mouse_pos
@@ -8631,9 +8764,16 @@ class DrawingCanvas(QMainWindow):
     @measurement_drag
     def mouseReleaseEvent(self, event):
         if self.is_roaming:
-            self._pan_point = None
-            self.setCursor(Qt.CursorShape.OpenHandCursor)
-            event.accept()
+            if self._touch_synthesized(event) or event.button() != Qt.MouseButton.LeftButton:
+                return
+            token, self._teaching_roam_action = self._teaching_roam_action, None
+            try:
+                self._pan_point = None
+                self.setCursor(Qt.CursorShape.OpenHandCursor)
+                event.accept()
+                finish_roam_action(self, token)
+            finally:
+                cancel_roam_action(token)
             return
         if self._touch_synthesized(event):
             return
@@ -8673,7 +8813,7 @@ class DrawingCanvas(QMainWindow):
                     if events is not None:
                         events.discard_operation(trace)
                 return
-            if self.draw_state == "SELECT" and self.selection_rect:
+            if self.draw_state == "SELECT" and self.selection_rect is not None:
                 self.select_objects_in_rect(self.selection_rect)
                 self.selection_rect = None
                 self.selection_start = None
@@ -8716,7 +8856,7 @@ class DrawingCanvas(QMainWindow):
             self._finish_teaching_edit(edit, content_changed, action, selection_method)
             self._finish_teaching_recognition(recognition)
         finally:
-            self._discard_teaching_operation(recognition[0])
+            self._discard_teaching_recognition(recognition)
             if edit is not None:
                 self._discard_teaching_operation(edit[0])
 
@@ -8741,12 +8881,16 @@ class DrawingCanvas(QMainWindow):
                 return True
             return False        # 不接受 → Qt 用主接触点合成鼠标事件，单指路径照旧
         if kind == QEvent.Type.TouchCancel:
+            self._cancel_teaching_roam()
             self._board_gesture.clear()
             self._pan_point = None
             if self.is_roaming:
                 ev.accept()
                 return True
             self._discard_teaching_edit()
+            self._discard_teaching_operation(self._teaching_stroke_operation)
+            self._teaching_stroke_operation = None
+            self._discard_teaching_recognition(self._take_teaching_recognition())
             if self._pointer_slots:
                 self._cancel_all_pointers()
                 ev.accept()
@@ -8767,15 +8911,34 @@ class DrawingCanvas(QMainWindow):
             self._touch_owns_input = True
             self._pan_point = None
             points = {point.id(): point.position() for point in ev.points()}
-            changed = self._board_gesture.update(self.board_view, points)
-            active = {point.id(): point.position() for point in ev.points()
-                      if point.state() != QEventPoint.State.Released}
-            if active.keys() != points.keys():
-                self._board_gesture.update(self.board_view, active)
-            if ev.type() == QEvent.Type.TouchEnd:
-                self._board_gesture.clear()
-            if changed:
-                self.view_changed()
+            tracked = [points[key] for key in sorted(points)[:2]]
+            anchor = (sum(tracked, QPointF()) / len(tracked)) if tracked else self._teaching_roam_anchor
+            if ev.type() == QEvent.Type.TouchBegin:
+                self._cancel_teaching_roam()
+                self._teaching_roam_action = begin_roam_action(self, "gesture", "touch", anchor)
+            self._teaching_roam_anchor = anchor
+            try:
+                changed = self._board_gesture.update(self.board_view, points)
+                observe_roam_touch(self, self._teaching_roam_action, points)
+                active = {point.id(): point.position() for point in ev.points()
+                          if point.state() != QEventPoint.State.Released}
+                if active.keys() != points.keys():
+                    self._board_gesture.update(self.board_view, active)
+                    observe_roam_touch(self, self._teaching_roam_action, active)
+                if ev.type() == QEvent.Type.TouchEnd:
+                    self._board_gesture.clear()
+                if changed:
+                    self.view_changed()
+                if ev.type() == QEvent.Type.TouchEnd:
+                    token, self._teaching_roam_action = self._teaching_roam_action, None
+                    self._teaching_roam_anchor = None
+                    try:
+                        finish_roam_action(self, token, anchor)
+                    finally:
+                        cancel_roam_action(token)
+            except Exception:
+                self._cancel_teaching_roam()
+                raise
             return True
         if ev.type() == QEvent.Type.TouchBegin and ev.points():
             self.consume_page_pen_return()
@@ -8962,7 +9125,7 @@ class DrawingCanvas(QMainWindow):
             self._finish_teaching_recognition(recognition)
         finally:
             if recognition is not None:
-                self._discard_teaching_operation(recognition[0])
+                self._discard_teaching_recognition(recognition)
 
     def _drop_pointer(self, key):
         timer = self._pointer_timers.pop(key, None)
@@ -8979,6 +9142,9 @@ class DrawingCanvas(QMainWindow):
         """
         for key in list(self._pointer_slots):
             with self._pointer_scope(key):
+                self._discard_teaching_operation(self._teaching_stroke_operation)
+                self._teaching_stroke_operation = None
+                self._discard_teaching_recognition(self._take_teaching_recognition())
                 self._cancel_smart_recognition(drop_pending=True)
                 self._finish_pointer_stroke()
             self._drop_pointer(key)
@@ -8986,11 +9152,16 @@ class DrawingCanvas(QMainWindow):
 
     def wheelEvent(self, event):
         if self.is_roaming:
-            delta = event.angleDelta().y() or event.pixelDelta().y()
-            if delta:
-                self.board_view.zoom_at(event.position(), self.board_view.zoom * 1.2 ** (delta / 120.0))
-                self.view_changed()
-            event.accept()
+            token = begin_roam_action(self, "zoom", "wheel", event.position())
+            try:
+                delta = event.angleDelta().y() or event.pixelDelta().y()
+                if delta:
+                    self.board_view.zoom_at(event.position(), self.board_view.zoom * 1.2 ** (delta / 120.0))
+                    self.view_changed()
+                event.accept()
+                finish_roam_action(self, token, event.position())
+            finally:
+                cancel_roam_action(token)
             return
         if self.is_drawing_mode and self.draw_state == "MAGNIFIER":
             self.step_magnifier_zoom(1 if event.angleDelta().y() > 0 else -1)
@@ -9543,6 +9714,9 @@ class ControlPanel(QWidget):
         self._update_worker = None
         self._update_download_worker = None
         self._pending_update_release = None
+        self._release_notes = NotesController(
+            os.path.join(DATA_DIR, "update-history.json"), fetch_release_notes,
+            self._release_notes_allowed, self)
         result_path = os.path.join(DATA_DIR, "update-result.json")
         try:
             with open(result_path, encoding="utf-8-sig") as result_file:
@@ -9662,6 +9836,19 @@ class ControlPanel(QWidget):
         self.thumbnail_panel.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
         self.thumbnail_panel.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         thumb_layout = QVBoxLayout(self.thumbnail_panel)
+        thumb_layout.setContentsMargins(16, 12, 16, 12)
+        thumb_header = QHBoxLayout()
+        thumb_title = QLabel(tr("page_list"))
+        thumb_title.setObjectName("SettingsSection")
+        thumb_header.addWidget(thumb_title)
+        thumb_header.addStretch()
+        self.btn_close_thumbnails = QToolButton()
+        self.btn_close_thumbnails.setText("×")
+        self.btn_close_thumbnails.setToolTip(tr("close_panel"))
+        self.btn_close_thumbnails.setMinimumSize(36, 36)
+        self.btn_close_thumbnails.clicked.connect(self.close_thumbnail_panel)
+        thumb_header.addWidget(self.btn_close_thumbnails)
+        thumb_layout.addLayout(thumb_header)
         self._thumbnail_cache = {}
         self._thumbnail_order = ()
         self.thumbnail_list = PageListWidget(reorder_scope=lambda: teaching_document_action(self, ("page.reordered",))); self.thumbnail_list.setViewMode(QListWidget.ViewMode.IconMode)
@@ -9901,6 +10088,10 @@ class ControlPanel(QWidget):
             QLabel#SettingsSection {{ color: {t["accent"]}; font-size: 12px; font-weight: bold; padding: 6px 2px 2px 2px; }}
             QLabel#SettingsHint {{ color: {t["hint"]}; font-size: 10px; padding: 0px 2px 4px 2px; }}
             QWidget#TeachingSurface {{ background-color: {t["panel"]}; color: {t["text"]}; }}
+            QDialog#UpdateHistory {{ background-color: {t["panel"]}; color: {t["text"]}; }}
+            QTextBrowser#ReleaseNotesBrowser {{ background-color: {t["panel"]}; color: {t["text"]}; border: 1px solid {border}; padding: 6px; }}
+            QToolButton#ReleaseNotesToggle {{ background-color: {t["button"]}; color: {t["text"]}; padding: 6px; border-radius: {rad["button"]}px; }}
+            QToolButton#ReleaseNotesToggle:hover {{ background-color: {t["button_hover"]}; }}
             QWidget#TeachingSurface QLabel {{ color: {t["text"]}; font-size: 14px; padding: 0px; }}
             QWidget#TeachingSurface QLabel#TeachingTitle {{ font-size: 16px; font-weight: bold; }}
             QWidget#TeachingSurface QScrollArea,
@@ -10164,6 +10355,8 @@ class ControlPanel(QWidget):
             # 收起工具栏，但保留LOGO
             self.show_only_sub(None)
             self.close_thumbnail_panel()
+            if self.settings_panel is not None:
+                self.settings_panel.hide()
             self.toolbar_window.hide()
             if hasattr(self, "lifecycle"):
                 self.lifecycle.state = LifecycleState.COLLAPSED
@@ -10471,12 +10664,12 @@ class ControlPanel(QWidget):
             self._position_thumbnail_panel()
 
     def _position_thumbnail_panel(self):
-        """Compact page list aligned with the rail, never with the main toolbar."""
+        """Fit a page overview above the rail, leaving room for teaching controls."""
         area = toolbar_windows._available_rect(self.page_rail)
         rail = self.page_rail.geometry()
         gap = 8
-        width = min(320, area.width())
-        height = min(300, max(1, rail.top() - area.top() - gap))
+        width = min(1000, max(320, int(area.width() * 0.70)), area.width() - 2 * gap)
+        height = min(680, max(1, rail.top() - area.top() - 2 * gap))
         self.thumbnail_panel.setMinimumSize(0, 0)
         self.thumbnail_panel.resize(width, height)
         x = max(area.left(), min(rail.right() - width + 1, area.right() - width + 1))
@@ -10748,6 +10941,7 @@ class ControlPanel(QWidget):
                     valid = actual == expected and self.canvas._page_id == active_id
                     events.emit_result(operation, "page.reordered", "success" if valid else "failed", {
                         "page_id": page_id, "source": source, "destination": destination,
+                        "next_page_id": actual[destination + 1] if destination + 1 < len(actual) else None,
                         "current_page_id": self.canvas._page_id, "page": self.canvas.current_page + 1,
                         "pages": len(self.canvas.pages)})
 
@@ -10929,6 +11123,7 @@ class ControlPanel(QWidget):
 
     def set_infinite_whiteboard(self, enabled):
         self.canvas.finish_active_ink()
+        self.canvas._cancel_teaching_roam()
         self.canvas._board_gesture.clear()
         self.canvas._pan_point = None
         self.infinite_whiteboard = bool(enabled)
@@ -12038,7 +12233,7 @@ class ControlPanel(QWidget):
                     pen_styles=PEN_STYLES, style_options=PEN_STYLE_OPTIONS) == self.pen_defaults[style])
             results = (
                 (mode_operation, "mode.changed", "success" if drawing != before_drawing else "cancelled",
-                 {"drawing_mode": drawing}),
+                 self.canvas._teaching_mode_details()),
                 (tool_operation, "tool.changed", "success" if changed else "cancelled",
                  {"tool": tool, "drawing_mode": drawing}),
                 (style_operation, "pen.style_changed", "success" if drawing and
@@ -12692,6 +12887,7 @@ class ControlPanel(QWidget):
         if not cv:
             return
         cv.cancel_page_pen_return()
+        cv._cancel_teaching_roam()
         cv._pan_point = None
         cv._board_gesture.clear()
         if cv.is_drawing_mode == enabled:
@@ -12740,7 +12936,7 @@ class ControlPanel(QWidget):
             # 不会再走 _laser_fade.start() 那条路径，激光笔的定时重绘就被永久跳过了）。
             cv.laser_trail = []
             self._laser_fade.start()
-        cv._emit_teaching_result(operation, "mode.changed", {"drawing_mode": cv.is_drawing_mode})
+        cv._emit_teaching_result(operation, "mode.changed", cv._teaching_mode_details())
 
     def toggle_mode(self):
         self.set_drawing_mode(not self.canvas.is_drawing_mode)
@@ -13270,6 +13466,11 @@ class ControlPanel(QWidget):
             label.setWordWrap(True)
             form.addWidget(label)
 
+        self.btn_feedback = QPushButton(tr("feedback"))
+        self.btn_feedback.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl("https://forms.cloud.microsoft/r/5i4Sj4wuH2")))
+        form.addWidget(self.btn_feedback)
+
         self.release_notice = ReleaseNoticeCard(
             tr("release_notice_title"), tr("release_notice_message"),
             theme_name=self.theme_name, close_text=tr("close"))
@@ -13396,6 +13597,9 @@ class ControlPanel(QWidget):
         self.btn_check_update = QPushButton(tr("check_update_now"))
         self.btn_check_update.clicked.connect(self.check_for_updates)
         form.addWidget(self.btn_check_update)
+        self.btn_update_history = QPushButton(tr("update_history"))
+        self.btn_update_history.clicked.connect(self.open_update_history)
+        form.addWidget(self.btn_update_history)
         self.btn_download_update = QPushButton(tr("update_download"))
         self.btn_download_update.clicked.connect(self.download_pending_update)
         self.btn_download_update.setEnabled(bool(self._pending_update_release))
@@ -13411,7 +13615,11 @@ class ControlPanel(QWidget):
         self.update_status_label = QLabel(getattr(self, "_update_status_text", ""))
         self.update_status_label.setObjectName("SettingsHint")
         self.update_status_label.setWordWrap(True)
+        self.update_status_label.setTextFormat(Qt.TextFormat.PlainText)
         form.addWidget(self.update_status_label)
+        self.update_notes_section = ReleaseNotesSection(self._release_notes)
+        form.addWidget(self.update_notes_section)
+        self._sync_release_notes()
         if getattr(self, "_update_download_active", False):
             self._on_update_progress(*getattr(self, "_update_download_progress", (0, 0)))
         hint(tr("update_hint"))
@@ -13555,11 +13763,50 @@ class ControlPanel(QWidget):
             self._set_update_status(tr("autostart_saved") if want else "")
         track_event("autostart_toggled", enabled=want, ok=ok)
 
+    def _release_notes_allowed(self):
+        return (self.runtime_context.updates and self.update_check_enabled
+                and not getattr(self, "_updates_stopping", False)
+                and not update_work_is_blocked(self))
+
+    def begin_update_history_session(self):
+        """Record only a running portable app, never a check, download or smoke run."""
+        if (not self.runtime_context.updates or not getattr(sys, "frozen", False)
+                or getattr(self, "_update_history_started", False)):
+            return
+        self._update_history_started = True
+        self._release_notes.history.record_running(APP_VERSION)
+        if self._release_notes.history.read_error or self._release_notes.history.write_error:
+            LOGGER.warning("Update history could not be persisted")
+
+    def open_update_history(self):
+        if not self.runtime_context.updates or update_work_is_blocked(self):
+            return
+        dialog = UpdateHistoryDialog(self._release_notes, APP_VERSION, self)
+        dialog.setStyleSheet(self.styleSheet())
+        dialog.setPalette(self.palette())
+        self.pause_callbacks()
+        try:
+            dialog.exec()
+        finally:
+            dialog.deleteLater()
+            self.resume_callbacks()
+
+    def _sync_release_notes(self):
+        section = getattr(self, "update_notes_section", None)
+        if section is not None:
+            release = self._pending_update_release
+            section.set_tag(release.get("tag") if isinstance(release, dict) else release)
+
     def set_update_channel(self, index):
         channel = self.update_channel_combo.itemData(index)
-        if channel not in ("stable", "preview"):
+        if channel not in ("stable", "preview") or channel == self.update_channel:
             return
         self.update_channel = channel
+        self._pending_update_release = None
+        if hasattr(self, "btn_download_update"):
+            self.btn_download_update.setEnabled(False)
+        self._sync_release_notes()
+        self._set_update_status("")
         self.save_settings()
         track_event("update_channel_changed", channel=channel)
 
@@ -13614,6 +13861,13 @@ class ControlPanel(QWidget):
             self._teaching_deferred_update_result = (release, error)
             return
         self._set_update_check_enabled(bool(self.update_check_enabled))
+        sender = self.sender()
+        if isinstance(sender, UpdateCheckWorker) and sender.channel != self.update_channel:
+            return
+        self._pending_update_release = None
+        if hasattr(self, "btn_download_update"):
+            self.btn_download_update.setEnabled(False)
+        self._sync_release_notes()
         if error == "rate_limited":
             self._set_update_status(tr("update_rate_limited"))
             track_event("update_check_rate_limited")
@@ -13630,6 +13884,7 @@ class ControlPanel(QWidget):
                 self._set_update_status(trf("update_failed", detail="bad_version"))
             elif remote > local:
                 self._pending_update_release = release
+                self._sync_release_notes()
                 self._set_update_status(trf("update_available", value=release))
                 if hasattr(self, "btn_download_update"):
                     self.btn_download_update.setEnabled(True)
@@ -13656,6 +13911,9 @@ class ControlPanel(QWidget):
             return
         if remote > local:
             self._pending_update_release = release
+            body, notes_error = release_body(release)
+            self._release_notes.prime(tag, body, release.get("notes_error") or notes_error)
+            self._sync_release_notes()
             self._set_update_status(trf("update_available", value=str(tag)))
             if hasattr(self, "btn_download_update"):
                 self.btn_download_update.setEnabled(True)
@@ -13669,6 +13927,9 @@ class ControlPanel(QWidget):
     def stop_update_worker(self):
         """Stop cooperatively; never destroy a QThread whose run() has not returned."""
         self._updates_stopping = True
+        notes = getattr(self, "_release_notes", None)
+        if notes is not None:
+            notes.stop()
         for attr in ("_update_worker", "_update_download_worker"):
             worker = getattr(self, attr, None)
             if worker is None:
@@ -15089,8 +15350,12 @@ class ControlPanel(QWidget):
         if path is None:
             path = self.project_path
         if not path:
-            default = str(self.runtime_context.paths.data_dir) if self.runtime_context.paths.practice else ""
-            path, _ = QFileDialog.getSaveFileName(self, tr("save_project"), default, tr("project_filter_save"))
+            practice = self.runtime_context.paths.practice
+            default = str(self.runtime_context.paths.data_dir / "1.msd") if practice else ""
+            # The split control panel is a 1x1 shell; attach the private chooser
+            # to the visible canvas so it remains above its topmost owner.
+            owner = self.canvas if practice else self
+            path, _ = QFileDialog.getSaveFileName(owner, tr("save_project"), default, tr("project_filter_save"))
         if not path:
             if events is not None:
                 events.emit_result(operation, "project.saved", "cancelled", {})
@@ -15127,6 +15392,16 @@ class ControlPanel(QWidget):
     def save_project_from_file_panel(self):
         with teaching_document_action(self, ("project.saved",)):
             self.show_only_sub(None)
+            presenter = getattr(self, "teaching_presenter", None)
+            if self.runtime_context.paths.practice and presenter is not None and presenter.engine.phase == "running":
+                step = presenter.engine.current_step
+                if step is not None and step.wait is not None:
+                    clause = step.wait.clauses[presenter.engine.sequence_index]
+                    filename = clause.equals.get("path") if clause.event == "project.saved" else None
+                    if filename and os.path.basename(self.project_path or "") != filename:
+                        # A previous wrong-name save must not silently reuse that
+                        # path forever while the lesson still waits for this name.
+                        return self.save_project("")
             return self.save_project()
 
     def save_project_as_from_file_panel(self):
@@ -15166,8 +15441,11 @@ class ControlPanel(QWidget):
             return False
         with teaching_document_action(self, ("project.saved", "unsaved.decision", "project.opened")) as events:
             operation = events.operation("project.opened") if events is not None else None
-            default = str(self.runtime_context.paths.data_dir) if self.runtime_context.paths.practice else ""
-            path, _ = QFileDialog.getOpenFileName(self, tr("open_project"), default, tr("project_filter_open"))
+            practice = self.runtime_context.paths.practice
+            default = (getattr(self, "_teaching_last_saved_project", None)
+                       or str(self.runtime_context.paths.data_dir)) if practice else ""
+            owner = self.canvas if practice else self
+            path, _ = QFileDialog.getOpenFileName(owner, tr("open_project"), default, tr("project_filter_open"))
             if not path:
                 if events is not None:
                     events.emit_result(operation, "project.opened", "cancelled", {})
@@ -15874,6 +16152,25 @@ class ControlPanel(QWidget):
                 else:
                     y = min(ky + kh + 8, screen.bottom() - height)
         x, y = clamp_rect(x, y, width, height, bounds)
+        presenter = getattr(self, "teaching_presenter", None)
+        text_region = getattr(self, "teaching_text_region", None)
+        if presenter is not None and callable(text_region):
+            region = text_region()
+            if not region.isEmpty():
+                from teaching.widgets import controller_geometry
+                obstacles = [region]
+                for name in ("toolbar_window", "logo_window", "menu_panel", "select_panel", "page_rail"):
+                    window = getattr(self, name, None)
+                    if window is not None and window.isVisible():
+                        obstacles.append(window.frameGeometry())
+                if keyboard:
+                    obstacles.append(QRect(*keyboard))
+                if any(QRect(x, y, width, height).intersects(rect) for rect in obstacles):
+                    # The controller yields to this panel, never the reverse;
+                    # otherwise two independently moving windows can oscillate.
+                    preferred = QRect(x - 7, y, 1, height)
+                    placed = controller_geometry(preferred, panel.size(), screen, gap=6, obstacles=obstacles)
+                    x, y = placed.x(), placed.y()
         panel.move(x, y)
         # 顺手把整条浮窗链排正。只 force_topmost 不行：对已在置顶层的窗口它不改变兄弟
         # 高低，主面板压上来时拉不回去。
@@ -16832,6 +17129,7 @@ if __name__ == "__main__":
     # 托盘「重启软件」传来的恢复文件：接回它就不再问自动保存（那份更旧）。
     # Core startup is ready even if the user pauses at the recovery dialog.
     QTimer.singleShot(0, acknowledge_update_startup)
+    QTimer.singleShot(0, pnl.begin_update_history_session)
     restart_file = None
     argv = sys.argv[1:]
     if "--restore" in argv:

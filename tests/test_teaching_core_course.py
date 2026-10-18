@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+from dataclasses import replace
 import json
 from pathlib import Path
 from string import Formatter
@@ -10,8 +11,9 @@ from unittest.mock import Mock
 
 import pytest
 from PyQt6 import sip
-from PyQt6.QtCore import QTimer
+from PyQt6.QtCore import QPoint, QTimer, Qt
 from PyQt6.QtGui import QColor, QScreen
+from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication, QDialog
 
 from persistence import normalize_project_data, read_json_maybe_gz, PROJECT_KIND, AUTOSAVE_KIND
@@ -140,26 +142,100 @@ def completed(host, progress, chapter):
     assert host.presenter._dialog_depth == 0
 
 
-def test_core_interface_uses_actual_marker_tool_ink_and_two_mode_changes(core_host):
-    host, progress = core_host
-    panel = host.panel
+def assert_core_interface_button_round_trip(host, progress, monkeypatch):
+    panel, presenter = host.panel, host.presenter
+    canvas, engine = panel.canvas, presenter.engine
+    app = QApplication.instance()
+    assert app.platformName() == 'offscreen'
+    assert host.context.paths.practice
+
+    def click(button):
+        assert button.isVisible() and button.isEnabled()
+        QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+        drain(app)
+
     step(host, 'identity')
-    assert host.presenter.controller.practice_label.isVisible()
-    assert host.presenter.controller.practice_label.text() == host.module.tr('teaching_practice_badge')
-    assert not panel.canvas.is_drawing_mode
-    host.presenter.controller.next_button.click()
+    assert presenter.controller.practice_label.isVisible()
+    assert presenter.controller.practice_label.text() == host.module.tr('teaching_practice_badge')
+    assert not canvas.is_drawing_mode
+    click(presenter.controller.next_button)
     step(host, 'pen')
-    host.presenter.controller.next_button.click()  # An operation cannot be bypassed.
-    step(host, 'pen')
-    panel.handle_pen_click()
+    QTest.mouseClick(presenter.controller.next_button, Qt.MouseButton.LeftButton)
+    step(host, 'pen')  # An operation cannot be bypassed.
+    click(panel.icon_buttons['pen'])
     step(host, 'stroke')
-    draw_ink(panel.canvas)
+    QTest.mousePress(canvas, Qt.MouseButton.LeftButton, pos=QPoint(50, 70))
+    QTest.mouseMove(canvas, QPoint(160, 70))
+    QTest.mouseRelease(canvas, Qt.MouseButton.LeftButton, pos=QPoint(200, 70))
+    drain(app)
     step(host, 'mode')
-    panel.toggle_mode()
-    step(host, 'mode')
-    assert host.presenter.engine.sequence_index == 1 and not panel.canvas.is_drawing_mode
-    panel.toggle_mode()
+    assert canvas.all_segments and canvas.is_drawing_mode
+    assert presenter.active_target_id == 'toolbar.mode' and engine.sequence_index == 0
+
+    modes = []
+    emit_result = presenter.events.emit_result
+
+    def record_mode(context, name, outcome, details):
+        # Observe real adapter results without issuing or fabricating any event.
+        if context is not None and name == 'mode.changed' and outcome == 'success':
+            modes.append((details['drawing_mode'], canvas.is_drawing_mode))
+        return emit_result(context, name, outcome, details)
+
+    monkeypatch.setattr(presenter.events, 'emit_result', record_mode)
+    blocked_clicks = []
+    panel.icon_buttons['settings'].clicked.connect(lambda: blocked_clicks.append('settings'))
+    panel.icon_buttons['pen'].clicked.connect(lambda: blocked_clicks.append('pen'))
+    click(panel.icon_buttons['pen'])  # Return is not allowed before entering mouse mode.
+    assert canvas.is_drawing_mode and engine.sequence_index == 0 and not modes
+
+    for stage in (0, 1):
+        assert presenter.barrier.installed
+        click(panel.icon_buttons['settings'])  # Visible even in the compact mouse toolbar.
+        QTest.mouseClick(presenter.controller.next_button, Qt.MouseButton.LeftButton)
+        step(host, 'mode')
+        assert engine.sequence_index == stage and blocked_clicks == []
+        assert not any(record[1] == 'completed' for record in progress)
+        if stage == 0:
+            click(panel.icon_buttons['mode'])
+            step(host, 'mode')
+            assert engine.sequence_index == 1 and not canvas.is_drawing_mode
+            assert canvas.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            assert modes == [(False, False)]
+
+    return_target = presenter.active_target_id
+    return_highlight = presenter.highlight.geometry()
+    pen_rect = host.registry.global_rect('toolbar.pen')
+    click(panel.icon_buttons['pen'])
+    assert canvas.is_drawing_mode, 'Annotate input must return from mouse mode'
+    assert not canvas.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+    assert modes == [(False, False), (True, True)] and engine.sequence_index == 2
+    assert return_target == 'toolbar.pen' and return_highlight == pen_rect
+    assert blocked_clicks == ['pen']
     completed(host, progress, 'interface')
+    assert not presenter.barrier.installed
+
+
+def test_core_interface_uses_actual_marker_tool_ink_and_two_mode_changes(core_host, monkeypatch):
+    assert_core_interface_button_round_trip(*core_host, monkeypatch)
+
+
+def test_core_interface_button_regression_rejects_old_mode_allowlist(core_host, monkeypatch):
+    host, progress = core_host
+    chapter = host.catalog.chapter_by_id('c01.interface')
+    # Reintroduce only the old course-data defect in memory; never roll back files
+    # or bypass the real presenter, InputBarrier, buttons, or action adapters.
+    old_chapter = replace(chapter, steps=tuple(
+        replace(item, allowed_targets=('toolbar.mode', 'toolbar.mode'))
+        if item.id == 'mode' else item for item in chapter.steps))
+    monkeypatch.setattr(host.presenter.engine, '_chapter', old_chapter)
+    monkeypatch.setattr(host.presenter, '_chapter', old_chapter)
+    with pytest.raises(AssertionError, match='Annotate input must return from mouse mode'):
+        assert_core_interface_button_round_trip(host, progress, monkeypatch)
+    step(host, 'mode')
+    assert host.presenter.engine.sequence_index == 1
+    assert host.presenter.active_target_id == 'toolbar.mode'
+    assert host.presenter.barrier.installed and not host.panel.canvas.is_drawing_mode
+    assert not any(record[1] == 'completed' for record in progress)
 
 
 @pytest.mark.parametrize('core_host', ['c01.ink'], indirect=True)
@@ -232,7 +308,7 @@ def test_core_pages_starts_outside_whiteboard_and_keeps_actual_page_sequence(cor
 
 def save_and_reopen(host, monkeypatch):
     panel = host.panel
-    path = host.request.paths.data_dir / 'practice.msd'
+    path = host.request.paths.data_dir / '1.msd'
     monkeypatch.setattr(host.module.QFileDialog, 'getSaveFileName', lambda *args: (str(path), ''))
     assert panel.save_project_from_file_panel() and path.is_file()
     step(host, 'open')
@@ -271,7 +347,7 @@ def test_core_file_cancel_and_another_fixture_cannot_credit_expected_save_or_reo
     wrong = host.request.paths.data_dir / 'wrong-name.msd'
     assert panel.save_project(str(wrong))
     step(host, 'save')
-    expected = host.request.paths.data_dir / 'practice.msd'
+    expected = host.request.paths.data_dir / '1.msd'
     assert panel.save_project(str(expected))
     step(host, 'open')
     other = host.request.paths.data_dir / 'fixtures/core.files.msd'

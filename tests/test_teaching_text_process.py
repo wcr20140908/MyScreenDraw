@@ -147,7 +147,7 @@ BRIDGE = BRIDGE.replace("        elif chapter.startswith('c06.'):", r'''        
         elif chapter.startswith('c06.'):''')
 
 
-def test_seven_courses_256_steps_share_one_process_and_restore_once(parent_coordinator, tmp_path, monkeypatch):
+def test_seven_courses_266_steps_share_one_process_and_restore_once(parent_coordinator, tmp_path, monkeypatch):
     panel, coordinator = parent_coordinator
     stderr = tmp_path/'text-child.stderr'
     original_stderr = QProcess.setStandardErrorFile
@@ -170,7 +170,7 @@ def test_seven_courses_256_steps_share_one_process_and_restore_once(parent_coord
           timeout=110000,diagnostic=diagnostic)
     proof = json.loads((coordinator.session.paths.data_dir/'formal-core-proof.json').read_text(encoding='utf-8'))
     assert proof['completed'] == list(CHAPTERS) and proof['all_complete']
-    assert len(proof['steps']) == 256 and proof['hold_elapsed'] >= 0.65 and proof['text_keys'] > 0
+    assert len(proof['steps']) == 266 and proof['hold_elapsed'] >= 0.65 and proof['text_keys'] > 0
     assert len(set(proof['pids'])) == 1 and proof['pids'][0] == process.processId()
     assert coordinator.session._token is token and coordinator.session.process is process
     assert coordinator.session.suspend.call_count == 1 and coordinator.session.restore.call_count == 0

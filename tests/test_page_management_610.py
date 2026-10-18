@@ -92,7 +92,7 @@ def test_drag_requests_actual_document_order(document):
     widget = panel.thumbnail_list
     widget.setCurrentRow(0)
     widget.doItemsLayout()
-    target = widget.visualItemRect(widget.item(1)).bottomLeft()
+    target = widget.visualItemRect(widget.item(1)).bottomRight()
     accepted = []
     event = SimpleNamespace(source=lambda: widget, position=lambda: QPointF(target),
                             setDropAction=lambda action: None, accept=lambda: accepted.append(True),
@@ -165,7 +165,7 @@ def test_drop_uses_dragged_identity_not_a_later_current_row(document):
     widget._drag_source_id = canvas.pages[0]["page_id"]
     widget.setCurrentRow(1)
     widget.doItemsLayout()
-    point = widget.visualItemRect(widget.item(1)).bottomLeft()
+    point = widget.visualItemRect(widget.item(1)).bottomRight()
     event = SimpleNamespace(source=lambda: widget, position=lambda: QPointF(point),
                             setDropAction=lambda _: None, accept=lambda: None, ignore=lambda: None)
     widget.dropEvent(event)

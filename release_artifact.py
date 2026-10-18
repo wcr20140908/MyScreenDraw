@@ -75,16 +75,63 @@ def _write_new(path, value):
         stream.write('\n')
 
 
+def teaching_inventory(root, *, required=False):
+    """Exact spec data paths and hashes, never a blanket image-extension exemption."""
+    root = Path(os.path.abspath(root))
+    tutorials = safe_path(root / 'assets' / 'tutorials', root)
+    if not tutorials.exists():
+        if required:
+            raise ValueError('teaching source assets/tutorials is required')
+        return {}
+    # Share the spec's link/type/path checks; this helper has no Qt/application imports.
+    from teaching.packaging import collect_teaching_datas
+    entries = collect_teaching_datas(root)
+    return {'_internal/' + (Path(destination) / Path(source).name).as_posix(): sha256(source)
+            for source, destination in entries}
+
+
+def _release_teaching(root, version):
+    required = tuple(int(part) for part in version.split('.')) >= (6, 2, 0)
+    if root is None:
+        if required:
+            raise ValueError('source root is required to verify teaching release resources')
+        return {}
+    return teaching_inventory(root, required=required)
+
+
+def _package_sources(root):
+    """Walk importable source packages only; do not inspect user or generated trees."""
+    pending = []
+    for child in root.iterdir():
+        if child.name.startswith('.') or child.name in {'data', 'exports', 'build', 'dist', 'tests', 'docs', '__pycache__'}:
+            continue
+        if child.name == 'teaching' or (child / '__init__.py').is_file():
+            pending.append(safe_path(child, root))
+    while pending:
+        directory = pending.pop()
+        for child in directory.iterdir():
+            if child.name.startswith('.') or child.name == '__pycache__':
+                continue
+            child = safe_path(child, root)
+            if child.is_dir():
+                pending.append(child)
+            elif child.suffix in {'.py', '.ps1', '.spec'}:
+                yield child
+
+
 def source_snapshot(root):
-    """Hash current onedir inputs and release gates, never runtime data or secrets.
+    """Hash onedir code (including packages), spec data and release gates, not user data.
 
     Tests and documentation may be finalized/committed after acceptance without
-    rebuilding identical binaries. Publishing still requires the entire tree clean.
+    rebuilding identical binaries. Publishing still requires the entire tree clean,
+    and every included input (including new teaching assets) tracked by that commit.
     """
     root = Path(os.path.abspath(root))
     paths = {root / name for name in SOURCE_REQUIRED}
     for pattern in ('*.py', '*.ps1', '*.spec'):
         paths.update(root.glob(pattern))
+    paths.update(_package_sources(root))
+    paths.update(root / name.removeprefix('_internal/') for name in teaching_inventory(root))
     hashes = {}
     for path in sorted(paths):
         path = safe_path(path, root)
@@ -135,7 +182,47 @@ def _check_pe(data):
         raise ValueError('invalid x64 executable PE') from exc
 
 
-def _members(archive):
+def _check_private_member(name, teaching, *, is_directory=False):
+    parts = name.split('/')
+    lowered = [part.casefold() for part in parts]
+    if (set(lowered) & {'data', 'exports', 'build', 'dist', 'autosave', 'screenshots', '__pycache__'}
+            or lowered[-1] in {'config.json', 'roster.json', 'events.jsonl', 'app.log'}
+            or (Path(lowered[-1]).suffix in {'.py', '.pyc', '.jsonl', '.tmp', '.log', '.png', '.jpg', '.jpeg'}
+                and name not in teaching)):
+        raise ValueError('private/source file in archive or package')
+    if not is_directory and '/'.join(lowered[:3]) == '_internal/assets/tutorials' and name not in teaching:
+        raise ValueError('unlisted teaching resource in archive or package')
+
+
+def check_package(directory, version, root):
+    """Stage hygiene before/after smoke, with complete source-bound teaching resources."""
+    artifact_name(version)
+    teaching = _release_teaching(root, version)
+    directory = Path(os.path.abspath(directory))
+    actual = {}
+    pending = [directory]
+    while pending:
+        parent = pending.pop()
+        for child in parent.iterdir():
+            child = safe_path(child, directory)
+            if child.is_dir():
+                pending.append(child)
+            elif child.is_file():
+                name = child.relative_to(directory).as_posix()
+                _check_private_member(name, teaching)
+                if name in teaching:
+                    actual[name] = sha256(child)
+            else:
+                raise ValueError('unsafe package member type')
+    if set(teaching) - set(actual):
+        raise ValueError('missing required teaching resource in package')
+    if actual != teaching:
+        raise ValueError('teaching content hash mismatch in package')
+    return {'teaching_files': len(teaching)}
+
+
+def _members(archive, teaching=None):
+    teaching = teaching or {}
     infos = archive.infolist()
     if len(infos) > 10000 or sum(i.file_size for i in infos) > 1024 ** 3:
         raise ValueError('archive size limit exceeded')
@@ -152,10 +239,7 @@ def _members(archive):
                        for p in parts)):
             raise ValueError('unsafe archive path')
         lowered = [p.casefold() for p in parts]
-        if (set(lowered) & {'data', 'exports', 'build', 'dist', 'autosave', 'screenshots', '__pycache__'}
-                or lowered[-1] in {'config.json', 'roster.json', 'events.jsonl', 'app.log'}
-                or Path(lowered[-1]).suffix in {'.py', '.pyc', '.jsonl', '.tmp', '.log', '.png', '.jpg', '.jpeg'}):
-            raise ValueError('private/source file in archive')
+        _check_private_member(name.rstrip('/'), teaching, is_directory=info.is_dir())
         mode = info.external_attr >> 16
         if (stat.S_IFMT(mode) not in (0, stat.S_IFREG, stat.S_IFDIR)
                 or bool(stat.S_ISDIR(mode)) and not info.is_dir() or info.flag_bits & 1):
@@ -172,16 +256,17 @@ def _members(archive):
     return members
 
 
-def validate_release_zip(path, version):
+def validate_release_zip(path, version, *, root=None):
     artifact_name(version)
+    teaching = _release_teaching(root, version)
     path = Path(path)
     if path.stat().st_size > 512 * 1024 ** 2:
         raise ValueError('archive size limit exceeded')
     before = sha256(path)
     try:
         with zipfile.ZipFile(path) as archive:
-            members = _members(archive)
-            required = list(REQUIRED_FILES)
+            members = _members(archive, teaching)
+            required = list(REQUIRED_FILES) + list(teaching)
             runtimes = [name for name in members if re.fullmatch(r'_internal/python3\d+\.dll', name)]
             if not runtimes:
                 raise ValueError('missing required Python runtime')
@@ -191,10 +276,14 @@ def validate_release_zip(path, version):
                 if not members[name].file_size:
                     raise ValueError(f'empty required file: {name}')
             # Read every entry to check its CRC, including non-required dependencies.
-            for info in members.values():
+            for name, info in members.items():
                 with archive.open(info) as stream:
-                    while stream.read(1024 * 1024):
-                        pass
+                    if name in teaching:
+                        if hashlib.file_digest(stream, 'sha256').hexdigest() != teaching[name]:
+                            raise ValueError(f'teaching content hash mismatch: {name}')
+                    else:
+                        while stream.read(1024 * 1024):
+                            pass
             if members['RELEASE-MANIFEST.json'].file_size > 65536:
                 raise ValueError('manifest too large')
             manifest = json.loads(archive.read('RELEASE-MANIFEST.json').decode('utf-8-sig'))
@@ -215,8 +304,8 @@ def validate_release_zip(path, version):
             'zip_sha256': before, 'exe_sha256': exe_hash}
 
 
-def check_extracted(path, directory, version):
-    result = validate_release_zip(path, version)
+def check_extracted(path, directory, version, *, root=None):
+    result = validate_release_zip(path, version, root=root)
     with zipfile.ZipFile(path) as archive:
         for info in archive.infolist():
             target = safe_path(Path(directory) / info.filename, directory)
@@ -241,7 +330,7 @@ def seal_candidate(path, version, root, snapshot, checksum, receipt, *, acceptan
     snapshot = safe_path(snapshot, Path(root) / 'build')
     receipt = safe_path(receipt, Path(root) / 'build')
     checksum = safe_path(checksum, root)
-    validated = validate_release_zip(path, version)
+    validated = validate_release_zip(path, version, root=root)
     current = source_snapshot(root)
     if _json(snapshot, 'source snapshot') != current:
         raise ValueError('source changed during build')
@@ -295,7 +384,7 @@ def verify_release(path, version, root, checksum, receipt, *, commit=None):
         raise ValueError('wrong release artifact name')
     if commit is not None:
         verify_repository(root, commit, version)
-    validated = validate_release_zip(path, version)
+    validated = validate_release_zip(path, version, root=root)
     try:
         text = checksum.read_text(encoding='ascii')
     except (OSError, UnicodeError) as exc:
@@ -317,12 +406,17 @@ def main():
     snapshot = sub.add_parser('snapshot')
     snapshot.add_argument('--root', required=True)
     snapshot.add_argument('--output', required=True)
+    package = sub.add_parser('check-package')
+    for name in ('root', 'directory', 'version'):
+        package.add_argument('--' + name, required=True)
     for command in ('validate', 'check-extracted', 'seal', 'verify'):
         child = sub.add_parser(command)
         child.add_argument('--zip', required=True)
         child.add_argument('--version', required=True)
         if command == 'check-extracted':
             child.add_argument('--directory', required=True)
+        if command in ('validate', 'check-extracted'):
+            child.add_argument('--root')  # Mandatory at runtime for teaching releases >= 6.2.0.
         if command in ('seal', 'verify'):
             for name in ('root', 'checksum', 'receipt'):
                 child.add_argument('--' + name, required=True)
@@ -336,10 +430,12 @@ def main():
         if args.command == 'snapshot':
             write_source_snapshot(args.root, args.output)
             result = {'source_snapshot': 'saved'}
+        elif args.command == 'check-package':
+            result = check_package(args.directory, args.version, args.root)
         elif args.command == 'validate':
-            result = validate_release_zip(args.zip, args.version)
+            result = validate_release_zip(args.zip, args.version, root=args.root)
         elif args.command == 'check-extracted':
-            result = check_extracted(args.zip, args.directory, args.version)
+            result = check_extracted(args.zip, args.directory, args.version, root=args.root)
         elif args.command == 'seal':
             result = seal_candidate(args.zip, args.version, args.root, args.snapshot,
                                     args.checksum, args.receipt,

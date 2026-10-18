@@ -35,6 +35,7 @@
     "pages.c05.rename_delete": "fixtures/pages.c05.rename_delete.msd",
     "pages.c05.copy_position": "fixtures/pages.c05.copy_position.msd",
     "pages.c05.reorder": "fixtures/pages.c05.reorder.msd",
+    "pages.c05.roam": "fixtures/pages.c05.roam.msd",
     "geometry.c06.plane": "fixtures/geometry.c06.plane.msd",
     "geometry.c06.solid": "fixtures/geometry.c06.solid.msd",
     "geometry.c06.points": "fixtures/geometry.c06.points.msd",

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Deterministic C05 page samples only inside this active private practice."""
 PAGES_FIXTURES = frozenset('pages.c05.'+chapter for chapter in
-                           ('board','add_switch','rename_delete','copy_position','reorder'))
+                           ('board','add_switch','rename_delete','copy_position','reorder','roam'))
 
 
 def prepare_pages_fixture(panel,fixture,paths):
@@ -11,6 +11,12 @@ def prepare_pages_fixture(panel,fixture,paths):
     if not paths.practice or context.paths!=paths or not context.ui_active:
         raise ValueError('page setup requires this active private practice')
     canvas=panel.canvas
+    if fixture == 'pages.c05.roam':
+        # Initial preparation only. Step reveals must never supply the answer.
+        panel.infinite_whiteboard=True
+        canvas.whiteboard_mode=True
+        from board_view import BoardView
+        canvas.board_view=BoardView()
     canvas._discard_teaching_laser_operations()
     canvas.laser_trail=[]
     canvas.selected_ids.clear()

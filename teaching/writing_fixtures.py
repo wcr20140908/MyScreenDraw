@@ -1,5 +1,10 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Trusted setup for the five offline writing/erasing chapters."""
+from math import ceil
+
+from PyQt6.QtCore import QLineF
+
+
 WRITING_FIXTURES = frozenset('writing.' + chapter for chapter in (
     'c02.styles', 'c02.color_width', 'c02.transient', 'c03.erase', 'c03.history_clear'))
 
@@ -19,6 +24,19 @@ def prepare_writing_fixture(panel, fixture, paths):
     panel.show_only_sub(None)
     canvas.smart_shapes_enabled = False
     if fixture == 'writing.c03.erase':
+        # The compact asset uses 116px segments; circular erasing removes hit
+        # segments, so sample them like real pen input instead of deleting a
+        # whole long edge. Keep both stroke IDs and the exact visible geometry.
+        segments = []
+        for segment in canvas.all_segments:
+            line = QLineF(segment['line'])
+            count = max(1, ceil(line.length() / 6))
+            for index in range(count):
+                segments.append(dict(segment, line=QLineF(
+                    line.pointAt(index / count), line.pointAt((index + 1) / count))))
+        canvas.all_segments = segments
+        canvas.mark_content_changed()
+        canvas.save_current_page()
         panel.set_eraser_type('STROKE')
         panel.e_slider.setValue(40)
     elif fixture == 'writing.c03.history_clear':

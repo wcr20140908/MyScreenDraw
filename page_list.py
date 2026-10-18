@@ -2,7 +2,7 @@
 """Page thumbnails with explicit model-order dragging, not free icon placement."""
 from contextlib import nullcontext
 
-from PyQt6.QtCore import Qt, QPoint, pyqtSignal
+from PyQt6.QtCore import QEvent, Qt, QPoint, QSize, pyqtSignal
 from PyQt6.QtGui import QDrag, QDragLeaveEvent
 from PyQt6.QtWidgets import QListWidget, QAbstractItemView
 
@@ -21,6 +21,49 @@ class PageListWidget(QListWidget):
         self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self._drag_source_id = None
         self._drag_source_row = None
+        self._fitting_thumbnails = False
+        self.setFlow(QListWidget.Flow.LeftToRight)
+        self.setWrapping(True)
+        self.setWordWrap(False)
+        self.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.model().rowsInserted.connect(self._fit_thumbnails)
+
+    def _fit_thumbnails(self):
+        if getattr(self, '_fitting_thumbnails', True):
+            return
+        self._fitting_thumbnails = True
+        try:
+            viewport = self.viewport().size()
+            caption = self.fontMetrics().height() + 12
+            columns = max(1, viewport.width() // 230)
+            cell_width = max(1, (viewport.width() - 1) // columns)
+            scale = min(1.0, max(1, cell_width - 24) / 260,
+                        max(1, viewport.height() - caption - 12) / 170)
+            icon = QSize(max(1, int(260 * scale)), max(1, int(170 * scale)))
+            grid = QSize(cell_width, icon.height() + caption + 12)
+            if self.iconSize() != icon:
+                self.setIconSize(icon)
+            if self.gridSize() != grid:
+                self.setGridSize(grid)
+            hint = QSize(max(1, grid.width() - 8), max(1, grid.height() - 8))
+            for index in range(self.count()):
+                item = self.item(index)
+                if item.sizeHint() != hint:
+                    item.setSizeHint(hint)
+        finally:
+            self._fitting_thumbnails = False
+
+    def viewportEvent(self, event):
+        result = super().viewportEvent(event)
+        if event.type() == QEvent.Type.Resize:
+            self._fit_thumbnails()
+        return result
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() in (QEvent.Type.FontChange, QEvent.Type.StyleChange):
+            self._fit_thumbnails()
 
     def startDrag(self, supported_actions):
         # Our drop handler updates the document and rebuilds its view. The
@@ -88,7 +131,11 @@ class PageListWidget(QListWidget):
             insertion = self.count()
         else:
             rect = self.visualItemRect(self.item(target))
-            insertion = target + (point.y() >= rect.center().y())
+            if self.viewport().width() >= 2 * self.gridSize().width():
+                after = point.x() >= rect.center().x()
+            else:
+                after = point.y() >= rect.center().y()
+            insertion = target + after
         destination = insertion - (source < insertion)
         destination = max(0, min(self.count() - 1, destination))
         if destination != source:

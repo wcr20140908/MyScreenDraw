@@ -91,8 +91,8 @@ def test_dwell_undo_redo_snap_and_two_real_constructions(writing_host,monkeypatc
 
 
 @pytest.mark.parametrize('writing_host',['c06.recognition_snap'],indirect=True)
-@pytest.mark.parametrize('endpoint',[(128,157),(240,150)])
-def test_wrong_anchor_or_exact_unsnapped_point_does_not_complete_formal_snap(writing_host,endpoint):
+@pytest.mark.parametrize('endpoint',[(128,157),(420,230)])
+def test_wrong_anchor_or_unsnapped_point_does_not_complete_formal_snap(writing_host,endpoint):
     host,progress=writing_host
     panel,canvas=host.panel,host.panel.canvas
     next_info(host);panel.btn_settings_smart.click();panel.pen_style_buttons['pen'].click()

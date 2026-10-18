@@ -105,7 +105,8 @@ def _sample_ellipse(center, rx: float, ry: float, rotation: float = 0.0, n: int 
     return pts
 
 
-def _emit_path(L, pts, height: int, *, closed: bool, color, width: float, dashed: bool = False):
+def _emit_path(L, pts, height: int, *, closed: bool, color, width: float, dashed: bool = False,
+               dash_pattern=(8, 6)):
     """把 Qt 坐标点序列画成一条 PostScript 折线/多边形。"""
     if len(pts) < 2:
         return
@@ -113,7 +114,7 @@ def _emit_path(L, pts, height: int, *, closed: bool, color, width: float, dashed
     L.append(f"{_fmt(width)} setlinewidth")
     L.append("1 setlinecap")
     L.append("1 setlinejoin")
-    L.append("[8 6] 0 setdash" if dashed else "[] 0 setdash")
+    L.append(f"[{' '.join(_fmt(length) for length in dash_pattern)}] 0 setdash" if dashed else "[] 0 setdash")
     x, y = pts[0]
     L.append(f"{_fmt(x)} {_fmt(height - y)} moveto")
     for px, py in pts[1:]:
@@ -208,27 +209,28 @@ def _emit_shape(L, item, height: int, board_style: str):
     rot = float(item.get("rotation", 0.0))
     cx, cy = x + w / 2.0, y + h / 2.0
     shape_type = item.get("type", "CUBE")
-    if shape_type == "CUBE":
-        offset = min(w, h) * 0.18
-        front = [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
-        back = [(x + offset, y - offset), (x + w + offset, y - offset),
-                (x + w + offset, y + h - offset), (x + offset, y + h - offset)]
-        _emit_path(L, [_rotate(p, cx, cy, rot) for p in front], height, closed=True, color=color, width=width)
-        _emit_path(L, [_rotate(p, cx, cy, rot) for p in back], height, closed=True, color=color, width=width)
-        for a, b in zip(front, back):
-            _emit_path(L, [_rotate(a, cx, cy, rot), _rotate(b, cx, cy, rot)], height,
-                       closed=False, color=color, width=width)
-    elif shape_type == "CUBOID":
-        offset = min(w, h) * 0.2
-        front = [(x, y + offset), (x + w - offset, y + offset),
-                 (x + w - offset, y + h), (x, y + h)]
-        back = [(x + offset, y), (x + w, y),
-                (x + w, y + h - offset), (x + offset, y + h - offset)]
-        _emit_path(L, [_rotate(p, cx, cy, rot) for p in front], height, closed=True, color=color, width=width)
-        _emit_path(L, [_rotate(p, cx, cy, rot) for p in back], height, closed=True, color=color, width=width)
-        for a, b in zip(front, back):
-            _emit_path(L, [_rotate(a, cx, cy, rot), _rotate(b, cx, cy, rot)], height,
-                       closed=False, color=color, width=width)
+    if shape_type in ("CUBE", "CUBOID"):
+        if shape_type == "CUBE":
+            offset = min(w, h) * 0.18
+            front = [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
+            back = [(px + offset, py - offset) for px, py in front]
+        else:
+            offset = min(w, h) * 0.2
+            front = [(x, y + offset), (x + w - offset, y + offset),
+                     (x + w - offset, y + h), (x, y + h)]
+            back = [(x + offset, y), (x + w, y),
+                    (x + w, y + h - offset), (x + offset, y + h - offset)]
+        vertices = [_rotate(point, cx, cy, rot) for point in front + back]
+        # TL/TR/BR/BL on each face: only the three edges meeting back BL are hidden.
+        # Emit each edge once; a dashed overlay on a solid rectangle has no gaps.
+        hidden = {(6, 7), (7, 4), (3, 7)}
+        for a, b in ((0, 1), (1, 2), (2, 3), (3, 0),
+                     (4, 5), (5, 6), (6, 7), (7, 4),
+                     (0, 4), (1, 5), (2, 6), (3, 7)):
+            # Qt DashLine scales its 4:2 pattern by pen width; round caps must not fill the gaps.
+            _emit_path(L, [vertices[a], vertices[b]], height, closed=False,
+                       color=color, width=width, dashed=(a, b) in hidden,
+                       dash_pattern=(4 * width, 2 * width))
     elif shape_type == "CYLINDER":
         hh = h * 0.2
         top = _sample_ellipse((x + w / 2.0, y + hh / 2.0), w / 2.0, hh / 2.0)

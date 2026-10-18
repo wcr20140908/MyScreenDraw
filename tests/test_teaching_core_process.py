@@ -123,11 +123,11 @@ def tick(self):
         elif name == 'next':
             panel.switch_whiteboard_page(1)
         elif name == 'save':
-            path = self.request.paths.data_dir / 'practice.msd'
+            path = self.request.paths.data_dir / '1.msd'
             self.module.QFileDialog.getSaveFileName = lambda *args: (str(path), '')
             assert panel.save_project_from_file_panel()
         elif name == 'open':
-            path = self.request.paths.data_dir / 'practice.msd'
+            path = self.request.paths.data_dir / '1.msd'
             self.module.QFileDialog.getOpenFileName = lambda *args: (str(path), '')
             assert panel.open_project_from_file_panel()
         elif name == 'preview':

@@ -66,12 +66,15 @@ BRIDGE = BRIDGE.replace(anchor, r'''        elif chapter.startswith('c09.'):
         elif chapter.startswith('c08.'):''')
 
 
-def test_nine_courses_297_steps_share_one_process_and_restore_once(parent_coordinator, tmp_path, monkeypatch):
+def test_nine_courses_307_steps_share_one_process_and_restore_once(parent_coordinator, tmp_path, monkeypatch):
     panel, coordinator = parent_coordinator
     stderr = tmp_path / 'media-child.stderr'
     original_stderr = QProcess.setStandardErrorFile
     monkeypatch.setattr(QProcess, 'setStandardErrorFile', lambda process, _: original_stderr(process, str(stderr)))
-    coordinator.session.command_factory = lambda request: (sys.executable, ['-B', '-c', BRIDGE, str(ROOT), str(ROOT),
+    # The expanded C05 chapter pushes this bridge past Windows' command-line limit.
+    bridge = tmp_path / 'media-child.py'
+    bridge.write_text(BRIDGE, encoding='utf-8')
+    coordinator.session.command_factory = lambda request: (sys.executable, ['-B', str(bridge), str(ROOT), str(ROOT),
         *practice_arguments(request.paths, request.channel, request.course_id, request.chapter_id)])
     coordinator.session.suspend = Mock(wraps=coordinator.session.suspend)
     coordinator.session.restore = Mock(wraps=coordinator.session.restore)
@@ -89,7 +92,7 @@ def test_nine_courses_297_steps_share_one_process_and_restore_once(parent_coordi
           timeout=140000, diagnostic=diagnostic)
     proof = json.loads((coordinator.session.paths.data_dir / 'formal-core-proof.json').read_text(encoding='utf-8'))
     assert proof['completed'] == list(CHAPTERS) and proof['all_complete']
-    assert len(proof['steps']) == 297 and proof['media_resized'] and proof['media_pages_isolated']
+    assert len(proof['steps']) == 307 and proof['media_resized'] and proof['media_pages_isolated']
     assert proof['media_notices'] == 2
     assert len(set(proof['pids'])) == 1 and proof['pids'][0] == process.processId()
     assert coordinator.session._token is token and coordinator.session.process is process
