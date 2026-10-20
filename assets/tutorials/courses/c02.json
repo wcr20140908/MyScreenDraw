@@ -1,0 +1,625 @@
+{
+  "schema_version": 1,
+  "id": "c02",
+  "revision": 1,
+  "compat_revision": 1,
+  "title_key": "teaching_c02_title",
+  "chapters": [
+    {
+      "id": "c02.styles",
+      "title_key": "teaching_c02_styles_title",
+      "fixture": "writing.c02.styles",
+      "steps": [
+        {
+          "id": "intro",
+          "title_key": "teaching_c02_styles_intro_title",
+          "body_key": "teaching_c02_styles_intro_body",
+          "kind": "information",
+          "next": "choose_pen"
+        },
+        {
+          "id": "choose_pen",
+          "title_key": "teaching_c02_styles_choose_pen_title",
+          "body_key": "teaching_c02_styles_choose_pen_body",
+          "target": "pen.style.pen",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "pen.style_changed",
+            "outcome": "success",
+            "equals": {
+              "style": "pen"
+            }
+          },
+          "next": "try_pen"
+        },
+        {
+          "id": "try_pen",
+          "title_key": "teaching_c02_styles_try_pen_title",
+          "body_key": "teaching_c02_styles_try_pen_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "ink.committed",
+            "outcome": "success",
+            "equals": {
+              "tool": "PEN",
+              "style": "pen"
+            },
+            "min_count": {
+              "segments": 1
+            }
+          },
+          "next": "choose_fountain"
+        },
+        {
+          "id": "choose_fountain",
+          "title_key": "teaching_c02_styles_choose_fountain_title",
+          "body_key": "teaching_c02_styles_choose_fountain_body",
+          "target": "pen.style.fountain",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "pen.style_changed",
+            "outcome": "success",
+            "equals": {
+              "style": "fountain"
+            }
+          },
+          "next": "try_fountain"
+        },
+        {
+          "id": "try_fountain",
+          "title_key": "teaching_c02_styles_try_fountain_title",
+          "body_key": "teaching_c02_styles_try_fountain_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "ink.committed",
+            "outcome": "success",
+            "equals": {
+              "tool": "PEN",
+              "style": "fountain"
+            },
+            "min_count": {
+              "segments": 1
+            }
+          },
+          "next": "choose_brush"
+        },
+        {
+          "id": "choose_brush",
+          "title_key": "teaching_c02_styles_choose_brush_title",
+          "body_key": "teaching_c02_styles_choose_brush_body",
+          "target": "pen.style.brush",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "pen.style_changed",
+            "outcome": "success",
+            "equals": {
+              "style": "brush"
+            }
+          },
+          "next": "try_brush"
+        },
+        {
+          "id": "try_brush",
+          "title_key": "teaching_c02_styles_try_brush_title",
+          "body_key": "teaching_c02_styles_try_brush_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "ink.committed",
+            "outcome": "success",
+            "equals": {
+              "tool": "PEN",
+              "style": "brush"
+            },
+            "min_count": {
+              "segments": 1
+            }
+          },
+          "next": "choose_calligraphy"
+        },
+        {
+          "id": "choose_calligraphy",
+          "title_key": "teaching_c02_styles_choose_calligraphy_title",
+          "body_key": "teaching_c02_styles_choose_calligraphy_body",
+          "target": "pen.style.calligraphy",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "pen.style_changed",
+            "outcome": "success",
+            "equals": {
+              "style": "calligraphy"
+            }
+          },
+          "next": "try_calligraphy"
+        },
+        {
+          "id": "try_calligraphy",
+          "title_key": "teaching_c02_styles_try_calligraphy_title",
+          "body_key": "teaching_c02_styles_try_calligraphy_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "ink.committed",
+            "outcome": "success",
+            "equals": {
+              "tool": "PEN",
+              "style": "calligraphy"
+            },
+            "min_count": {
+              "segments": 1
+            }
+          },
+          "next": "choose_pencil"
+        },
+        {
+          "id": "choose_pencil",
+          "title_key": "teaching_c02_styles_choose_pencil_title",
+          "body_key": "teaching_c02_styles_choose_pencil_body",
+          "target": "pen.style.pencil",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "pen.style_changed",
+            "outcome": "success",
+            "equals": {
+              "style": "pencil"
+            }
+          },
+          "next": "try_pencil"
+        },
+        {
+          "id": "try_pencil",
+          "title_key": "teaching_c02_styles_try_pencil_title",
+          "body_key": "teaching_c02_styles_try_pencil_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "ink.committed",
+            "outcome": "success",
+            "equals": {
+              "tool": "PEN",
+              "style": "pencil"
+            },
+            "min_count": {
+              "segments": 1
+            }
+          },
+          "next": "choose_crayon"
+        },
+        {
+          "id": "choose_crayon",
+          "title_key": "teaching_c02_styles_choose_crayon_title",
+          "body_key": "teaching_c02_styles_choose_crayon_body",
+          "target": "pen.style.crayon",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "pen.style_changed",
+            "outcome": "success",
+            "equals": {
+              "style": "crayon"
+            }
+          },
+          "next": "try_crayon"
+        },
+        {
+          "id": "try_crayon",
+          "title_key": "teaching_c02_styles_try_crayon_title",
+          "body_key": "teaching_c02_styles_try_crayon_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "ink.committed",
+            "outcome": "success",
+            "equals": {
+              "tool": "PEN",
+              "style": "crayon"
+            },
+            "min_count": {
+              "segments": 1
+            }
+          },
+          "next": "choose_chalk"
+        },
+        {
+          "id": "choose_chalk",
+          "title_key": "teaching_c02_styles_choose_chalk_title",
+          "body_key": "teaching_c02_styles_choose_chalk_body",
+          "target": "pen.style.chalk",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "pen.style_changed",
+            "outcome": "success",
+            "equals": {
+              "style": "chalk"
+            }
+          },
+          "next": "try_chalk"
+        },
+        {
+          "id": "try_chalk",
+          "title_key": "teaching_c02_styles_try_chalk_title",
+          "body_key": "teaching_c02_styles_try_chalk_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "ink.committed",
+            "outcome": "success",
+            "equals": {
+              "tool": "PEN",
+              "style": "chalk"
+            },
+            "min_count": {
+              "segments": 1
+            }
+          },
+          "next": "choose_neon"
+        },
+        {
+          "id": "choose_neon",
+          "title_key": "teaching_c02_styles_choose_neon_title",
+          "body_key": "teaching_c02_styles_choose_neon_body",
+          "target": "pen.style.neon",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "pen.style_changed",
+            "outcome": "success",
+            "equals": {
+              "style": "neon"
+            }
+          },
+          "next": "try_neon"
+        },
+        {
+          "id": "try_neon",
+          "title_key": "teaching_c02_styles_try_neon_title",
+          "body_key": "teaching_c02_styles_try_neon_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "ink.committed",
+            "outcome": "success",
+            "equals": {
+              "tool": "PEN",
+              "style": "neon"
+            },
+            "min_count": {
+              "segments": 1
+            }
+          },
+          "next": "choose_dashed"
+        },
+        {
+          "id": "choose_dashed",
+          "title_key": "teaching_c02_styles_choose_dashed_title",
+          "body_key": "teaching_c02_styles_choose_dashed_body",
+          "target": "pen.style.dashed",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "pen.style_changed",
+            "outcome": "success",
+            "equals": {
+              "style": "dashed"
+            }
+          },
+          "next": "try_dashed"
+        },
+        {
+          "id": "try_dashed",
+          "title_key": "teaching_c02_styles_try_dashed_title",
+          "body_key": "teaching_c02_styles_try_dashed_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "ink.committed",
+            "outcome": "success",
+            "equals": {
+              "tool": "PEN",
+              "style": "dashed"
+            },
+            "min_count": {
+              "segments": 1
+            }
+          },
+          "next": "choose_rainbow"
+        },
+        {
+          "id": "choose_rainbow",
+          "title_key": "teaching_c02_styles_choose_rainbow_title",
+          "body_key": "teaching_c02_styles_choose_rainbow_body",
+          "target": "pen.style.rainbow",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "pen.style_changed",
+            "outcome": "success",
+            "equals": {
+              "style": "rainbow"
+            }
+          },
+          "next": "try_rainbow"
+        },
+        {
+          "id": "try_rainbow",
+          "title_key": "teaching_c02_styles_try_rainbow_title",
+          "body_key": "teaching_c02_styles_try_rainbow_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "ink.committed",
+            "outcome": "success",
+            "equals": {
+              "tool": "PEN",
+              "style": "rainbow"
+            },
+            "min_count": {
+              "segments": 1
+            }
+          },
+          "next": "choose_arrow"
+        },
+        {
+          "id": "choose_arrow",
+          "title_key": "teaching_c02_styles_choose_arrow_title",
+          "body_key": "teaching_c02_styles_choose_arrow_body",
+          "target": "pen.style.arrow",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "pen.style_changed",
+            "outcome": "success",
+            "equals": {
+              "style": "arrow"
+            }
+          },
+          "next": "try_arrow"
+        },
+        {
+          "id": "try_arrow",
+          "title_key": "teaching_c02_styles_try_arrow_title",
+          "body_key": "teaching_c02_styles_try_arrow_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "ink.committed",
+            "outcome": "success",
+            "equals": {
+              "tool": "PEN",
+              "style": "arrow"
+            },
+            "min_count": {
+              "segments": 1
+            }
+          },
+          "next": "done"
+        },
+        {
+          "id": "done",
+          "title_key": "teaching_c02_styles_done_title",
+          "body_key": "teaching_c02_styles_done_body",
+          "kind": "information",
+          "next": "end_chapter"
+        }
+      ]
+    },
+    {
+      "id": "c02.color_width",
+      "title_key": "teaching_c02_color_width_title",
+      "fixture": "writing.c02.color_width",
+      "steps": [
+        {
+          "id": "intro",
+          "title_key": "teaching_c02_color_width_intro_title",
+          "body_key": "teaching_c02_color_width_intro_body",
+          "kind": "information",
+          "next": "color"
+        },
+        {
+          "id": "color",
+          "title_key": "teaching_c02_color_width_color_title",
+          "body_key": "teaching_c02_color_width_color_body",
+          "target": "pen.palette",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "pen.color_changed",
+            "outcome": "success"
+          },
+          "next": "width"
+        },
+        {
+          "id": "width",
+          "title_key": "teaching_c02_color_width_width_title",
+          "body_key": "teaching_c02_color_width_width_body",
+          "target": "pen.width",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "pen.width_changed",
+            "outcome": "success"
+          },
+          "next": "stroke"
+        },
+        {
+          "id": "stroke",
+          "title_key": "teaching_c02_color_width_stroke_title",
+          "body_key": "teaching_c02_color_width_stroke_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "ink.committed",
+            "outcome": "success",
+            "equals": {
+              "tool": "PEN"
+            },
+            "min_count": {
+              "segments": 1
+            }
+          },
+          "next": "preset_capture"
+        },
+        {
+          "id": "preset_capture",
+          "title_key": "teaching_c02_color_width_preset_capture_title",
+          "body_key": "teaching_c02_color_width_preset_capture_body",
+          "target": "pen.defaults.capture",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "pen.default_saved",
+            "outcome": "success",
+            "equals": {
+              "key": "pen"
+            }
+          },
+          "next": "preset_enable"
+        },
+        {
+          "id": "preset_enable",
+          "title_key": "teaching_c02_color_width_preset_enable_title",
+          "body_key": "teaching_c02_color_width_preset_enable_body",
+          "target": "pen.defaults",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "pen.defaults_changed",
+            "outcome": "success",
+            "equals": {
+              "enabled": true
+            }
+          },
+          "next": "preset_apply"
+        },
+        {
+          "id": "preset_apply",
+          "title_key": "teaching_c02_color_width_preset_apply_title",
+          "body_key": "teaching_c02_color_width_preset_apply_body",
+          "target": "pen.marker",
+          "input_policy": "target_only",
+          "allowed_targets": [
+            "pen.marker",
+            "pen.style.pen"
+          ],
+          "wait": {
+            "sequence": [
+              {
+                "event": "pen.style_changed",
+                "outcome": "success",
+                "equals": {
+                  "style": "marker"
+                }
+              },
+              {
+                "event": "pen.default_applied",
+                "outcome": "success",
+                "equals": {
+                  "key": "pen"
+                }
+              }
+            ]
+          },
+          "next": "done"
+        },
+        {
+          "id": "done",
+          "title_key": "teaching_c02_color_width_done_title",
+          "body_key": "teaching_c02_color_width_done_body",
+          "kind": "information",
+          "next": "end_chapter"
+        }
+      ]
+    },
+    {
+      "id": "c02.transient",
+      "title_key": "teaching_c02_transient_title",
+      "fixture": "writing.c02.transient",
+      "steps": [
+        {
+          "id": "intro",
+          "title_key": "teaching_c02_transient_intro_title",
+          "body_key": "teaching_c02_transient_intro_body",
+          "kind": "information",
+          "next": "marker"
+        },
+        {
+          "id": "marker",
+          "title_key": "teaching_c02_transient_marker_title",
+          "body_key": "teaching_c02_transient_marker_body",
+          "target": "pen.marker",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "pen.style_changed",
+            "outcome": "success",
+            "equals": {
+              "style": "marker"
+            }
+          },
+          "next": "marker_stroke"
+        },
+        {
+          "id": "marker_stroke",
+          "title_key": "teaching_c02_transient_marker_stroke_title",
+          "body_key": "teaching_c02_transient_marker_stroke_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "ink.committed",
+            "outcome": "success",
+            "equals": {
+              "tool": "MARKER"
+            },
+            "min_count": {
+              "segments": 1
+            }
+          },
+          "next": "marker_info"
+        },
+        {
+          "id": "marker_info",
+          "title_key": "teaching_c02_transient_marker_info_title",
+          "body_key": "teaching_c02_transient_marker_info_body",
+          "kind": "information",
+          "next": "laser"
+        },
+        {
+          "id": "laser",
+          "title_key": "teaching_c02_transient_laser_title",
+          "body_key": "teaching_c02_transient_laser_body",
+          "target": "pen.laser",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "pen.style_changed",
+            "outcome": "success",
+            "equals": {
+              "style": "laser"
+            }
+          },
+          "next": "laser_trace"
+        },
+        {
+          "id": "laser_trace",
+          "title_key": "teaching_c02_transient_laser_trace_title",
+          "body_key": "teaching_c02_transient_laser_trace_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "laser.trace",
+            "outcome": "success",
+            "min_count": {
+              "points": 2
+            }
+          },
+          "next": "fade_info"
+        },
+        {
+          "id": "fade_info",
+          "title_key": "teaching_c02_transient_fade_info_title",
+          "body_key": "teaching_c02_transient_fade_info_body",
+          "kind": "information",
+          "next": "done"
+        },
+        {
+          "id": "done",
+          "title_key": "teaching_c02_transient_done_title",
+          "body_key": "teaching_c02_transient_done_body",
+          "kind": "information",
+          "next": "end_chapter"
+        }
+      ]
+    }
+  ]
+}

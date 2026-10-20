@@ -1,0 +1,795 @@
+{
+  "schema_version": 1,
+  "id": "c06",
+  "revision": 1,
+  "compat_revision": 1,
+  "title_key": "teaching_c06_title",
+  "chapters": [
+    {
+      "id": "c06.plane",
+      "title_key": "teaching_c06_plane_title",
+      "fixture": "geometry.c06.plane",
+      "steps": [
+        {
+          "id": "intro",
+          "title_key": "teaching_c06_plane_intro_title",
+          "body_key": "teaching_c06_plane_intro_body",
+          "kind": "information",
+          "next": "choose_line"
+        },
+        {
+          "id": "choose_line",
+          "title_key": "teaching_c06_plane_choose_line_title",
+          "body_key": "teaching_c06_plane_choose_line_body",
+          "target": "shape.type.line",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "shape.type_changed",
+            "outcome": "success",
+            "equals": {
+              "type": "LINE"
+            }
+          },
+          "next": "draw_line"
+        },
+        {
+          "id": "draw_line",
+          "title_key": "teaching_c06_plane_draw_line_title",
+          "body_key": "teaching_c06_plane_draw_line_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "shape.committed",
+            "outcome": "success",
+            "equals": {
+              "type": "LINE",
+              "count": 1
+            }
+          },
+          "next": "choose_dashed_line"
+        },
+        {
+          "id": "choose_dashed_line",
+          "title_key": "teaching_c06_plane_choose_dashed_line_title",
+          "body_key": "teaching_c06_plane_choose_dashed_line_body",
+          "target": "shape.type.dashed_line",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "shape.type_changed",
+            "outcome": "success",
+            "equals": {
+              "type": "DASHED_LINE"
+            }
+          },
+          "next": "draw_dashed_line"
+        },
+        {
+          "id": "draw_dashed_line",
+          "title_key": "teaching_c06_plane_draw_dashed_line_title",
+          "body_key": "teaching_c06_plane_draw_dashed_line_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "shape.committed",
+            "outcome": "success",
+            "equals": {
+              "type": "DASHED_LINE",
+              "count": 1
+            }
+          },
+          "next": "choose_triangle"
+        },
+        {
+          "id": "choose_triangle",
+          "title_key": "teaching_c06_plane_choose_triangle_title",
+          "body_key": "teaching_c06_plane_choose_triangle_body",
+          "target": "shape.type.triangle",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "shape.type_changed",
+            "outcome": "success",
+            "equals": {
+              "type": "TRIANGLE"
+            }
+          },
+          "next": "draw_triangle"
+        },
+        {
+          "id": "draw_triangle",
+          "title_key": "teaching_c06_plane_draw_triangle_title",
+          "body_key": "teaching_c06_plane_draw_triangle_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "shape.committed",
+            "outcome": "success",
+            "equals": {
+              "type": "TRIANGLE",
+              "count": 1
+            }
+          },
+          "next": "choose_rect"
+        },
+        {
+          "id": "choose_rect",
+          "title_key": "teaching_c06_plane_choose_rect_title",
+          "body_key": "teaching_c06_plane_choose_rect_body",
+          "target": "shape.type.rect",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "shape.type_changed",
+            "outcome": "success",
+            "equals": {
+              "type": "RECT"
+            }
+          },
+          "next": "draw_rect"
+        },
+        {
+          "id": "draw_rect",
+          "title_key": "teaching_c06_plane_draw_rect_title",
+          "body_key": "teaching_c06_plane_draw_rect_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "shape.committed",
+            "outcome": "success",
+            "equals": {
+              "type": "RECT",
+              "count": 1
+            }
+          },
+          "next": "choose_parallelogram"
+        },
+        {
+          "id": "choose_parallelogram",
+          "title_key": "teaching_c06_plane_choose_parallelogram_title",
+          "body_key": "teaching_c06_plane_choose_parallelogram_body",
+          "target": "shape.type.parallelogram",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "shape.type_changed",
+            "outcome": "success",
+            "equals": {
+              "type": "PARALLELOGRAM"
+            }
+          },
+          "next": "draw_parallelogram"
+        },
+        {
+          "id": "draw_parallelogram",
+          "title_key": "teaching_c06_plane_draw_parallelogram_title",
+          "body_key": "teaching_c06_plane_draw_parallelogram_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "shape.committed",
+            "outcome": "success",
+            "equals": {
+              "type": "PARALLELOGRAM",
+              "count": 1
+            }
+          },
+          "next": "choose_trapezoid"
+        },
+        {
+          "id": "choose_trapezoid",
+          "title_key": "teaching_c06_plane_choose_trapezoid_title",
+          "body_key": "teaching_c06_plane_choose_trapezoid_body",
+          "target": "shape.type.trapezoid",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "shape.type_changed",
+            "outcome": "success",
+            "equals": {
+              "type": "TRAPEZOID"
+            }
+          },
+          "next": "draw_trapezoid"
+        },
+        {
+          "id": "draw_trapezoid",
+          "title_key": "teaching_c06_plane_draw_trapezoid_title",
+          "body_key": "teaching_c06_plane_draw_trapezoid_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "shape.committed",
+            "outcome": "success",
+            "equals": {
+              "type": "TRAPEZOID",
+              "count": 1
+            }
+          },
+          "next": "choose_diamond"
+        },
+        {
+          "id": "choose_diamond",
+          "title_key": "teaching_c06_plane_choose_diamond_title",
+          "body_key": "teaching_c06_plane_choose_diamond_body",
+          "target": "shape.type.diamond",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "shape.type_changed",
+            "outcome": "success",
+            "equals": {
+              "type": "DIAMOND"
+            }
+          },
+          "next": "draw_diamond"
+        },
+        {
+          "id": "draw_diamond",
+          "title_key": "teaching_c06_plane_draw_diamond_title",
+          "body_key": "teaching_c06_plane_draw_diamond_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "shape.committed",
+            "outcome": "success",
+            "equals": {
+              "type": "DIAMOND",
+              "count": 1
+            }
+          },
+          "next": "choose_angle"
+        },
+        {
+          "id": "choose_angle",
+          "title_key": "teaching_c06_plane_choose_angle_title",
+          "body_key": "teaching_c06_plane_choose_angle_body",
+          "target": "shape.type.angle",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "shape.type_changed",
+            "outcome": "success",
+            "equals": {
+              "type": "ANGLE"
+            }
+          },
+          "next": "draw_angle"
+        },
+        {
+          "id": "draw_angle",
+          "title_key": "teaching_c06_plane_draw_angle_title",
+          "body_key": "teaching_c06_plane_draw_angle_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "shape.committed",
+            "outcome": "success",
+            "equals": {
+              "type": "ANGLE",
+              "count": 1
+            }
+          },
+          "next": "choose_circle"
+        },
+        {
+          "id": "choose_circle",
+          "title_key": "teaching_c06_plane_choose_circle_title",
+          "body_key": "teaching_c06_plane_choose_circle_body",
+          "target": "shape.type.circle",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "shape.type_changed",
+            "outcome": "success",
+            "equals": {
+              "type": "CIRCLE"
+            }
+          },
+          "next": "draw_circle"
+        },
+        {
+          "id": "draw_circle",
+          "title_key": "teaching_c06_plane_draw_circle_title",
+          "body_key": "teaching_c06_plane_draw_circle_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "shape.committed",
+            "outcome": "success",
+            "equals": {
+              "type": "CIRCLE",
+              "count": 1
+            }
+          },
+          "next": "choose_ellipse"
+        },
+        {
+          "id": "choose_ellipse",
+          "title_key": "teaching_c06_plane_choose_ellipse_title",
+          "body_key": "teaching_c06_plane_choose_ellipse_body",
+          "target": "shape.type.ellipse",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "shape.type_changed",
+            "outcome": "success",
+            "equals": {
+              "type": "ELLIPSE"
+            }
+          },
+          "next": "draw_ellipse"
+        },
+        {
+          "id": "draw_ellipse",
+          "title_key": "teaching_c06_plane_draw_ellipse_title",
+          "body_key": "teaching_c06_plane_draw_ellipse_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "shape.committed",
+            "outcome": "success",
+            "equals": {
+              "type": "ELLIPSE",
+              "count": 1
+            }
+          },
+          "next": "done"
+        },
+        {
+          "id": "done",
+          "title_key": "teaching_c06_plane_done_title",
+          "body_key": "teaching_c06_plane_done_body",
+          "kind": "information",
+          "next": "end_chapter"
+        }
+      ]
+    },
+    {
+      "id": "c06.solid",
+      "title_key": "teaching_c06_solid_title",
+      "fixture": "geometry.c06.solid",
+      "steps": [
+        {
+          "id": "intro",
+          "title_key": "teaching_c06_solid_intro_title",
+          "body_key": "teaching_c06_solid_intro_body",
+          "kind": "information",
+          "next": "choose_cuboid"
+        },
+        {
+          "id": "choose_cuboid",
+          "title_key": "teaching_c06_solid_choose_cuboid_title",
+          "body_key": "teaching_c06_solid_choose_cuboid_body",
+          "target": "shape.type.cuboid",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "shape.type_changed",
+            "outcome": "success",
+            "equals": {
+              "type": "CUBOID"
+            }
+          },
+          "next": "draw_cuboid"
+        },
+        {
+          "id": "draw_cuboid",
+          "title_key": "teaching_c06_solid_draw_cuboid_title",
+          "body_key": "teaching_c06_solid_draw_cuboid_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "shape.committed",
+            "outcome": "success",
+            "equals": {
+              "type": "CUBOID",
+              "count": 1
+            }
+          },
+          "next": "choose_cube"
+        },
+        {
+          "id": "choose_cube",
+          "title_key": "teaching_c06_solid_choose_cube_title",
+          "body_key": "teaching_c06_solid_choose_cube_body",
+          "target": "shape.type.cube",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "shape.type_changed",
+            "outcome": "success",
+            "equals": {
+              "type": "CUBE"
+            }
+          },
+          "next": "draw_cube"
+        },
+        {
+          "id": "draw_cube",
+          "title_key": "teaching_c06_solid_draw_cube_title",
+          "body_key": "teaching_c06_solid_draw_cube_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "shape.committed",
+            "outcome": "success",
+            "equals": {
+              "type": "CUBE",
+              "count": 1
+            }
+          },
+          "next": "choose_cylinder"
+        },
+        {
+          "id": "choose_cylinder",
+          "title_key": "teaching_c06_solid_choose_cylinder_title",
+          "body_key": "teaching_c06_solid_choose_cylinder_body",
+          "target": "shape.type.cylinder",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "shape.type_changed",
+            "outcome": "success",
+            "equals": {
+              "type": "CYLINDER"
+            }
+          },
+          "next": "draw_cylinder"
+        },
+        {
+          "id": "draw_cylinder",
+          "title_key": "teaching_c06_solid_draw_cylinder_title",
+          "body_key": "teaching_c06_solid_draw_cylinder_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "shape.committed",
+            "outcome": "success",
+            "equals": {
+              "type": "CYLINDER",
+              "count": 1
+            }
+          },
+          "next": "choose_cone"
+        },
+        {
+          "id": "choose_cone",
+          "title_key": "teaching_c06_solid_choose_cone_title",
+          "body_key": "teaching_c06_solid_choose_cone_body",
+          "target": "shape.type.cone",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "shape.type_changed",
+            "outcome": "success",
+            "equals": {
+              "type": "CONE"
+            }
+          },
+          "next": "draw_cone"
+        },
+        {
+          "id": "draw_cone",
+          "title_key": "teaching_c06_solid_draw_cone_title",
+          "body_key": "teaching_c06_solid_draw_cone_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "shape.committed",
+            "outcome": "success",
+            "equals": {
+              "type": "CONE",
+              "count": 1
+            }
+          },
+          "next": "done"
+        },
+        {
+          "id": "done",
+          "title_key": "teaching_c06_solid_done_title",
+          "body_key": "teaching_c06_solid_done_body",
+          "kind": "information",
+          "next": "end_chapter"
+        }
+      ]
+    },
+    {
+      "id": "c06.points",
+      "title_key": "teaching_c06_points_title",
+      "fixture": "geometry.c06.points",
+      "steps": [
+        {
+          "id": "intro",
+          "title_key": "teaching_c06_points_intro_title",
+          "body_key": "teaching_c06_points_intro_body",
+          "kind": "information",
+          "next": "choose_triangle"
+        },
+        {
+          "id": "choose_triangle",
+          "title_key": "teaching_c06_points_choose_triangle_title",
+          "body_key": "teaching_c06_points_choose_triangle_body",
+          "target": "shape.type.triangle",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "shape.type_changed",
+            "outcome": "success",
+            "equals": {
+              "type": "TRIANGLE"
+            }
+          },
+          "next": "point1"
+        },
+        {
+          "id": "point1",
+          "title_key": "teaching_c06_points_point1_title",
+          "body_key": "teaching_c06_points_point1_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "shape.point_added",
+            "outcome": "success",
+            "equals": {
+              "type": "TRIANGLE",
+              "points": 1
+            }
+          },
+          "next": "point2"
+        },
+        {
+          "id": "point2",
+          "title_key": "teaching_c06_points_point2_title",
+          "body_key": "teaching_c06_points_point2_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "shape.point_added",
+            "outcome": "success",
+            "equals": {
+              "type": "TRIANGLE",
+              "points": 2
+            }
+          },
+          "next": "cancel"
+        },
+        {
+          "id": "cancel",
+          "title_key": "teaching_c06_points_cancel_title",
+          "body_key": "teaching_c06_points_cancel_body",
+          "target": "shape.cancel_points",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "shape.points_cancelled",
+            "outcome": "success",
+            "equals": {
+              "removed": 2
+            }
+          },
+          "next": "restart1"
+        },
+        {
+          "id": "restart1",
+          "title_key": "teaching_c06_points_restart1_title",
+          "body_key": "teaching_c06_points_restart1_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "shape.point_added",
+            "outcome": "success",
+            "equals": {
+              "type": "TRIANGLE",
+              "points": 1
+            }
+          },
+          "next": "restart2"
+        },
+        {
+          "id": "restart2",
+          "title_key": "teaching_c06_points_restart2_title",
+          "body_key": "teaching_c06_points_restart2_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "shape.point_added",
+            "outcome": "success",
+            "equals": {
+              "type": "TRIANGLE",
+              "points": 2
+            }
+          },
+          "next": "finish3"
+        },
+        {
+          "id": "finish3",
+          "title_key": "teaching_c06_points_finish3_title",
+          "body_key": "teaching_c06_points_finish3_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "shape.committed",
+            "outcome": "success",
+            "equals": {
+              "type": "TRIANGLE",
+              "count": 1
+            }
+          },
+          "next": "order_info"
+        },
+        {
+          "id": "order_info",
+          "title_key": "teaching_c06_points_order_info_title",
+          "body_key": "teaching_c06_points_order_info_body",
+          "kind": "information",
+          "next": "done"
+        },
+        {
+          "id": "done",
+          "title_key": "teaching_c06_points_done_title",
+          "body_key": "teaching_c06_points_done_body",
+          "kind": "information",
+          "next": "end_chapter"
+        }
+      ]
+    },
+    {
+      "id": "c06.recognition_snap",
+      "title_key": "teaching_c06_recognition_snap_title",
+      "fixture": "geometry.c06.recognition_snap",
+      "steps": [
+        {
+          "id": "intro",
+          "title_key": "teaching_c06_recognition_snap_intro_title",
+          "body_key": "teaching_c06_recognition_snap_intro_body",
+          "kind": "information",
+          "next": "enable"
+        },
+        {
+          "id": "enable",
+          "title_key": "teaching_c06_recognition_snap_enable_title",
+          "body_key": "teaching_c06_recognition_snap_enable_body",
+          "target": "settings.smart_shapes",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "shape.recognition_changed",
+            "outcome": "success",
+            "equals": {
+              "enabled": true
+            }
+          },
+          "next": "pen"
+        },
+        {
+          "id": "pen",
+          "title_key": "teaching_c06_recognition_snap_pen_title",
+          "body_key": "teaching_c06_recognition_snap_pen_body",
+          "target": "pen.style.pen",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "pen.style_changed",
+            "outcome": "success",
+            "equals": {
+              "style": "pen",
+              "tool": "PEN"
+            }
+          },
+          "next": "recognize_line"
+        },
+        {
+          "id": "recognize_line",
+          "title_key": "teaching_c06_recognition_snap_recognize_line_title",
+          "body_key": "teaching_c06_recognition_snap_recognize_line_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "shape.recognized",
+            "outcome": "success",
+            "equals": {
+              "type": "LINE",
+              "count": 1
+            }
+          },
+          "next": "undo_recognition"
+        },
+        {
+          "id": "undo_recognition",
+          "title_key": "teaching_c06_recognition_snap_undo_recognition_title",
+          "body_key": "teaching_c06_recognition_snap_undo_recognition_body",
+          "target": "toolbar.undo",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "history.undone",
+            "outcome": "success"
+          },
+          "next": "redo_recognition"
+        },
+        {
+          "id": "redo_recognition",
+          "title_key": "teaching_c06_recognition_snap_redo_recognition_title",
+          "body_key": "teaching_c06_recognition_snap_redo_recognition_body",
+          "target": "toolbar.redo",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "history.redone",
+            "outcome": "success"
+          },
+          "next": "limits_info"
+        },
+        {
+          "id": "limits_info",
+          "title_key": "teaching_c06_recognition_snap_limits_info_title",
+          "body_key": "teaching_c06_recognition_snap_limits_info_body",
+          "kind": "information",
+          "next": "choose_line"
+        },
+        {
+          "id": "choose_line",
+          "title_key": "teaching_c06_recognition_snap_choose_line_title",
+          "body_key": "teaching_c06_recognition_snap_choose_line_body",
+          "target": "shape.type.line",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "shape.type_changed",
+            "outcome": "success",
+            "equals": {
+              "type": "LINE"
+            }
+          },
+          "next": "snap_line"
+        },
+        {
+          "id": "snap_line",
+          "title_key": "teaching_c06_recognition_snap_snap_line_title",
+          "body_key": "teaching_c06_recognition_snap_snap_line_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "shape.committed",
+            "outcome": "success",
+            "equals": {
+              "type": "LINE",
+              "count": 1,
+              "snapped": true,
+              "snap_target_id": "83ed9223-1658-5c07-ae30-c0b1f9058dce",
+              "snap_target_endpoint": 1
+            }
+          },
+          "next": "midpoint"
+        },
+        {
+          "id": "midpoint",
+          "title_key": "teaching_c06_recognition_snap_midpoint_title",
+          "body_key": "teaching_c06_recognition_snap_midpoint_body",
+          "target": "selection.more",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "shape.constructed",
+            "outcome": "success",
+            "equals": {
+              "operation": "midpoint",
+              "source_type": "LINE"
+            }
+          },
+          "next": "perp_bisector"
+        },
+        {
+          "id": "perp_bisector",
+          "title_key": "teaching_c06_recognition_snap_perp_bisector_title",
+          "body_key": "teaching_c06_recognition_snap_perp_bisector_body",
+          "target": "selection.more",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "shape.constructed",
+            "outcome": "success",
+            "equals": {
+              "operation": "perp_bisector",
+              "source_type": "LINE"
+            }
+          },
+          "next": "construction_info"
+        },
+        {
+          "id": "construction_info",
+          "title_key": "teaching_c06_recognition_snap_construction_info_title",
+          "body_key": "teaching_c06_recognition_snap_construction_info_body",
+          "kind": "information",
+          "next": "done"
+        },
+        {
+          "id": "done",
+          "title_key": "teaching_c06_recognition_snap_done_title",
+          "body_key": "teaching_c06_recognition_snap_done_body",
+          "kind": "information",
+          "next": "end_chapter"
+        }
+      ]
+    }
+  ]
+}

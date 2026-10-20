@@ -47,6 +47,7 @@ data/config.json
 # 否则「data/config.json.*  # 说明」会被当成含空格和井号的字面模式，一条都匹配不到。
 data/config.json.*
 data/roster.json
+data/tutorial_state.json
 data/autosave/
 # 兜底：自动保存目前写进 data/autosave/（上一行已挡住），这条防的是将来写盘路径
 # 改动后板书内容直接落在 data/ 下而无人察觉——那是用户的课堂内容，不能进仓库。

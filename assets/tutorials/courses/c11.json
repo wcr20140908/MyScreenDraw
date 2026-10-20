@@ -1,0 +1,236 @@
+{
+  "schema_version": 1,
+  "id": "c11",
+  "revision": 1,
+  "compat_revision": 1,
+  "title_key": "aids",
+  "chapters": [
+    {
+      "id": "c11.instruments",
+      "title_key": "aids",
+      "fixture": "measurement.c11.instruments",
+      "steps": [
+        {
+          "id": "intro",
+          "kind": "information",
+          "title_key": "aids",
+          "body_key": "teaching_measure_intro",
+          "next": "ruler"
+        },
+        {
+          "id": "ruler",
+          "title_key": "aid_ruler",
+          "body_key": "teaching_measure_add",
+          "target": "aids.ruler",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "aid.added",
+            "outcome": "success",
+            "equals": {
+              "kind": "ruler"
+            }
+          },
+          "next": "move_ruler"
+        },
+        {
+          "id": "move_ruler",
+          "title_key": "aid_ruler",
+          "body_key": "teaching_measure_move",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "aid.transformed",
+            "outcome": "success",
+            "equals": {
+              "kind": "ruler",
+              "action": "move"
+            }
+          },
+          "next": "width_ruler"
+        },
+        {
+          "id": "width_ruler",
+          "title_key": "aid_ruler",
+          "body_key": "teaching_measure_width",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "aid.transformed",
+            "outcome": "success",
+            "equals": {
+              "kind": "ruler",
+              "action": "width"
+            }
+          },
+          "next": "protractor"
+        },
+        {
+          "id": "protractor",
+          "title_key": "aid_protractor",
+          "body_key": "teaching_measure_add",
+          "target": "aids.protractor",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "aid.added",
+            "outcome": "success",
+            "equals": {
+              "kind": "protractor"
+            }
+          },
+          "next": "rotate_protractor"
+        },
+        {
+          "id": "rotate_protractor",
+          "title_key": "aid_protractor",
+          "body_key": "teaching_measure_rotate",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "aid.transformed",
+            "outcome": "success",
+            "equals": {
+              "kind": "protractor",
+              "action": "rotate"
+            }
+          },
+          "next": "square_45"
+        },
+        {
+          "id": "square_45",
+          "title_key": "aid_set_square_45",
+          "body_key": "teaching_measure_add",
+          "target": "aids.set_square_45",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "aid.added",
+            "outcome": "success",
+            "equals": {
+              "kind": "set_square_45"
+            }
+          },
+          "next": "scale_square_45"
+        },
+        {
+          "id": "scale_square_45",
+          "title_key": "aid_set_square_45",
+          "body_key": "teaching_measure_scale",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "aid.transformed",
+            "outcome": "success",
+            "equals": {
+              "kind": "set_square_45",
+              "action": "scale"
+            }
+          },
+          "next": "square_30"
+        },
+        {
+          "id": "square_30",
+          "title_key": "aid_set_square_30",
+          "body_key": "teaching_measure_add",
+          "target": "aids.set_square_30",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "aid.added",
+            "outcome": "success",
+            "equals": {
+              "kind": "set_square_30"
+            }
+          },
+          "next": "scale_square_30"
+        },
+        {
+          "id": "scale_square_30",
+          "title_key": "aid_set_square_30",
+          "body_key": "teaching_measure_scale",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "aid.transformed",
+            "outcome": "success",
+            "equals": {
+              "kind": "set_square_30",
+              "action": "scale"
+            }
+          },
+          "next": "clear"
+        },
+        {
+          "id": "clear",
+          "title_key": "aid_clear_all",
+          "body_key": "teaching_measure_clear",
+          "target": "aids.clear",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "aid.cleared",
+            "outcome": "success",
+            "equals": {
+              "remaining": 0
+            }
+          },
+          "next": "done"
+        },
+        {
+          "id": "done",
+          "kind": "information",
+          "title_key": "aids",
+          "body_key": "teaching_measure_done",
+          "next": "end_chapter"
+        }
+      ]
+    },
+    {
+      "id": "c11.calibration",
+      "title_key": "calibrate_screen",
+      "fixture": "measurement.c11.calibration",
+      "steps": [
+        {
+          "id": "intro",
+          "kind": "information",
+          "title_key": "calibrate_screen",
+          "body_key": "teaching_measure_cal_intro",
+          "next": "calibrate"
+        },
+        {
+          "id": "calibrate",
+          "title_key": "calibrate_screen",
+          "body_key": "teaching_measure_calibrate",
+          "target": "aids.calibrate",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "aid.calibration_changed",
+            "outcome": "success",
+            "equals": {
+              "calibrated": true
+            }
+          },
+          "next": "reset"
+        },
+        {
+          "id": "reset",
+          "title_key": "reset_to_dpi",
+          "body_key": "teaching_measure_reset",
+          "target": "aids.reset",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "aid.calibration_changed",
+            "outcome": "success",
+            "equals": {
+              "calibrated": false
+            }
+          },
+          "next": "done"
+        },
+        {
+          "id": "done",
+          "kind": "information",
+          "title_key": "calibrate_screen",
+          "body_key": "teaching_measure_done",
+          "next": "end_chapter"
+        }
+      ]
+    }
+  ]
+}

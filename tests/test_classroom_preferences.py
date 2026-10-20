@@ -76,6 +76,7 @@ def test_disabled_and_boundary_noop_do_not_arm(rig):
 
 def test_mouse_mode_return_captures_only_after_whiteboard_page(rig):
     p, c = rig.fresh()
+    p.set_infinite_whiteboard(False)
     c.new_page()
     p.set_drawing_mode(False)
     assert c._mouse_passthrough
@@ -266,6 +267,7 @@ def test_settings_hints_have_readable_small_text_contrast(rig, theme):
 @pytest.mark.parametrize("entry", ["page", "tool", "mode", "annotate"])
 def test_mouse_mode_reentry_applies_same_annotation_preset(rig, tool, key, width_attr, entry):
     p, c = rig.fresh()
+    p.set_infinite_whiteboard(False)
     p.choose_pen_style("chalk")
     p.set_tool(tool, p.btn_pen)
     p.pen_defaults[key]["width"] = 17

@@ -105,7 +105,8 @@ def _sample_ellipse(center, rx: float, ry: float, rotation: float = 0.0, n: int 
     return pts
 
 
-def _emit_path(L, pts, height: int, *, closed: bool, color, width: float, dashed: bool = False):
+def _emit_path(L, pts, height: int, *, closed: bool, color, width: float, dashed: bool = False,
+               dash_pattern=(8, 6)):
     """把 Qt 坐标点序列画成一条 PostScript 折线/多边形。"""
     if len(pts) < 2:
         return
@@ -113,7 +114,7 @@ def _emit_path(L, pts, height: int, *, closed: bool, color, width: float, dashed
     L.append(f"{_fmt(width)} setlinewidth")
     L.append("1 setlinecap")
     L.append("1 setlinejoin")
-    L.append("[8 6] 0 setdash" if dashed else "[] 0 setdash")
+    L.append(f"[{' '.join(_fmt(length) for length in dash_pattern)}] 0 setdash" if dashed else "[] 0 setdash")
     x, y = pts[0]
     L.append(f"{_fmt(x)} {_fmt(height - y)} moveto")
     for px, py in pts[1:]:
@@ -208,33 +209,33 @@ def _emit_shape(L, item, height: int, board_style: str):
     rot = float(item.get("rotation", 0.0))
     cx, cy = x + w / 2.0, y + h / 2.0
     shape_type = item.get("type", "CUBE")
-    if shape_type == "CUBE":
-        offset = min(w, h) * 0.18
-        front = [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
-        back = [(x + offset, y - offset), (x + w + offset, y - offset),
-                (x + w + offset, y + h - offset), (x + offset, y + h - offset)]
-        _emit_path(L, [_rotate(p, cx, cy, rot) for p in front], height, closed=True, color=color, width=width)
-        _emit_path(L, [_rotate(p, cx, cy, rot) for p in back], height, closed=True, color=color, width=width)
-        for a, b in zip(front, back):
-            _emit_path(L, [_rotate(a, cx, cy, rot), _rotate(b, cx, cy, rot)], height,
-                       closed=False, color=color, width=width)
-    elif shape_type == "CUBOID":
-        offset = min(w, h) * 0.2
-        front = [(x, y + offset), (x + w - offset, y + offset),
-                 (x + w - offset, y + h), (x, y + h)]
-        back = [(x + offset, y), (x + w, y),
-                (x + w, y + h - offset), (x + offset, y + h - offset)]
-        _emit_path(L, [_rotate(p, cx, cy, rot) for p in front], height, closed=True, color=color, width=width)
-        _emit_path(L, [_rotate(p, cx, cy, rot) for p in back], height, closed=True, color=color, width=width)
-        for a, b in zip(front, back):
-            _emit_path(L, [_rotate(a, cx, cy, rot), _rotate(b, cx, cy, rot)], height,
-                       closed=False, color=color, width=width)
+    if shape_type in ("CUBE", "CUBOID"):
+        if shape_type == "CUBE":
+            offset = min(w, h) * 0.18
+            front = [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
+            back = [(px + offset, py - offset) for px, py in front]
+        else:
+            offset = min(w, h) * 0.2
+            front = [(x, y + offset), (x + w - offset, y + offset),
+                     (x + w - offset, y + h), (x, y + h)]
+            back = [(x + offset, y), (x + w, y),
+                    (x + w, y + h - offset), (x + offset, y + h - offset)]
+        vertices = [_rotate(point, cx, cy, rot) for point in front + back]
+        # TL/TR/BR/BL on each face: only the three edges meeting back BL are hidden.
+        # Emit each edge once; a dashed overlay on a solid rectangle has no gaps.
+        hidden = {(6, 7), (7, 4), (3, 7)}
+        for a, b in ((0, 1), (1, 2), (2, 3), (3, 0),
+                     (4, 5), (5, 6), (6, 7), (7, 4),
+                     (0, 4), (1, 5), (2, 6), (3, 7)):
+            # Qt DashLine scales its 4:2 pattern by pen width; round caps must not fill the gaps.
+            _emit_path(L, [vertices[a], vertices[b]], height, closed=False,
+                       color=color, width=width, dashed=(a, b) in hidden,
+                       dash_pattern=(4 * width, 2 * width))
     elif shape_type == "CYLINDER":
         hh = h * 0.2
         top = _sample_ellipse((x + w / 2.0, y + hh / 2.0), w / 2.0, hh / 2.0)
         bottom = _sample_ellipse((x + w / 2.0, y + h - hh / 2.0), w / 2.0, hh / 2.0)
         _emit_path(L, [_rotate(p, cx, cy, rot) for p in top], height, closed=True, color=color, width=width)
-        _emit_path(L, [_rotate(p, cx, cy, rot) for p in bottom], height, closed=True, color=color, width=width)
         for sx in (x, x + w):
             a = (sx, y + hh / 2.0)
             b = (sx, y + h - hh / 2.0)
@@ -250,7 +251,12 @@ def _emit_shape(L, item, height: int, board_style: str):
                    closed=False, color=color, width=width)
         _emit_path(L, [_rotate(apex, cx, cy, rot), _rotate(right, cx, cy, rot)], height,
                    closed=False, color=color, width=width)
-        _emit_path(L, [_rotate(p, cx, cy, rot) for p in bottom], height, closed=True, color=color, width=width)
+
+    if shape_type in ("CYLINDER", "CONE"):
+        middle = len(bottom) // 2
+        for arc, hidden in ((bottom[middle:], True), (bottom[:middle + 1], False)):
+            _emit_path(L, [_rotate(p, cx, cy, rot) for p in arc], height,
+                       closed=False, color=color, width=width, dashed=hidden)
 
 
 def _emit_text_at(L, x, y, text, size, color, height: int):
@@ -311,7 +317,7 @@ def _emit_image(L, img, height: int, decoded_images: dict):
     L.append("grestore")
 
 
-def _eps_lines(page, width: int, height: int, board_style: str, decoded_images: dict):
+def _eps_lines(page, width: int, height: int, board_style: str, decoded_images: dict, content_transform=None):
     L = []
     bg = _background(board_style)
     L.append("%!PS-Adobe-3.0 EPSF-3.0")
@@ -325,6 +331,11 @@ def _eps_lines(page, width: int, height: int, board_style: str, decoded_images: 
     L.append(f"{width} {height} lineto")
     L.append(f"0 {height} lineto")
     L.append("closepath fill")
+    L.append("gsave")
+    if content_transform is not None:
+        scale, x, y = content_transform
+        L.append(f"{_fmt(x)} {_fmt(height * (1 - scale) - y)} translate")
+        L.append(f"{_fmt(scale)} {_fmt(scale)} scale")
     dash_positions = {}
     for seg in page.get("segments", []):
         key = seg.get("id")
@@ -341,16 +352,17 @@ def _eps_lines(page, width: int, height: int, board_style: str, decoded_images: 
         _emit_image(L, img, height, decoded_images)
     for item in page.get("texts", []):
         _emit_text(L, item, height, board_style)
+    L.append("grestore")
     L.append("%%EOF")
     return L
 
 
 def write_eps(path, page, width: int, height: int, board_style: str = "WHITE",
-              decoded_images: dict | None = None) -> None:
+              decoded_images: dict | None = None, content_transform=None) -> None:
     """把一页序列化页面写成矢量 EPS 文件（latin-1 编码，含 BoundingBox）。"""
     width = max(1, int(width))
     height = max(1, int(height))
-    lines = _eps_lines(page, width, height, board_style, decoded_images or {})
+    lines = _eps_lines(page, width, height, board_style, decoded_images or {}, content_transform)
     with open(path, "w", encoding="latin-1", newline="\n") as handle:
         handle.write("\n".join(lines))
         handle.write("\n")

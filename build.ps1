@@ -60,8 +60,8 @@ function Invoke-Smoke([string]$Executable, [string]$Directory) {
 }
 
 $version = (& python -c "from version import VERSION; print(VERSION)").Trim()
-if ($LASTEXITCODE -ne 0 -or $version -ne "6.1.1") {
-    throw "Release build requires version 6.1.1, found '$version'"
+if ($LASTEXITCODE -ne 0 -or $version -ne "6.2.0") {
+    throw "Release build requires version 6.2.0, found '$version'"
 }
 
 # Never package checked-out runtime data or stale PyInstaller output.
@@ -91,8 +91,7 @@ $env:QT_QPA_PLATFORM = "offscreen"
 $previousErrorAction = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
 try {
-    # 6.1.1: focused release checks per the user's request for fast delivery.
-    python -B -m pytest -q -p no:cacheprovider --tb=short tests/test_ink_latency.py tests/test_stroke_spatial_index.py tests/test_stroke_cache_610.py tests/test_document_safety_610.py tests/test_release_hygiene.py tests/test_color_schemes.py::test_classic_factory_keeps_legacy_tokens tests/test_color_schemes.py::test_settings_choice_applies_and_reopens_from_disk tests/test_color_schemes.py::test_switching_preserves_user_content_preferences_and_button_geometry
+    python -m pytest -q --ignore=tests/test_touch_injection.py --ignore=tests/test_multitouch_injection.py --ignore=tests/test_multitouch.py
     $testsExit = $LASTEXITCODE
 } finally {
     $ErrorActionPreference = $previousErrorAction
@@ -134,16 +133,10 @@ foreach ($relative in $required) {
     }
 }
 
-# A package must not inherit local user data, caches, source, or old logs.
-$forbidden = Get-ChildItem -LiteralPath $package -Recurse -File -Force | Where-Object {
-    $_.Name -match '^(config\.json|roster\.json|events\.jsonl|app\.log)$' -or
-    $_.Extension -in @('.py', '.pyc', '.jsonl', '.tmp', '.png', '.jpg', '.jpeg') -or
-    $_.FullName -match '\\autosave\\' -or
-    $_.FullName -match '\\screenshots\\'
-}
-if ($forbidden) {
-    throw "Release package contains user/runtime files: $($forbidden.FullName -join ', ')"
-}
+# Reject local user data/caches/source/logs, but require byte-identical offline teaching
+# resources from the spec inventory. A path prefix alone must never exempt an image.
+python -B release_artifact.py check-package --directory $package --version $version --root $root
+if ($LASTEXITCODE -ne 0) { throw 'Release package failed privacy/teaching resource verification' }
 
 # Bind acceptance to the executable that was exercised, not a later replacement.
 $hash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -161,14 +154,8 @@ $runtimeAutosave = Assert-PathWithin (Join-Path $package "data\autosave") $packa
 if (Test-Path -LiteralPath $runtimeAutosave) { Remove-Item -LiteralPath $runtimeAutosave -Recurse -Force }
 
 $package = Assert-PathWithin $package $root -Recurse
-$forbiddenAfterSmoke = Get-ChildItem -LiteralPath $package -Recurse -File -Force | Where-Object {
-    $_.Name -match '^(config\.json|roster\.json|events\.jsonl|app\.log)$' -or
-    $_.Extension -in @('.py', '.pyc', '.jsonl', '.tmp', '.png', '.jpg', '.jpeg') -or
-    $_.FullName -match '\\autosave\\|\\screenshots\\'
-}
-if ($forbiddenAfterSmoke) {
-    throw "Release package contains runtime or private files after smoke: $($forbiddenAfterSmoke.FullName -join ', ')"
-}
+python -B release_artifact.py check-package --directory $package --version $version --root $root
+if ($LASTEXITCODE -ne 0) { throw 'Release package failed privacy/teaching verification after smoke' }
 
 
 $manifest = [ordered]@{
@@ -194,13 +181,13 @@ $acceptancePath = Assert-PathWithin (Join-Path $candidateDir 'acceptance.json') 
 $verifyDir = Assert-PathWithin (Join-Path $candidateDir 'extracted') $candidateDir
 $updateEntries = Get-ChildItem -LiteralPath $package -Force | Where-Object { $_.Name -notin @('data', 'exports') }
 Compress-Archive -LiteralPath $updateEntries.FullName -DestinationPath $candidateZip -CompressionLevel Optimal
-$validationJson = python -B release_artifact.py validate --zip $candidateZip --version $version
+$validationJson = python -B release_artifact.py validate --zip $candidateZip --version $version --root $root
 if ($LASTEXITCODE -ne 0) { throw 'Candidate ZIP failed release validation' }
 $validation = $validationJson | ConvertFrom-Json
 if ($validation.exe_sha256 -ne $hash) { throw 'ZIP executable differs from staging smoke executable' }
 try {
     Expand-Archive -LiteralPath $candidateZip -DestinationPath $verifyDir
-    python -B release_artifact.py check-extracted --zip $candidateZip --version $version --directory $verifyDir
+    python -B release_artifact.py check-extracted --zip $candidateZip --version $version --directory $verifyDir --root $root
     if ($LASTEXITCODE -ne 0) { throw 'Extracted files differ from candidate ZIP' }
     $extractedExe = Assert-PathWithin (Join-Path $verifyDir 'MyScreenDraw.exe') $verifyDir
     Invoke-Smoke $extractedExe $verifyDir

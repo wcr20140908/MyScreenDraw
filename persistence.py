@@ -243,6 +243,13 @@ def validate_page_data(page: Any) -> tuple[bool, str]:
     if "name" in page and (not isinstance(page["name"], str) or len(page["name"]) > 256):
         return False, "Invalid page name"
 
+    if "view" in page:
+        view = page["view"]
+        if (not isinstance(view, dict) or set(view) != {"x", "y", "zoom"}
+                or not _finite_number(view["x"]) or not _finite_number(view["y"])
+                or not _bounded_number(view["zoom"], 0.1, 8.0)):
+            return False, "Invalid page view"
+
     # One stroke legitimately consists of many segments sharing an id. Texts and
     # shapes are individual objects, and ids may not alias another object class.
     stroke_ids: set[str] = set()

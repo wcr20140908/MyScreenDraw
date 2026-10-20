@@ -3,6 +3,7 @@
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel, QComboBox, QSpinBox, QSlider, QApplication
 from i18n import tr, trf
+from teaching.file_actions import teaching_interval_choice
 
 AUTOSAVE_PRESETS = (15, 30, 60, 120, 300)
 COPY_PLACEMENTS = ("after", "before", "first", "last")
@@ -75,6 +76,7 @@ class DocumentPreferences(QWidget):
         QApplication.instance().screenAdded.connect(self.refresh_screens)
         QApplication.instance().screenRemoved.connect(self.refresh_screens)
 
+    @teaching_interval_choice
     def _interval_selected(self, _):
         seconds = self.interval_combo.currentData()
         custom = seconds == -1

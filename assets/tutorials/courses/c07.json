@@ -1,0 +1,1334 @@
+{
+  "schema_version": 1,
+  "id": "c07",
+  "revision": 1,
+  "compat_revision": 1,
+  "title_key": "teaching_c07_title",
+  "chapters": [
+    {
+      "id": "c07.edit",
+      "title_key": "teaching_c07_edit_title",
+      "fixture": "text.c07.edit",
+      "steps": [
+        {
+          "id": "intro",
+          "title_key": "teaching_c07_edit_intro_title",
+          "body_key": "teaching_c07_edit_intro_body",
+          "kind": "information",
+          "next": "choose_text"
+        },
+        {
+          "id": "choose_text",
+          "title_key": "teaching_c07_edit_choose_text_title",
+          "body_key": "teaching_c07_edit_choose_text_body",
+          "target": "toolbar.text",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "tool.changed",
+            "outcome": "success",
+            "equals": {
+              "tool": "TEXT",
+              "drawing_mode": true
+            }
+          },
+          "next": "create_box"
+        },
+        {
+          "id": "create_box",
+          "title_key": "teaching_c07_edit_create_box_title",
+          "body_key": "teaching_c07_edit_create_box_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "text.box_created",
+            "outcome": "success",
+            "equals": {
+              "count": 1
+            }
+          },
+          "next": "type_text"
+        },
+        {
+          "id": "type_text",
+          "title_key": "teaching_c07_edit_type_text_title",
+          "body_key": "teaching_c07_edit_type_text_body",
+          "target": "text.input",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "text.changed",
+            "outcome": "success",
+            "equals": {
+              "action": "insert",
+              "same_original": true,
+              "nonempty": true
+            },
+            "min_count": {
+              "characters": 2,
+              "inserted": 1
+            }
+          },
+          "next": "insert_middle"
+        },
+        {
+          "id": "insert_middle",
+          "title_key": "teaching_c07_edit_insert_middle_title",
+          "body_key": "teaching_c07_edit_insert_middle_body",
+          "target": "text.input",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "text.changed",
+            "outcome": "success",
+            "equals": {
+              "action": "insert",
+              "same_original": true,
+              "nonempty": true,
+              "middle": true
+            },
+            "min_count": {
+              "inserted": 1
+            }
+          },
+          "next": "backspace"
+        },
+        {
+          "id": "backspace",
+          "title_key": "teaching_c07_edit_backspace_title",
+          "body_key": "teaching_c07_edit_backspace_body",
+          "target": "text.backspace",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "text.changed",
+            "outcome": "success",
+            "equals": {
+              "action": "backspace",
+              "same_original": true
+            },
+            "min_count": {
+              "removed": 1
+            }
+          },
+          "next": "newline"
+        },
+        {
+          "id": "newline",
+          "title_key": "teaching_c07_edit_newline_title",
+          "body_key": "teaching_c07_edit_newline_body",
+          "target": "text.newline",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "text.changed",
+            "outcome": "success",
+            "equals": {
+              "action": "newline",
+              "same_original": true
+            },
+            "min_count": {
+              "inserted": 1
+            }
+          },
+          "next": "finish"
+        },
+        {
+          "id": "finish",
+          "title_key": "teaching_c07_edit_finish_title",
+          "body_key": "teaching_c07_edit_finish_body",
+          "target": "text.done",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "text.edit_finished",
+            "outcome": "success",
+            "equals": {
+              "retained": true,
+              "same_original": true
+            }
+          },
+          "next": "reedit"
+        },
+        {
+          "id": "reedit",
+          "title_key": "teaching_c07_edit_reedit_title",
+          "body_key": "teaching_c07_edit_reedit_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "sequence": [
+              {
+                "event": "text.edit_started",
+                "outcome": "success",
+                "equals": {
+                  "existing": true,
+                  "same_original": true
+                }
+              },
+              {
+                "event": "text.changed",
+                "outcome": "success",
+                "equals": {
+                  "action": "insert",
+                  "same_original": true,
+                  "at_end": true,
+                  "nonempty": true,
+                  "appended_only": true
+                },
+                "min_count": {
+                  "inserted": 1
+                }
+              }
+            ]
+          },
+          "allowed_targets": [
+            "canvas.ink",
+            "text.input"
+          ],
+          "next": "finish_again"
+        },
+        {
+          "id": "finish_again",
+          "title_key": "teaching_c07_edit_finish_again_title",
+          "body_key": "teaching_c07_edit_finish_again_body",
+          "target": "text.done",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "text.edit_finished",
+            "outcome": "success",
+            "equals": {
+              "retained": true,
+              "same_original": true
+            }
+          },
+          "next": "keyboard_ime_info"
+        },
+        {
+          "id": "keyboard_ime_info",
+          "title_key": "teaching_c07_edit_keyboard_ime_info_title",
+          "body_key": "teaching_c07_edit_keyboard_ime_info_body",
+          "kind": "information",
+          "next": "done"
+        },
+        {
+          "id": "done",
+          "title_key": "teaching_c07_edit_done_title",
+          "body_key": "teaching_c07_edit_done_body",
+          "kind": "information",
+          "next": "end_chapter"
+        }
+      ]
+    },
+    {
+      "id": "c07.format",
+      "title_key": "teaching_c07_format_title",
+      "fixture": "text.c07.format",
+      "steps": [
+        {
+          "id": "intro",
+          "title_key": "teaching_c07_format_intro_title",
+          "body_key": "teaching_c07_format_intro_body",
+          "kind": "information",
+          "next": "choose_select"
+        },
+        {
+          "id": "choose_select",
+          "title_key": "teaching_c07_format_choose_select_title",
+          "body_key": "teaching_c07_format_choose_select_body",
+          "target": "toolbar.select",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "tool.changed",
+            "outcome": "success",
+            "equals": {
+              "tool": "SELECT",
+              "drawing_mode": true
+            }
+          },
+          "next": "select_box"
+        },
+        {
+          "id": "select_box",
+          "title_key": "teaching_c07_format_select_box_title",
+          "body_key": "teaching_c07_format_select_box_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "selection.changed",
+            "outcome": "success",
+            "equals": {
+              "count": 1,
+              "method": "click"
+            }
+          },
+          "next": "size"
+        },
+        {
+          "id": "size",
+          "title_key": "teaching_c07_format_size_title",
+          "body_key": "teaching_c07_format_size_body",
+          "target": "selection.width",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "text.formatted",
+            "outcome": "success",
+            "equals": {
+              "action": "size",
+              "count": 1,
+              "size": 36,
+              "width": 6,
+              "item_id": "53917443-5e7f-51a4-8355-6b7dacbb101f"
+            }
+          },
+          "next": "color"
+        },
+        {
+          "id": "color",
+          "title_key": "teaching_c07_format_color_title",
+          "body_key": "teaching_c07_format_color_body",
+          "target": "selection.color",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "text.formatted",
+            "outcome": "success",
+            "equals": {
+              "action": "color",
+              "count": 1,
+              "item_id": "53917443-5e7f-51a4-8355-6b7dacbb101f"
+            }
+          },
+          "next": "move"
+        },
+        {
+          "id": "move",
+          "title_key": "teaching_c07_format_move_title",
+          "body_key": "teaching_c07_format_move_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "selection.transformed",
+            "outcome": "success",
+            "equals": {
+              "action": "move",
+              "count": 1
+            }
+          },
+          "next": "scale"
+        },
+        {
+          "id": "scale",
+          "title_key": "teaching_c07_format_scale_title",
+          "body_key": "teaching_c07_format_scale_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "selection.transformed",
+            "outcome": "success",
+            "equals": {
+              "action": "scale",
+              "count": 1
+            }
+          },
+          "next": "rotate"
+        },
+        {
+          "id": "rotate",
+          "title_key": "teaching_c07_format_rotate_title",
+          "body_key": "teaching_c07_format_rotate_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "selection.transformed",
+            "outcome": "success",
+            "equals": {
+              "action": "rotate",
+              "count": 1
+            }
+          },
+          "next": "copy"
+        },
+        {
+          "id": "copy",
+          "title_key": "teaching_c07_format_copy_title",
+          "body_key": "teaching_c07_format_copy_body",
+          "target": "selection.duplicate",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "selection.duplicated",
+            "outcome": "success",
+            "equals": {
+              "count": 1,
+              "preserved": 1,
+              "selected_new": 1
+            }
+          },
+          "next": "delete_copy"
+        },
+        {
+          "id": "delete_copy",
+          "title_key": "teaching_c07_format_delete_copy_title",
+          "body_key": "teaching_c07_format_delete_copy_body",
+          "target": "selection.delete",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "selection.deleted",
+            "outcome": "success",
+            "equals": {
+              "count": 1,
+              "remaining_ids": "53917443-5e7f-51a4-8355-6b7dacbb101f"
+            }
+          },
+          "next": "font_info"
+        },
+        {
+          "id": "font_info",
+          "title_key": "teaching_c07_format_font_info_title",
+          "body_key": "teaching_c07_format_font_info_body",
+          "kind": "information",
+          "next": "done"
+        },
+        {
+          "id": "done",
+          "title_key": "teaching_c07_format_done_title",
+          "body_key": "teaching_c07_format_done_body",
+          "kind": "information",
+          "next": "end_chapter"
+        }
+      ]
+    },
+    {
+      "id": "c07.formula",
+      "title_key": "teaching_c07_formula_title",
+      "fixture": "text.c07.formula",
+      "steps": [
+        {
+          "id": "intro",
+          "title_key": "teaching_c07_formula_intro_title",
+          "body_key": "teaching_c07_formula_intro_body",
+          "kind": "information",
+          "next": "choose_text"
+        },
+        {
+          "id": "choose_text",
+          "title_key": "teaching_c07_formula_choose_text_title",
+          "body_key": "teaching_c07_formula_choose_text_body",
+          "target": "toolbar.text",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "tool.changed",
+            "outcome": "success",
+            "equals": {
+              "tool": "TEXT",
+              "drawing_mode": true
+            }
+          },
+          "next": "open_symbols"
+        },
+        {
+          "id": "open_symbols",
+          "title_key": "teaching_c07_formula_open_symbols_title",
+          "body_key": "teaching_c07_formula_open_symbols_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "text.edit_started",
+            "outcome": "success",
+            "equals": {
+              "existing": true,
+              "item_id": "bf7fa356-4eb4-5550-9027-dde21fe37bd8"
+            }
+          },
+          "next": "greek"
+        },
+        {
+          "id": "greek",
+          "title_key": "teaching_c07_formula_greek_title",
+          "body_key": "teaching_c07_formula_greek_body",
+          "target": "text.symbol.alpha",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "text.changed",
+            "outcome": "success",
+            "equals": {
+              "action": "insert",
+              "symbol": "α",
+              "item_id": "bf7fa356-4eb4-5550-9027-dde21fe37bd8"
+            },
+            "min_count": {
+              "inserted": 1
+            }
+          },
+          "next": "operator"
+        },
+        {
+          "id": "operator",
+          "title_key": "teaching_c07_formula_operator_title",
+          "body_key": "teaching_c07_formula_operator_body",
+          "target": "text.symbol.pm",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "text.changed",
+            "outcome": "success",
+            "equals": {
+              "action": "insert",
+              "symbol": "±",
+              "item_id": "bf7fa356-4eb4-5550-9027-dde21fe37bd8"
+            },
+            "min_count": {
+              "inserted": 1
+            }
+          },
+          "next": "relation"
+        },
+        {
+          "id": "relation",
+          "title_key": "teaching_c07_formula_relation_title",
+          "body_key": "teaching_c07_formula_relation_body",
+          "target": "text.symbol.member",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "text.changed",
+            "outcome": "success",
+            "equals": {
+              "action": "insert",
+              "symbol": "∈",
+              "item_id": "bf7fa356-4eb4-5550-9027-dde21fe37bd8"
+            },
+            "min_count": {
+              "inserted": 1
+            }
+          },
+          "next": "calculus"
+        },
+        {
+          "id": "calculus",
+          "title_key": "teaching_c07_formula_calculus_title",
+          "body_key": "teaching_c07_formula_calculus_body",
+          "target": "text.symbol.integral",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "text.changed",
+            "outcome": "success",
+            "equals": {
+              "action": "insert",
+              "symbol": "∫",
+              "item_id": "bf7fa356-4eb4-5550-9027-dde21fe37bd8"
+            },
+            "min_count": {
+              "inserted": 1
+            }
+          },
+          "next": "open_formula"
+        },
+        {
+          "id": "open_formula",
+          "title_key": "teaching_c07_formula_open_formula_title",
+          "body_key": "teaching_c07_formula_open_formula_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "text.edit_started",
+            "outcome": "success",
+            "equals": {
+              "existing": true,
+              "item_id": "204fce49-86e9-59fa-829d-1c63ea8287ce"
+            }
+          },
+          "next": "structure"
+        },
+        {
+          "id": "structure",
+          "title_key": "teaching_c07_formula_structure_title",
+          "body_key": "teaching_c07_formula_structure_body",
+          "target": "text.group.structure",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "symbols.opened",
+            "outcome": "success",
+            "equals": {
+              "group": "structure"
+            }
+          },
+          "next": "frac"
+        },
+        {
+          "id": "frac",
+          "title_key": "teaching_c07_formula_frac_title",
+          "body_key": "teaching_c07_formula_frac_body",
+          "target": "text.structure.frac",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "formula.inserted",
+            "outcome": "success",
+            "equals": {
+              "kind": "frac",
+              "parent_kind": "plain",
+              "slot": "plain",
+              "depth": 0,
+              "item_id": "204fce49-86e9-59fa-829d-1c63ea8287ce",
+              "structures": 1
+            }
+          },
+          "next": "frac_num"
+        },
+        {
+          "id": "frac_num",
+          "title_key": "teaching_c07_formula_frac_num_title",
+          "body_key": "teaching_c07_formula_frac_num_body",
+          "target": "text.input",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "text.changed",
+            "outcome": "success",
+            "equals": {
+              "action": "insert",
+              "parent_kind": "frac",
+              "slot": "num",
+              "depth": 1,
+              "item_id": "204fce49-86e9-59fa-829d-1c63ea8287ce",
+              "slot_filled": true
+            },
+            "min_count": {
+              "inserted": 1
+            }
+          },
+          "next": "frac_den"
+        },
+        {
+          "id": "frac_den",
+          "title_key": "teaching_c07_formula_frac_den_title",
+          "body_key": "teaching_c07_formula_frac_den_body",
+          "target": "text.input",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "text.changed",
+            "outcome": "success",
+            "equals": {
+              "action": "insert",
+              "parent_kind": "frac",
+              "slot": "den",
+              "depth": 1,
+              "item_id": "204fce49-86e9-59fa-829d-1c63ea8287ce",
+              "slot_filled": true
+            },
+            "min_count": {
+              "inserted": 1
+            }
+          },
+          "next": "frac_edit"
+        },
+        {
+          "id": "frac_edit",
+          "title_key": "teaching_c07_formula_frac_edit_title",
+          "body_key": "teaching_c07_formula_frac_edit_body",
+          "target": "text.input",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "text.changed",
+            "outcome": "success",
+            "equals": {
+              "action": "insert",
+              "parent_kind": "frac",
+              "slot": "den",
+              "depth": 1,
+              "item_id": "204fce49-86e9-59fa-829d-1c63ea8287ce",
+              "slot_filled": true,
+              "at_end": false
+            },
+            "min_count": {
+              "inserted": 1
+            }
+          },
+          "next": "root_after_frac"
+        },
+        {
+          "id": "root_after_frac",
+          "title_key": "teaching_c07_formula_root_after_frac_title",
+          "body_key": "teaching_c07_formula_root_after_frac_body",
+          "target": "text.input",
+          "input_policy": "canvas",
+          "wait": {
+            "sequence": [
+              {
+                "event": "formula.slot_changed",
+                "outcome": "success",
+                "equals": {
+                  "slot": "root",
+                  "depth": 0,
+                  "item_id": "204fce49-86e9-59fa-829d-1c63ea8287ce"
+                }
+              },
+              {
+                "event": "formula.cursor_moved",
+                "outcome": "success",
+                "equals": {
+                  "slot": "root",
+                  "depth": 0,
+                  "at_end": true,
+                  "item_id": "204fce49-86e9-59fa-829d-1c63ea8287ce"
+                }
+              },
+              {
+                "event": "text.changed",
+                "outcome": "success",
+                "equals": {
+                  "action": "insert",
+                  "slot": "root",
+                  "depth": 0,
+                  "at_end": true,
+                  "item_id": "204fce49-86e9-59fa-829d-1c63ea8287ce",
+                  "slot_filled": true
+                },
+                "min_count": {
+                  "inserted": 1
+                }
+              }
+            ]
+          },
+          "next": "sup",
+          "allowed_targets": [
+            "canvas.ink",
+            "text.input",
+            "text.input"
+          ]
+        },
+        {
+          "id": "sup",
+          "title_key": "teaching_c07_formula_sup_title",
+          "body_key": "teaching_c07_formula_sup_body",
+          "target": "text.structure.sup",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "formula.inserted",
+            "outcome": "success",
+            "equals": {
+              "kind": "sup",
+              "parent_kind": "root",
+              "slot": "root",
+              "depth": 0,
+              "item_id": "204fce49-86e9-59fa-829d-1c63ea8287ce",
+              "structures": 2
+            }
+          },
+          "next": "sup_base"
+        },
+        {
+          "id": "sup_base",
+          "title_key": "teaching_c07_formula_sup_base_title",
+          "body_key": "teaching_c07_formula_sup_base_body",
+          "target": "text.input",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "text.changed",
+            "outcome": "success",
+            "equals": {
+              "action": "insert",
+              "parent_kind": "sup",
+              "slot": "base",
+              "depth": 1,
+              "item_id": "204fce49-86e9-59fa-829d-1c63ea8287ce",
+              "slot_filled": true
+            },
+            "min_count": {
+              "inserted": 1
+            }
+          },
+          "next": "sup_exp"
+        },
+        {
+          "id": "sup_exp",
+          "title_key": "teaching_c07_formula_sup_exp_title",
+          "body_key": "teaching_c07_formula_sup_exp_body",
+          "target": "text.input",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "text.changed",
+            "outcome": "success",
+            "equals": {
+              "action": "insert",
+              "parent_kind": "sup",
+              "slot": "exp",
+              "depth": 1,
+              "item_id": "204fce49-86e9-59fa-829d-1c63ea8287ce",
+              "slot_filled": true
+            },
+            "min_count": {
+              "inserted": 1
+            }
+          },
+          "next": "root_after_sup"
+        },
+        {
+          "id": "root_after_sup",
+          "title_key": "teaching_c07_formula_root_after_sup_title",
+          "body_key": "teaching_c07_formula_root_after_sup_body",
+          "target": "text.input",
+          "input_policy": "canvas",
+          "wait": {
+            "sequence": [
+              {
+                "event": "formula.slot_changed",
+                "outcome": "success",
+                "equals": {
+                  "slot": "root",
+                  "depth": 0,
+                  "item_id": "204fce49-86e9-59fa-829d-1c63ea8287ce"
+                }
+              },
+              {
+                "event": "formula.cursor_moved",
+                "outcome": "success",
+                "equals": {
+                  "slot": "root",
+                  "depth": 0,
+                  "at_end": true,
+                  "item_id": "204fce49-86e9-59fa-829d-1c63ea8287ce"
+                }
+              },
+              {
+                "event": "text.changed",
+                "outcome": "success",
+                "equals": {
+                  "action": "insert",
+                  "slot": "root",
+                  "depth": 0,
+                  "at_end": true,
+                  "item_id": "204fce49-86e9-59fa-829d-1c63ea8287ce",
+                  "slot_filled": true
+                },
+                "min_count": {
+                  "inserted": 1
+                }
+              }
+            ]
+          },
+          "next": "sub",
+          "allowed_targets": [
+            "canvas.ink",
+            "text.input",
+            "text.input"
+          ]
+        },
+        {
+          "id": "sub",
+          "title_key": "teaching_c07_formula_sub_title",
+          "body_key": "teaching_c07_formula_sub_body",
+          "target": "text.structure.sub",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "formula.inserted",
+            "outcome": "success",
+            "equals": {
+              "kind": "sub",
+              "parent_kind": "root",
+              "slot": "root",
+              "depth": 0,
+              "item_id": "204fce49-86e9-59fa-829d-1c63ea8287ce",
+              "structures": 3
+            }
+          },
+          "next": "sub_base"
+        },
+        {
+          "id": "sub_base",
+          "title_key": "teaching_c07_formula_sub_base_title",
+          "body_key": "teaching_c07_formula_sub_base_body",
+          "target": "text.input",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "text.changed",
+            "outcome": "success",
+            "equals": {
+              "action": "insert",
+              "parent_kind": "sub",
+              "slot": "base",
+              "depth": 1,
+              "item_id": "204fce49-86e9-59fa-829d-1c63ea8287ce",
+              "slot_filled": true
+            },
+            "min_count": {
+              "inserted": 1
+            }
+          },
+          "next": "sub_sub"
+        },
+        {
+          "id": "sub_sub",
+          "title_key": "teaching_c07_formula_sub_sub_title",
+          "body_key": "teaching_c07_formula_sub_sub_body",
+          "target": "text.input",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "text.changed",
+            "outcome": "success",
+            "equals": {
+              "action": "insert",
+              "parent_kind": "sub",
+              "slot": "sub",
+              "depth": 1,
+              "item_id": "204fce49-86e9-59fa-829d-1c63ea8287ce",
+              "slot_filled": true
+            },
+            "min_count": {
+              "inserted": 1
+            }
+          },
+          "next": "root_after_sub"
+        },
+        {
+          "id": "root_after_sub",
+          "title_key": "teaching_c07_formula_root_after_sub_title",
+          "body_key": "teaching_c07_formula_root_after_sub_body",
+          "target": "text.input",
+          "input_policy": "canvas",
+          "wait": {
+            "sequence": [
+              {
+                "event": "formula.slot_changed",
+                "outcome": "success",
+                "equals": {
+                  "slot": "root",
+                  "depth": 0,
+                  "item_id": "204fce49-86e9-59fa-829d-1c63ea8287ce"
+                }
+              },
+              {
+                "event": "formula.cursor_moved",
+                "outcome": "success",
+                "equals": {
+                  "slot": "root",
+                  "depth": 0,
+                  "at_end": true,
+                  "item_id": "204fce49-86e9-59fa-829d-1c63ea8287ce"
+                }
+              },
+              {
+                "event": "text.changed",
+                "outcome": "success",
+                "equals": {
+                  "action": "insert",
+                  "slot": "root",
+                  "depth": 0,
+                  "at_end": true,
+                  "item_id": "204fce49-86e9-59fa-829d-1c63ea8287ce",
+                  "slot_filled": true
+                },
+                "min_count": {
+                  "inserted": 1
+                }
+              }
+            ]
+          },
+          "next": "sqrt",
+          "allowed_targets": [
+            "canvas.ink",
+            "text.input",
+            "text.input"
+          ]
+        },
+        {
+          "id": "sqrt",
+          "title_key": "teaching_c07_formula_sqrt_title",
+          "body_key": "teaching_c07_formula_sqrt_body",
+          "target": "text.structure.sqrt",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "formula.inserted",
+            "outcome": "success",
+            "equals": {
+              "kind": "sqrt",
+              "parent_kind": "root",
+              "slot": "root",
+              "depth": 0,
+              "item_id": "204fce49-86e9-59fa-829d-1c63ea8287ce",
+              "structures": 4
+            }
+          },
+          "next": "sqrt_frac"
+        },
+        {
+          "id": "sqrt_frac",
+          "title_key": "teaching_c07_formula_sqrt_frac_title",
+          "body_key": "teaching_c07_formula_sqrt_frac_body",
+          "target": "text.structure.frac",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "formula.inserted",
+            "outcome": "success",
+            "equals": {
+              "kind": "frac",
+              "parent_kind": "sqrt",
+              "slot": "arg",
+              "depth": 1,
+              "item_id": "204fce49-86e9-59fa-829d-1c63ea8287ce",
+              "structures": 5
+            }
+          },
+          "next": "sqrt_num"
+        },
+        {
+          "id": "sqrt_num",
+          "title_key": "teaching_c07_formula_sqrt_num_title",
+          "body_key": "teaching_c07_formula_sqrt_num_body",
+          "target": "text.input",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "text.changed",
+            "outcome": "success",
+            "equals": {
+              "action": "insert",
+              "parent_kind": "frac",
+              "slot": "num",
+              "depth": 2,
+              "item_id": "204fce49-86e9-59fa-829d-1c63ea8287ce",
+              "slot_filled": true
+            },
+            "min_count": {
+              "inserted": 1
+            }
+          },
+          "next": "sqrt_den"
+        },
+        {
+          "id": "sqrt_den",
+          "title_key": "teaching_c07_formula_sqrt_den_title",
+          "body_key": "teaching_c07_formula_sqrt_den_body",
+          "target": "text.input",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "text.changed",
+            "outcome": "success",
+            "equals": {
+              "action": "insert",
+              "parent_kind": "frac",
+              "slot": "den",
+              "depth": 2,
+              "item_id": "204fce49-86e9-59fa-829d-1c63ea8287ce",
+              "slot_filled": true
+            },
+            "min_count": {
+              "inserted": 1
+            }
+          },
+          "next": "root_after_sqrt"
+        },
+        {
+          "id": "root_after_sqrt",
+          "title_key": "teaching_c07_formula_root_after_sqrt_title",
+          "body_key": "teaching_c07_formula_root_after_sqrt_body",
+          "target": "text.input",
+          "input_policy": "canvas",
+          "wait": {
+            "sequence": [
+              {
+                "event": "formula.slot_changed",
+                "outcome": "success",
+                "equals": {
+                  "slot": "root",
+                  "depth": 0,
+                  "item_id": "204fce49-86e9-59fa-829d-1c63ea8287ce"
+                }
+              },
+              {
+                "event": "formula.cursor_moved",
+                "outcome": "success",
+                "equals": {
+                  "slot": "root",
+                  "depth": 0,
+                  "at_end": true,
+                  "item_id": "204fce49-86e9-59fa-829d-1c63ea8287ce"
+                }
+              },
+              {
+                "event": "text.changed",
+                "outcome": "success",
+                "equals": {
+                  "action": "insert",
+                  "slot": "root",
+                  "depth": 0,
+                  "at_end": true,
+                  "item_id": "204fce49-86e9-59fa-829d-1c63ea8287ce",
+                  "slot_filled": true
+                },
+                "min_count": {
+                  "inserted": 1
+                }
+              }
+            ]
+          },
+          "next": "sum",
+          "allowed_targets": [
+            "canvas.ink",
+            "text.input",
+            "text.input"
+          ]
+        },
+        {
+          "id": "sum",
+          "title_key": "teaching_c07_formula_sum_title",
+          "body_key": "teaching_c07_formula_sum_body",
+          "target": "text.structure.sum",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "formula.inserted",
+            "outcome": "success",
+            "equals": {
+              "kind": "sum",
+              "parent_kind": "root",
+              "slot": "root",
+              "depth": 0,
+              "item_id": "204fce49-86e9-59fa-829d-1c63ea8287ce",
+              "structures": 6
+            }
+          },
+          "next": "sum_lo"
+        },
+        {
+          "id": "sum_lo",
+          "title_key": "teaching_c07_formula_sum_lo_title",
+          "body_key": "teaching_c07_formula_sum_lo_body",
+          "target": "text.input",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "text.changed",
+            "outcome": "success",
+            "equals": {
+              "action": "insert",
+              "parent_kind": "sum",
+              "slot": "lo",
+              "depth": 1,
+              "item_id": "204fce49-86e9-59fa-829d-1c63ea8287ce",
+              "slot_filled": true
+            },
+            "min_count": {
+              "inserted": 1
+            }
+          },
+          "next": "sum_hi"
+        },
+        {
+          "id": "sum_hi",
+          "title_key": "teaching_c07_formula_sum_hi_title",
+          "body_key": "teaching_c07_formula_sum_hi_body",
+          "target": "text.input",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "text.changed",
+            "outcome": "success",
+            "equals": {
+              "action": "insert",
+              "parent_kind": "sum",
+              "slot": "hi",
+              "depth": 1,
+              "item_id": "204fce49-86e9-59fa-829d-1c63ea8287ce",
+              "slot_filled": true
+            },
+            "min_count": {
+              "inserted": 1
+            }
+          },
+          "next": "sum_arg"
+        },
+        {
+          "id": "sum_arg",
+          "title_key": "teaching_c07_formula_sum_arg_title",
+          "body_key": "teaching_c07_formula_sum_arg_body",
+          "target": "text.input",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "text.changed",
+            "outcome": "success",
+            "equals": {
+              "action": "insert",
+              "parent_kind": "sum",
+              "slot": "arg",
+              "depth": 1,
+              "item_id": "204fce49-86e9-59fa-829d-1c63ea8287ce",
+              "slot_filled": true
+            },
+            "min_count": {
+              "inserted": 1
+            }
+          },
+          "next": "root_after_sum"
+        },
+        {
+          "id": "root_after_sum",
+          "title_key": "teaching_c07_formula_root_after_sum_title",
+          "body_key": "teaching_c07_formula_root_after_sum_body",
+          "target": "text.input",
+          "input_policy": "canvas",
+          "wait": {
+            "sequence": [
+              {
+                "event": "formula.slot_changed",
+                "outcome": "success",
+                "equals": {
+                  "slot": "root",
+                  "depth": 0,
+                  "item_id": "204fce49-86e9-59fa-829d-1c63ea8287ce"
+                }
+              },
+              {
+                "event": "formula.cursor_moved",
+                "outcome": "success",
+                "equals": {
+                  "slot": "root",
+                  "depth": 0,
+                  "at_end": true,
+                  "item_id": "204fce49-86e9-59fa-829d-1c63ea8287ce"
+                }
+              },
+              {
+                "event": "text.changed",
+                "outcome": "success",
+                "equals": {
+                  "action": "insert",
+                  "slot": "root",
+                  "depth": 0,
+                  "at_end": true,
+                  "item_id": "204fce49-86e9-59fa-829d-1c63ea8287ce",
+                  "slot_filled": true
+                },
+                "min_count": {
+                  "inserted": 1
+                }
+              }
+            ]
+          },
+          "next": "integral",
+          "allowed_targets": [
+            "canvas.ink",
+            "text.input",
+            "text.input"
+          ]
+        },
+        {
+          "id": "integral",
+          "title_key": "teaching_c07_formula_integral_title",
+          "body_key": "teaching_c07_formula_integral_body",
+          "target": "text.structure.int",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "formula.inserted",
+            "outcome": "success",
+            "equals": {
+              "kind": "int",
+              "parent_kind": "root",
+              "slot": "root",
+              "depth": 0,
+              "item_id": "204fce49-86e9-59fa-829d-1c63ea8287ce",
+              "structures": 7
+            }
+          },
+          "next": "integral_lo"
+        },
+        {
+          "id": "integral_lo",
+          "title_key": "teaching_c07_formula_integral_lo_title",
+          "body_key": "teaching_c07_formula_integral_lo_body",
+          "target": "text.input",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "text.changed",
+            "outcome": "success",
+            "equals": {
+              "action": "insert",
+              "parent_kind": "int",
+              "slot": "lo",
+              "depth": 1,
+              "item_id": "204fce49-86e9-59fa-829d-1c63ea8287ce",
+              "slot_filled": true
+            },
+            "min_count": {
+              "inserted": 1
+            }
+          },
+          "next": "integral_hi"
+        },
+        {
+          "id": "integral_hi",
+          "title_key": "teaching_c07_formula_integral_hi_title",
+          "body_key": "teaching_c07_formula_integral_hi_body",
+          "target": "text.input",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "text.changed",
+            "outcome": "success",
+            "equals": {
+              "action": "insert",
+              "parent_kind": "int",
+              "slot": "hi",
+              "depth": 1,
+              "item_id": "204fce49-86e9-59fa-829d-1c63ea8287ce",
+              "slot_filled": true
+            },
+            "min_count": {
+              "inserted": 1
+            }
+          },
+          "next": "integral_arg"
+        },
+        {
+          "id": "integral_arg",
+          "title_key": "teaching_c07_formula_integral_arg_title",
+          "body_key": "teaching_c07_formula_integral_arg_body",
+          "target": "text.input",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "text.changed",
+            "outcome": "success",
+            "equals": {
+              "action": "insert",
+              "parent_kind": "int",
+              "slot": "arg",
+              "depth": 1,
+              "item_id": "204fce49-86e9-59fa-829d-1c63ea8287ce",
+              "slot_filled": true
+            },
+            "min_count": {
+              "inserted": 1
+            }
+          },
+          "next": "navigate_info"
+        },
+        {
+          "id": "navigate_info",
+          "title_key": "teaching_c07_formula_navigate_info_title",
+          "body_key": "teaching_c07_formula_navigate_info_body",
+          "kind": "information",
+          "next": "finish"
+        },
+        {
+          "id": "finish",
+          "title_key": "teaching_c07_formula_finish_title",
+          "body_key": "teaching_c07_formula_finish_body",
+          "target": "text.done",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "text.edit_finished",
+            "outcome": "success",
+            "equals": {
+              "retained": true,
+              "complete": true,
+              "structures": 7,
+              "item_id": "204fce49-86e9-59fa-829d-1c63ea8287ce",
+              "symbols_retained": true,
+              "structure_signature": "frac:2,int:1,sqrt:1,sub:1,sum:1,sup:1"
+            }
+          },
+          "next": "limits_info"
+        },
+        {
+          "id": "limits_info",
+          "title_key": "teaching_c07_formula_limits_info_title",
+          "body_key": "teaching_c07_formula_limits_info_body",
+          "kind": "information",
+          "next": "done"
+        },
+        {
+          "id": "done",
+          "title_key": "teaching_c07_formula_done_title",
+          "body_key": "teaching_c07_formula_done_body",
+          "kind": "information",
+          "next": "end_chapter"
+        }
+      ]
+    }
+  ]
+}

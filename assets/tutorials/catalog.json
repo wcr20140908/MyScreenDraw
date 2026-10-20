@@ -1,0 +1,112 @@
+{
+  "schema_version": 1,
+  "courses": [
+    "courses/c01.json",
+    "courses/c02.json",
+    "courses/c03.json",
+    "courses/c04.json",
+    "courses/c05.json",
+    "courses/c06.json",
+    "courses/c07.json",
+    "courses/c08.json",
+    "courses/c09.json",
+    "courses/c10.json",
+    "courses/c11.json",
+    "courses/c12.json",
+    "courses/c13.json"
+  ],
+  "fixtures": {
+    "core.interface": "fixtures/core.interface.msd",
+    "core.ink": "fixtures/core.ink.msd",
+    "core.select": "fixtures/core.select.msd",
+    "core.pages": "fixtures/core.pages.msd",
+    "core.files": "fixtures/core.files.msd",
+    "core.finish": "fixtures/core.finish.msd",
+    "writing.c02.styles": "fixtures/writing.c02.styles.msd",
+    "writing.c02.color_width": "fixtures/writing.c02.color_width.msd",
+    "writing.c02.transient": "fixtures/writing.c02.transient.msd",
+    "writing.c03.erase": "fixtures/writing.c03.erase.msd",
+    "writing.c03.history_clear": "fixtures/writing.c03.history_clear.msd",
+    "selection.c04.select_move": "fixtures/selection.c04.select_move.msd",
+    "selection.c04.transform": "fixtures/selection.c04.transform.msd",
+    "selection.c04.copy_delete": "fixtures/selection.c04.copy_delete.msd",
+    "pages.c05.board": "fixtures/pages.c05.board.msd",
+    "pages.c05.add_switch": "fixtures/pages.c05.add_switch.msd",
+    "pages.c05.rename_delete": "fixtures/pages.c05.rename_delete.msd",
+    "pages.c05.copy_position": "fixtures/pages.c05.copy_position.msd",
+    "pages.c05.reorder": "fixtures/pages.c05.reorder.msd",
+    "pages.c05.roam": "fixtures/pages.c05.roam.msd",
+    "geometry.c06.plane": "fixtures/geometry.c06.plane.msd",
+    "geometry.c06.solid": "fixtures/geometry.c06.solid.msd",
+    "geometry.c06.points": "fixtures/geometry.c06.points.msd",
+    "geometry.c06.recognition_snap": "fixtures/geometry.c06.recognition_snap.msd",
+    "text.c07.edit": "fixtures/text.c07.edit.msd",
+    "text.c07.format": "fixtures/text.c07.format.msd",
+    "text.c07.formula": "fixtures/text.c07.formula.msd",
+    "files.c08.save": "fixtures/files.c08.save.msd",
+    "files.c08.open_guard": "fixtures/files.c08.open_guard.msd",
+    "files.c08.recovery": "fixtures/files.c08.recovery.msd",
+    "files.c08.interval": "fixtures/files.c08.interval.msd",
+    "media.c09.image": "fixtures/media.c09.image.msd",
+    "media.c09.pdf_pages": "fixtures/media.c09.pdf_pages.msd",
+    "export.c10.formats": "fixtures/export.c10.formats.msd",
+    "export.c10.progress_cancel": "fixtures/export.c10.progress_cancel.msd",
+    "export.c10.result": "fixtures/export.c10.result.msd",
+    "measurement.c11.instruments": "fixtures/measurement.c11.instruments.msd",
+    "measurement.c11.calibration": "fixtures/measurement.c11.calibration.msd",
+    "toolbox.c12.calculator": "fixtures/toolbox.c12.calculator.msd",
+    "toolbox.c12.roster": "fixtures/toolbox.c12.roster.msd",
+    "toolbox.c12.timer": "fixtures/toolbox.c12.timer.msd",
+    "toolbox.c12.magnifier": "fixtures/toolbox.c12.magnifier.msd",
+    "toolbox.c12.spotlight": "fixtures/toolbox.c12.spotlight.msd",
+    "interface.c13.layout_theme": "fixtures/interface.c13.layout_theme.msd",
+    "interface.c13.monitor_audio": "fixtures/interface.c13.monitor_audio.msd",
+    "interface.c13.lifecycle": "fixtures/interface.c13.lifecycle.msd",
+    "interface.c13.system": "fixtures/interface.c13.system.msd"
+  },
+  "groups": [
+    {
+      "id": "core",
+      "title_key": "teaching_group_core",
+      "courses": [
+        "c01"
+      ]
+    },
+    {
+      "id": "drawing",
+      "title_key": "teaching_group_drawing",
+      "courses": [
+        "c02",
+        "c03",
+        "c06"
+      ]
+    },
+    {
+      "id": "editing",
+      "title_key": "teaching_group_editing",
+      "courses": [
+        "c04",
+        "c05",
+        "c07"
+      ]
+    },
+    {
+      "id": "files",
+      "title_key": "teaching_group_files",
+      "courses": [
+        "c08",
+        "c09",
+        "c10"
+      ]
+    },
+    {
+      "id": "tools",
+      "title_key": "tools",
+      "courses": [
+        "c11",
+        "c12",
+        "c13"
+      ]
+    }
+  ]
+}

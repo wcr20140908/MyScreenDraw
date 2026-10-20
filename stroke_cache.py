@@ -4,7 +4,7 @@
 The owner invalidates after in-place geometry/style edits. Replaced/shortened
 lists are detected independently. No pixel surfaces or cross-page copies live here.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import math
 from PyQt6.QtCore import QPointF, QRectF
 from PyQt6.QtGui import QPainterPath
@@ -29,6 +29,7 @@ class StrokeCommand:
     clip_bounds: object = None
     clip_margin: float = 0.0
     index: int = -1
+    parts: list = field(default_factory=list)
 
 
 class StrokeGeometryCache:
@@ -41,6 +42,7 @@ class StrokeGeometryCache:
         self.count = 0
         self.tail = None
         self.commands = []
+        self._next_part_order = 0
         self.groups = {}
         self.object_bounds = {}
         self._cells = {}
@@ -82,6 +84,8 @@ class StrokeGeometryCache:
                                         index=len(self.commands))
                 self.commands.append(command)
                 self._index_command(command)
+            command.parts.append((self._next_part_order, segment))
+            self._next_part_order += 1
             # Preserve the original selection margin semantics, including normal
             # and marker strokes whose bounds intentionally omit their pen width.
             margin = ink_radius(segment) if style else 0.0
@@ -138,18 +142,68 @@ class StrokeGeometryCache:
             for cell in cells:
                 self._cells.setdefault(cell,set()).add(index)
 
+    def segments_in_rect(self, rect):
+        """Return local stroke parts in source order, including interleaved strokes."""
+        parts = [part for command in self.visible_commands(rect) for part in command.parts]
+        return [segment for _, segment in sorted(parts, key=lambda part: part[0])]
+
+    def discard_segments(self, segments, removed, grouped_styles, ink_radius):
+        """Keep unaffected paths/index entries after an eraser deletes source parts."""
+        removed_parts = {id(segment) for segment in removed}
+        affected_ids = {segment['id'] for segment in removed}
+        affected = [command for command in self.commands
+                    if command is not None and command.segment['id'] in affected_ids]
+        remaining = sorted((part for command in affected for part in command.parts
+                            if id(part[1]) not in removed_parts), key=lambda part: part[0])
+        order = {id(segment): index for index, segment in remaining}
+        dirty = QRectF()
+        for command in affected:
+            dirty = dirty.united(command.clip_bounds)
+            self.commands[command.index] = None
+            cells = self._command_cells.pop(command.index)
+            if cells is None:
+                self._wide_commands.discard(command.index)
+            else:
+                for cell in cells:
+                    bucket = self._cells[cell]
+                    bucket.remove(command.index)
+                    if not bucket:
+                        del self._cells[cell]
+            if command.path is not None:
+                segment = command.segment
+                del self.groups[(segment['id'], segment.get('style'), bool(segment.get('marker')))]
+        # Reuse sync's path/gap/bounds logic, but only for strokes actually hit.
+        rebuilt = StrokeGeometryCache()
+        rebuilt.sync([segment for _, segment in remaining], grouped_styles, ink_radius)
+        for previous, command in zip(affected, rebuilt.commands):
+            command.index = previous.index
+            command.parts = [(order[id(segment)], segment) for _, segment in command.parts]
+            self.commands[command.index] = command
+            self._index_command(command)
+            dirty = dirty.united(command.clip_bounds)
+        self.groups.update(rebuilt.groups)
+        for object_id in affected_ids:
+            if object_id in rebuilt.object_bounds:
+                self.object_bounds[object_id] = rebuilt.object_bounds[object_id]
+            else:
+                self.object_bounds.pop(object_id, None)
+        self.parts_processed += rebuilt.parts_processed
+        self.source = segments
+        self.count = len(segments)
+        self.tail = segments[-1] if segments else None
+        return dirty
+
     def visible_commands(self, clip):
-        """Cull in Python before painting; sorted indices preserve alpha/z order."""
+        """Cull before painting; surviving first parts determine alpha/z order."""
         cells = None if clip is None else self._covered_cells(clip)
         if cells is None:
             candidates = range(len(self.commands))
         else:
-            indices = set(self._wide_commands)
+            candidates = set(self._wide_commands)
             for cell in cells:
-                indices.update(self._cells.get(cell, ()))
-            candidates = sorted(indices)
+                candidates.update(self._cells.get(cell, ()))
         self.query_candidates = len(candidates)
-        for index in candidates:
-            command = self.commands[index]
-            if clip is None or clip.intersects(command.clip_bounds):
-                yield command
+        commands = (self.commands[index] for index in candidates)
+        visible = (command for command in commands if command is not None
+                   and (clip is None or clip.intersects(command.clip_bounds)))
+        yield from sorted(visible, key=lambda command: command.parts[0][0])

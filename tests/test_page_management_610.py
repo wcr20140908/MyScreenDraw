@@ -92,7 +92,7 @@ def test_drag_requests_actual_document_order(document):
     widget = panel.thumbnail_list
     widget.setCurrentRow(0)
     widget.doItemsLayout()
-    target = widget.visualItemRect(widget.item(1)).bottomLeft()
+    target = widget.visualItemRect(widget.item(1)).bottomRight()
     accepted = []
     event = SimpleNamespace(source=lambda: widget, position=lambda: QPointF(target),
                             setDropAction=lambda action: None, accept=lambda: accepted.append(True),
@@ -165,7 +165,7 @@ def test_drop_uses_dragged_identity_not_a_later_current_row(document):
     widget._drag_source_id = canvas.pages[0]["page_id"]
     widget.setCurrentRow(1)
     widget.doItemsLayout()
-    point = widget.visualItemRect(widget.item(1)).bottomLeft()
+    point = widget.visualItemRect(widget.item(1)).bottomRight()
     event = SimpleNamespace(source=lambda: widget, position=lambda: QPointF(point),
                             setDropAction=lambda _: None, accept=lambda: None, ignore=lambda: None)
     widget.dropEvent(event)
@@ -207,7 +207,8 @@ def test_internal_drag_move_uses_generic_autoscroll_and_accepts_page_insertion(d
     housekeeping = Mock()
     monkeypatch.setattr(QAbstractItemView, "dragMoveEvent", housekeeping)
     accepted = []
-    event = SimpleNamespace(source=lambda: widget, setDropAction=lambda _: None,
+    event = SimpleNamespace(source=lambda: widget, position=lambda: QPointF(10, 10),
+                            setDropAction=lambda _: None,
                             accept=lambda: accepted.append(True), ignore=lambda: accepted.append(False))
     widget.dragMoveEvent(event)
     housekeeping.assert_called_once_with(widget, event)

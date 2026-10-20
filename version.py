@@ -1,5 +1,5 @@
-# SPDX-FileCopyrightText: MyScreenDraw contributors
+﻿# SPDX-FileCopyrightText: MyScreenDraw contributors
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Single source of truth for application versioning."""
-VERSION = "6.1.1"
+VERSION = "6.2.0"
 APP_VERSION = f"v{VERSION}"

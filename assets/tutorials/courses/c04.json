@@ -1,0 +1,268 @@
+{
+  "schema_version": 1,
+  "id": "c04",
+  "revision": 1,
+  "compat_revision": 1,
+  "title_key": "teaching_c04_title",
+  "chapters": [
+    {
+      "id": "c04.select_move",
+      "title_key": "teaching_c04_select_move_title",
+      "fixture": "selection.c04.select_move",
+      "steps": [
+        {
+          "id": "intro",
+          "title_key": "teaching_c04_select_move_intro_title",
+          "body_key": "teaching_c04_select_move_intro_body",
+          "kind": "information",
+          "next": "tool"
+        },
+        {
+          "id": "tool",
+          "title_key": "teaching_c04_select_move_tool_title",
+          "body_key": "teaching_c04_select_move_tool_body",
+          "target": "toolbar.select",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "tool.changed",
+            "outcome": "success",
+            "equals": {
+              "tool": "SELECT",
+              "drawing_mode": true
+            }
+          },
+          "next": "select"
+        },
+        {
+          "id": "select",
+          "title_key": "teaching_c04_select_move_select_title",
+          "body_key": "teaching_c04_select_move_select_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "selection.changed",
+            "outcome": "success",
+            "equals": {
+              "count": 1,
+              "method": "click"
+            }
+          },
+          "next": "move"
+        },
+        {
+          "id": "move",
+          "title_key": "teaching_c04_select_move_move_title",
+          "body_key": "teaching_c04_select_move_move_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "selection.transformed",
+            "outcome": "success",
+            "equals": {
+              "action": "move",
+              "count": 1
+            }
+          },
+          "next": "done"
+        },
+        {
+          "id": "done",
+          "title_key": "teaching_c04_select_move_done_title",
+          "body_key": "teaching_c04_select_move_done_body",
+          "kind": "information",
+          "next": "end_chapter"
+        }
+      ]
+    },
+    {
+      "id": "c04.transform",
+      "title_key": "teaching_c04_transform_title",
+      "fixture": "selection.c04.transform",
+      "steps": [
+        {
+          "id": "intro",
+          "title_key": "teaching_c04_transform_intro_title",
+          "body_key": "teaching_c04_transform_intro_body",
+          "kind": "information",
+          "next": "tool"
+        },
+        {
+          "id": "tool",
+          "title_key": "teaching_c04_transform_tool_title",
+          "body_key": "teaching_c04_transform_tool_body",
+          "target": "toolbar.select",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "tool.changed",
+            "outcome": "success",
+            "equals": {
+              "tool": "SELECT",
+              "drawing_mode": true
+            }
+          },
+          "next": "select"
+        },
+        {
+          "id": "select",
+          "title_key": "teaching_c04_transform_select_title",
+          "body_key": "teaching_c04_transform_select_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "selection.changed",
+            "outcome": "success",
+            "equals": {
+              "count": 1,
+              "method": "click"
+            }
+          },
+          "next": "handles"
+        },
+        {
+          "id": "handles",
+          "title_key": "teaching_c04_transform_handles_title",
+          "body_key": "teaching_c04_transform_handles_body",
+          "kind": "information",
+          "next": "scale"
+        },
+        {
+          "id": "scale",
+          "title_key": "teaching_c04_transform_scale_title",
+          "body_key": "teaching_c04_transform_scale_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "selection.transformed",
+            "outcome": "success",
+            "equals": {
+              "action": "scale",
+              "count": 1
+            }
+          },
+          "next": "rotate"
+        },
+        {
+          "id": "rotate",
+          "title_key": "teaching_c04_transform_rotate_title",
+          "body_key": "teaching_c04_transform_rotate_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "selection.transformed",
+            "outcome": "success",
+            "equals": {
+              "action": "rotate",
+              "count": 1
+            }
+          },
+          "next": "done"
+        },
+        {
+          "id": "done",
+          "title_key": "teaching_c04_transform_done_title",
+          "body_key": "teaching_c04_transform_done_body",
+          "kind": "information",
+          "next": "end_chapter"
+        }
+      ]
+    },
+    {
+      "id": "c04.copy_delete",
+      "title_key": "teaching_c04_copy_delete_title",
+      "fixture": "selection.c04.copy_delete",
+      "steps": [
+        {
+          "id": "intro",
+          "title_key": "teaching_c04_copy_delete_intro_title",
+          "body_key": "teaching_c04_copy_delete_intro_body",
+          "kind": "information",
+          "next": "tool"
+        },
+        {
+          "id": "tool",
+          "title_key": "teaching_c04_copy_delete_tool_title",
+          "body_key": "teaching_c04_copy_delete_tool_body",
+          "target": "toolbar.select",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "tool.changed",
+            "outcome": "success",
+            "equals": {
+              "tool": "SELECT",
+              "drawing_mode": true
+            }
+          },
+          "next": "box"
+        },
+        {
+          "id": "box",
+          "title_key": "teaching_c04_copy_delete_box_title",
+          "body_key": "teaching_c04_copy_delete_box_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "selection.changed",
+            "outcome": "success",
+            "equals": {
+              "count": 2,
+              "method": "rectangle"
+            }
+          },
+          "next": "copy"
+        },
+        {
+          "id": "copy",
+          "title_key": "teaching_c04_copy_delete_copy_title",
+          "body_key": "teaching_c04_copy_delete_copy_body",
+          "target": "selection.duplicate",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "selection.duplicated",
+            "outcome": "success",
+            "equals": {
+              "count": 2,
+              "preserved": 2,
+              "selected_new": 2
+            }
+          },
+          "next": "delete"
+        },
+        {
+          "id": "delete",
+          "title_key": "teaching_c04_copy_delete_delete_title",
+          "body_key": "teaching_c04_copy_delete_delete_body",
+          "target": "selection.delete",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "selection.deleted",
+            "outcome": "success",
+            "equals": {
+              "count": 2,
+              "remaining_ids": "8a611863-06cc-5ea4-aa66-80266ebfd34a,c6b990f4-5ab7-5d4b-b539-a69e2534890e"
+            }
+          },
+          "next": "undo"
+        },
+        {
+          "id": "undo",
+          "title_key": "teaching_c04_copy_delete_undo_title",
+          "body_key": "teaching_c04_copy_delete_undo_body",
+          "target": "toolbar.undo",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "history.undone",
+            "outcome": "success"
+          },
+          "next": "done"
+        },
+        {
+          "id": "done",
+          "title_key": "teaching_c04_copy_delete_done_title",
+          "body_key": "teaching_c04_copy_delete_done_body",
+          "kind": "information",
+          "next": "end_chapter"
+        }
+      ]
+    }
+  ]
+}

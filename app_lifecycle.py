@@ -15,12 +15,14 @@ import os
 import sys
 import json
 import tempfile
+import time
 import weakref
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from PyQt6.QtWidgets import QSystemTrayIcon, QMenu, QMessageBox, QWidgetAction, QLabel, QDialog, QWidget, QToolTip
 from PyQt6.QtGui import QAction, QIcon, QPainter, QColor, QFont
-from PyQt6.QtCore import Qt, QTimer, QObject, QEvent
+from PyQt6.QtCore import Qt, QTimer, QObject, QEvent, QRect, QAbstractEventDispatcher, QThread
 from PyQt6 import sip
 
 
@@ -30,6 +32,83 @@ class LifecycleState:
     COLLAPSED = "collapsed"
     HIDDEN = "hidden"
     QUITTING = "quitting"
+
+
+@dataclass(frozen=True)
+class _TeachingWindowSnapshot:
+    window: QWidget
+    visible: bool
+    geometry: QRect
+    normal_geometry: QRect
+    saved_geometry: object
+    state: Qt.WindowState
+
+
+@dataclass(frozen=True)
+class _TeachingTimerSnapshot:
+    timer: QTimer
+    active: bool
+    interval: int
+    remaining: int
+    single_shot: bool
+    timer_type: Qt.TimerType
+
+
+@dataclass(eq=False)
+class _TeachingSuspension:
+    manager_ref: object
+    windows: tuple
+    timers: tuple
+    focus_ref: object
+    restored: bool = False
+
+
+class _TeachingTimerPhase(QObject):
+    """Reset a resumed repeating timer's first (remaining) period, not its interval.
+
+    QTimer.start(remaining) would change the nominal interval. Re-registering
+    its existing dispatcher ID keeps QTimer's interval, activity, and genuine
+    timeout delivery intact, including single-shot and stop/restart semantics.
+    """
+
+    def __init__(self, timer, dispatcher, timer_id, interval, timer_type):
+        super().__init__(timer)
+        self._timer_ref = weakref.ref(timer)
+        self._dispatcher = dispatcher
+        self._timer_id = timer_id
+        self._interval = interval
+        self._timer_type = timer_type
+        timer.installEventFilter(self)
+
+    def cancel(self):
+        timer = self._timer_ref()
+        if timer is not None and not sip.isdeleted(timer):
+            timer.removeEventFilter(self)
+        self.deleteLater()
+
+    def eventFilter(self, watched, event):
+        if event.type() != QEvent.Type.Timer:
+            return False
+        if watched.timerId() != self._timer_id:
+            # A callback or another owner explicitly stopped/restarted it.
+            self.cancel()
+            return False
+        if event.timerId() != self._timer_id:
+            return False
+        try:
+            if not watched.isSingleShot():
+                if not self._dispatcher.unregisterTimer(self._timer_id):
+                    raise RuntimeError("Cannot reset the teaching timer's repeating period")
+                self._dispatcher.registerTimer(self._timer_id, self._interval,
+                                               self._timer_type, watched)
+        except Exception as error:
+            # Never let an exception escape a Qt event filter (or spin a timer).
+            watched.stop()
+            self.cancel()
+            print(f"Teaching timer resume failed: {error}", file=sys.stderr)
+            return True
+        self.cancel()
+        return False
 
 
 class _BackgroundWindowGuard(QObject):
@@ -44,14 +123,31 @@ class _BackgroundWindowGuard(QObject):
         # Do not keep the panel/manager alive through a global application filter.
         manager_ref = getattr(self, "_manager_ref", None)
         manager = manager_ref() if manager_ref is not None else None
-        if manager is None or manager.state != LifecycleState.HIDDEN or not isinstance(watched, QWidget):
+        if manager is None or not isinstance(watched, QWidget):
             return False
-        if (event.type() == QEvent.Type.Close
-                or (event.type() == QEvent.Type.Hide and watched in manager._background_allowed_windows)):
-            manager._forget_closed_window(watched)
-        elif (event.type() == QEvent.Type.Show and watched.isWindow()
-              and manager._owns_window(watched) and not manager._allowed_in_background(watched)):
-            watched.hide()
+        suspended = getattr(manager.panel, "_teaching_suspended", False)
+        context = getattr(manager.panel, "runtime_context", None)
+        paths = getattr(context, "paths", None)
+        inactive = context is not None and not context.ui_active
+        if (event.type() == QEvent.Type.Show and watched.isWindow()
+                and manager._owns_window(watched)):
+            allowed_restore = watched in getattr(manager, "_teaching_restore_windows", ())
+            allowed_recovery = (suspended and not inactive
+                                and watched in getattr(manager, "_teaching_recovery_windows", ()))
+            allowed_practice = (suspended and not inactive and context is not None
+                                and getattr(paths, "practice", False) is True
+                                and watched in manager._practice_teaching_windows)
+            if not (allowed_restore or allowed_recovery or allowed_practice) and (suspended or inactive or (
+                    manager.state == LifecycleState.HIDDEN
+                    and not manager._allowed_in_background(watched))):
+                watched.hide()
+            elif watched.isVisible():
+                manager._queue_teaching_raise(watched)
+        elif manager.state == LifecycleState.HIDDEN and not suspended:
+            if (event.type() == QEvent.Type.Close or (
+                    event.type() == QEvent.Type.Hide
+                    and watched in manager._background_allowed_windows)):
+                manager._forget_closed_window(watched)
         return False
 
 
@@ -87,12 +183,23 @@ class AppLifecycleManager:
         self._restore_windows = []
         self._background_allowed_windows = weakref.WeakSet()
         self._tool_windows = weakref.WeakSet()
+        self._teaching_token = None
+        self._teaching_restoring = False
+        self._teaching_restore_windows = weakref.WeakSet()
+        self._teaching_recovery_windows = weakref.WeakSet()
+        self._practice_teaching_windows = weakref.WeakSet()
+        self._teaching_windows = []
+        self._teaching_raise_pending = weakref.WeakSet()
+        self._teaching_timer_phases = []
         self._window_guard = _BackgroundWindowGuard(self)
         self.app.installEventFilter(self._window_guard)
         self._setup_tray()
 
     def _setup_tray(self):
         """初始化托盘图标和菜单"""
+        context = getattr(self.panel, "runtime_context", None)
+        if context is not None and not context.tray:
+            return
         if not QSystemTrayIcon.isSystemTrayAvailable():
             print("WARNING: System tray not available. Background mode disabled.",
                   file=sys.stderr)
@@ -239,6 +346,12 @@ class AppLifecycleManager:
         if label is not None:
             label.setText(text)
 
+    def _teaching_coordinator(self):
+        coordinator = getattr(self.panel, "teaching_coordinator", None)
+        if isinstance(coordinator, QObject) and not sip.isdeleted(coordinator):
+            return coordinator
+        return None
+
     def _on_tray_activated(self, reason):
         """托盘图标激活：左键单击恢复完整主界面"""
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
@@ -246,13 +359,19 @@ class AppLifecycleManager:
 
     def _toggle_main_ui(self):
         """切换显示/隐藏主界面"""
-        if self.state == LifecycleState.HIDDEN:
+        coordinator = self._teaching_coordinator()
+        hidden = (coordinator.background_hidden if coordinator is not None and coordinator.active
+                  else self.state == LifecycleState.HIDDEN)
+        if hidden:
             self.restore_from_background()
         else:
             self.hide_to_background()
 
     def _open_settings_from_tray(self):
         """从托盘打开设置（后台也能打开）"""
+        coordinator = self._teaching_coordinator()
+        if getattr(self, "_teaching_token", None) is not None or coordinator is not None and coordinator.active:
+            return
         if self.state == LifecycleState.HIDDEN:
             # 后台状态：设置页懒创建后再显示，不恢复主面板。
             if self.panel.settings_panel is None:
@@ -263,8 +382,20 @@ class AppLifecycleManager:
             # 前台状态：正常打开
             self.panel.open_settings_panel()
 
+    def _route_teaching_action(self, action):
+        coordinator = self._teaching_coordinator()
+        if coordinator is not None and coordinator.request_lifecycle_action(action):
+            return True
+        # A lost coordinator cannot authorize mutation of a suspended original.
+        return getattr(self, "_teaching_token", None) is not None
+
     def _restart_app(self):
         """重启软件：保留当前未保存工作"""
+        context = getattr(self.panel, "runtime_context", None)
+        if context is not None and not context.ordinary_recovery:
+            return
+        if self._route_teaching_action("restart"):
+            return
         if self._quit_dialog_showing or self.state == LifecycleState.QUITTING:
             return
         import subprocess
@@ -326,6 +457,8 @@ class AppLifecycleManager:
 
     def _quit_app(self):
         """退出软件：显示保存提示"""
+        if self._route_teaching_action("quit"):
+            return
         if self._quit_dialog_showing or self.state == LifecycleState.QUITTING:
             return
 
@@ -389,6 +522,8 @@ class AppLifecycleManager:
 
     def _do_quit(self, save):
         """执行退出清理"""
+        if self._route_teaching_action("quit"):
+            return
         if getattr(self, "_quit_done", False):
             return
         self._quit_done = True
@@ -441,6 +576,112 @@ class AppLifecycleManager:
         """Track ownership without Qt parenting (native stacking owns the tools)."""
         self._tool_windows.add(window)
 
+    def teaching_windows(self):
+        windows = [ref() for ref in self._teaching_windows]
+        windows = [window for window in windows if window is not None and not sip.isdeleted(window)]
+        self._teaching_windows = [weakref.ref(window) for window in windows]
+        # Recent dialogs go first; input-transparent highlights cannot cover controls.
+        newest = list(reversed(windows))
+        return tuple(window for window in newest
+                     if not window.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)) + tuple(
+                     window for window in newest
+                     if window.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents))
+
+    def register_teaching_window(self, window):
+        if (not isinstance(window, QWidget) or sip.isdeleted(window) or not window.isWindow()
+                or QThread.currentThread() != self.panel.thread()):
+            raise ValueError("Teaching layer requires a live top-level window on the GUI thread")
+        self.register_tool_window(window)
+        if not any(existing is window for existing in self.teaching_windows()):
+            self._teaching_windows.append(weakref.ref(window))
+            self.panel._bound_key = None
+        if window.isVisible():
+            self._queue_teaching_raise(window)
+
+    def _queue_teaching_raise(self, window):
+        if (window not in self.teaching_windows() or window in self._teaching_raise_pending):
+            return
+        self._teaching_raise_pending.add(window)
+        manager_ref, window_ref = weakref.ref(self), weakref.ref(window)
+        def raise_later():
+            manager = manager_ref()
+            if manager is None:
+                return
+            current = window_ref()
+            if current is not None:
+                manager._teaching_raise_pending.discard(current)
+                manager._raise_teaching_window(current)
+        QTimer.singleShot(0, raise_later)
+
+    def _raise_teaching_window(self, window):
+        if (sip.isdeleted(self.panel) or window is None or sip.isdeleted(window)
+                or window not in self.teaching_windows() or not window.isVisible()
+                or self.state in (LifecycleState.HIDDEN, LifecycleState.QUITTING)):
+            return False
+        context = getattr(self.panel, "runtime_context", None)
+        if context is not None and not context.ui_active:
+            return False
+        if (getattr(self.panel, "_teaching_suspended", False)
+                and window not in self._practice_teaching_windows
+                and window not in self._teaching_recovery_windows):
+            return False
+        raise_window = getattr(self.panel, "raise_floating", None)
+        if not callable(raise_window):
+            return False
+        try:
+            raise_window(window)
+        except Exception:
+            return False
+        return True
+
+    def unregister_tool_window(self, window):
+        """Release explicit ownership/allowance, without touching other windows."""
+        self._tool_windows.discard(window)
+        self._background_allowed_windows.discard(window)
+        self._teaching_recovery_windows.discard(window)
+        self._practice_teaching_windows.discard(window)
+        self._teaching_windows = [ref for ref in self._teaching_windows if ref() is not None and ref() is not window]
+        self._teaching_raise_pending.discard(window)
+        self.panel._bound_key = None
+
+    def allow_practice_teaching_window(self, window):
+        """Trusted active child views only; original parent UI cannot use this exemption."""
+        context = getattr(self.panel, "runtime_context", None)
+        paths = getattr(context, "paths", None)
+        if (context is None or getattr(paths, "practice", False) is not True or not context.ui_active
+                or QThread.currentThread() != self.panel.thread()
+                or not isinstance(window, QWidget) or sip.isdeleted(window)
+                or not window.isWindow() or not self._owns_window(window)):
+            raise ValueError("An active owned practice teaching window is required")
+        self.register_teaching_window(window)
+        self._practice_teaching_windows.add(window)
+
+    def allow_teaching_recovery_window(self, window):
+        """Trusted parent UI only: broker must already confirm child NotRunning.
+
+        This is not a course/IPC capability. Only this exact owned top-level
+        prompt is exempted while suspended; inactive practice UI stays blocked.
+        """
+        if QThread.currentThread() != self.panel.thread():
+            raise RuntimeError("Teaching recovery UI must run on the panel's Qt thread")
+        if not isinstance(window, QWidget) or sip.isdeleted(window) or not window.isWindow():
+            raise ValueError("Teaching recovery prompt must be a live top-level QWidget")
+        self.register_teaching_window(window)
+        self._teaching_recovery_windows.add(window)
+
+    def disallow_teaching_recovery_window(self, window):
+        """Revoke just this prompt's bypass; keep ownership until explicit teardown.
+
+        Keeping ownership prevents a parentless prompt from evading the guard
+        as a foreign window. The caller can unregister it after hiding/deleting.
+        """
+        if QThread.currentThread() != self.panel.thread():
+            raise RuntimeError("Teaching recovery UI must run on the panel's Qt thread")
+        self._teaching_recovery_windows.discard(window)
+        if (isinstance(window, QWidget) and not sip.isdeleted(window)
+                and self._owns_window(window) and getattr(self.panel, "_teaching_suspended", False)):
+            window.hide()
+
     def _owns_window(self, window):
         # Tool windows historically have no Qt parent; discover those through
         # their owning panel as well as normal parent chains (dialogs/popups).
@@ -483,6 +724,294 @@ class AppLifecycleManager:
         return [window for window in self.app.topLevelWidgets()
                 if not sip.isdeleted(window) and self._owns_window(window)]
 
+    def _owned_timers(self, windows=None):
+        """Only this panel's QObject trees and explicitly held parentless timers."""
+        roots = [self.panel] + list(self._owned_windows() if windows is None else windows)
+        coordinator = getattr(self.panel, "teaching_coordinator", None)
+        if not isinstance(coordinator, QObject) or sip.isdeleted(coordinator):
+            coordinator = None
+
+        def teaching_transport_timer(timer):
+            # This explicit trusted parent owns broker/transport deadlines, not
+            # the business UI. They must run through suspension and session
+            # cleanup, and must never become part of a restoration token.
+            parent = timer
+            while parent is not None:
+                if parent is coordinator:
+                    return True
+                parent = parent.parent()
+            return False
+
+        timers = {}
+        for root in roots:
+            if sip.isdeleted(root):
+                continue
+            for timer in root.findChildren(QTimer):
+                if not sip.isdeleted(timer) and not teaching_transport_timer(timer):
+                    timers[id(timer)] = timer
+            for value in vars(root).values():
+                if (not isinstance(value, QTimer) or sip.isdeleted(value)
+                        or teaching_transport_timer(value)):
+                    continue
+                parent = value.parent()
+                while parent is not None and parent not in roots:
+                    parent = parent.parent()
+                if parent in roots or value.parent() is None:
+                    timers[id(value)] = value
+        return list(timers.values())
+
+    def _cancel_teaching_timer_phases(self):
+        phases, self._teaching_timer_phases = self._teaching_timer_phases, []
+        for phase in phases:
+            if not sip.isdeleted(phase):
+                phase.cancel()
+
+    def suspend_for_teaching(self):
+        """Hide owned UI and pause QTimers without editing the document/state.
+
+        The opaque token belongs to this manager. Repeated suspension raises
+        RuntimeError instead of replacing the original snapshot. Use on the Qt
+        GUI thread, just like the normal lifecycle's hide/show operations.
+        """
+        if self._teaching_token is not None or getattr(self.panel, "_teaching_suspended", False):
+            raise RuntimeError("This panel is already suspended for teaching")
+        if QThread.currentThread() != self.panel.thread():
+            raise RuntimeError("Teaching suspension must run on the panel's Qt thread")
+        windows = self._owned_windows()
+        timers = self._owned_timers(windows)
+        if any(timer.thread() != QThread.currentThread() for timer in timers):
+            raise RuntimeError("Owned teaching timers must run on the panel's Qt thread")
+        focus = self.app.focusWidget()
+        token = _TeachingSuspension(
+            weakref.ref(self),
+            tuple(_TeachingWindowSnapshot(window, window.isVisible(), QRect(window.geometry()),
+                                          QRect(window.normalGeometry()), window.saveGeometry(),
+                                          window.windowState()) for window in windows),
+            tuple(_TeachingTimerSnapshot(timer, timer.isActive(), timer.interval(),
+                                         timer.remainingTime(), timer.isSingleShot(), timer.timerType())
+                  for timer in timers),
+            weakref.ref(focus) if focus is not None and self._owns_window(focus) else None,
+        )
+        self._teaching_token = token
+        self.panel._teaching_suspended = True
+        try:
+            self._cancel_teaching_timer_phases()
+            for timer in timers:
+                timer.stop()
+            for window in windows:
+                window.hide()
+            # hideEvent callbacks can create/restart timers; leave them stopped.
+            for timer in self._owned_timers():
+                timer.stop()
+        except Exception as error:
+            for rollback_error in self._teaching_fail_closed(token):
+                error.add_note(f"Teaching suspension cleanup failed: {rollback_error}")
+            raise
+        return token
+
+    def _teaching_fail_closed(self, token):
+        """Best-effort rollback; do not let one broken widget leave others live."""
+        self.panel._teaching_suspended = True
+        self._teaching_restore_windows.clear()
+        errors = []
+        try:
+            self._cancel_teaching_timer_phases()
+        except Exception as error:
+            errors.append(error)
+        windows = {id(snapshot.window): snapshot.window for snapshot in token.windows}
+        timers = {id(snapshot.timer): snapshot.timer for snapshot in token.timers}
+        try:
+            windows.update((id(window), window) for window in self._owned_windows())
+            timers.update((id(timer), timer) for timer in self._owned_timers())
+        except Exception as error:
+            errors.append(error)
+        for timer in timers.values():
+            if not sip.isdeleted(timer):
+                try:
+                    timer.stop()
+                except Exception as error:
+                    errors.append(error)
+        for window in windows.values():
+            if not sip.isdeleted(window):
+                try:
+                    window.hide()
+                except Exception as error:
+                    errors.append(error)
+        # Hide handlers may create as well as restart timers during rollback.
+        try:
+            timers.update((id(timer), timer) for timer in self._owned_timers())
+        except Exception as error:
+            errors.append(error)
+        for timer in timers.values():
+            if not sip.isdeleted(timer):
+                try:
+                    timer.stop()
+                except Exception as error:
+                    errors.append(error)
+        return errors
+
+    def _restore_teaching_windows(self, token):
+        def depth(snapshot):
+            count, parent = 0, snapshot.window.parentWidget()
+            while parent is not None:
+                count += 1
+                parent = parent.parentWidget()
+            return count
+        for snapshot in sorted(token.windows, key=depth):
+            window = snapshot.window
+            unchanged_stateful = (
+                snapshot.state != Qt.WindowState.WindowNoState
+                and window.windowState() == snapshot.state
+                and window.geometry() == snapshot.geometry
+                and window.normalGeometry() == snapshot.normal_geometry)
+            # hide() retains these properties. Reconstructing an already exact
+            # fullscreen/no-focus window can instead make Qt restore its normal
+            # geometry or clear fullscreen; leave that state untouched.
+            if not unchanged_stateful:
+                window.setWindowState(Qt.WindowState.WindowNoState)
+                window.setGeometry(snapshot.normal_geometry if snapshot.normal_geometry.isValid()
+                                   else snapshot.geometry)
+                if not window.restoreGeometry(snapshot.saved_geometry):
+                    raise RuntimeError("Cannot restore an owned teaching window's geometry")
+                window.setWindowState(snapshot.state)
+                if snapshot.state == Qt.WindowState.WindowNoState and window.geometry() != snapshot.geometry:
+                    window.setGeometry(snapshot.geometry)
+            if snapshot.visible:
+                window.show()
+            else:
+                window.hide()
+            if (window.isVisible() != snapshot.visible or window.windowState() != snapshot.state
+                    or window.geometry() != snapshot.geometry):
+                raise RuntimeError(
+                    "Cannot restore an owned teaching window's visibility/state/geometry: "
+                    f"{type(window).__name__}, expected "
+                    f"{snapshot.visible}/{snapshot.state}/{snapshot.geometry}, got "
+                    f"{window.isVisible()}/{window.windowState()}/{window.geometry()}")
+
+    def _restore_teaching_timer(self, snapshot):
+        timer = snapshot.timer
+        timer.stop()
+        timer.setInterval(snapshot.interval)
+        timer.setSingleShot(snapshot.single_shot)
+        timer.setTimerType(snapshot.timer_type)
+        if (timer.interval() != snapshot.interval or timer.isSingleShot() != snapshot.single_shot
+                or timer.timerType() != snapshot.timer_type):
+            raise RuntimeError("Cannot restore an owned teaching timer's configuration")
+        if not snapshot.active:
+            return
+        timer.start()
+        if not timer.isActive():
+            raise RuntimeError("Cannot restart an owned teaching timer")
+        if snapshot.remaining < 0 or snapshot.remaining == snapshot.interval:
+            return
+        dispatcher = QAbstractEventDispatcher.instance(timer.thread())
+        timer_id = timer.timerId()
+        if dispatcher is None or not dispatcher.unregisterTimer(timer_id):
+            raise RuntimeError("Cannot restore an owned teaching timer's remaining deadline")
+        dispatcher.registerTimer(timer_id, snapshot.remaining, snapshot.timer_type, timer)
+        if timer.remainingTime() < 0:
+            raise RuntimeError("Cannot register an owned teaching timer's remaining deadline")
+        if not snapshot.single_shot:
+            self._teaching_timer_phases.append(_TeachingTimerPhase(
+                timer, dispatcher, timer_id, snapshot.interval, snapshot.timer_type))
+
+    def restore_practice_after_chapter_change(self, token):
+        """Rebuild this child's UI sizes; original-work restoration remains exact."""
+        context = getattr(self.panel, "runtime_context", None)
+        paths = getattr(context, "paths", None)
+        if (context is None or not context.ui_active or getattr(paths, "practice", False) is not True):
+            raise ValueError("Chapter layout rebuilding requires an active private practice")
+        if (not isinstance(token, _TeachingSuspension) or token.manager_ref() is not self
+                or not token.restored and self._teaching_token is not token):
+            raise ValueError("Private chapter token belongs to this manager only")
+        if QThread.currentThread() != self.panel.thread() or self._teaching_restoring:
+            raise RuntimeError("Private chapter rebuilding requires the idle GUI thread")
+        if token.restored:
+            return
+        snapshots = []
+        canvas = getattr(self.panel, "canvas", None)
+        for snapshot in token.windows:
+            window = snapshot.window
+            if sip.isdeleted(window):
+                raise RuntimeError("A private chapter window was destroyed")
+            if window is not canvas and snapshot.state == Qt.WindowState.WindowNoState:
+                geometry = QRect(snapshot.geometry.topLeft(), window.size())
+                normal = QRect(snapshot.normal_geometry)
+                if normal.isValid():
+                    normal.setSize(window.size())
+                snapshot = replace(snapshot, geometry=geometry, normal_geometry=normal)
+            snapshots.append(snapshot)
+        token.windows = tuple(snapshots)
+        self.restore_after_teaching(token)
+
+    def restore_after_teaching(self, token):
+        """Restore this manager's snapshot, or raise and keep it retryable/hidden.
+
+        Successful tokens are idempotent, even if a later suspension is active.
+        Invalid/foreign tokens raise ValueError; reentrant restoration raises
+        RuntimeError. No document editing, normal background restore, or listener
+        shutdown occurs here. The input barrier stays up until every step succeeds.
+        """
+        if not isinstance(token, _TeachingSuspension) or token.manager_ref() is not self:
+            raise ValueError("Teaching token belongs to a different lifecycle manager")
+        if token.restored:
+            return
+        if self._teaching_token is not token:
+            raise ValueError("Teaching token is not this manager's active suspension")
+        if self._teaching_restoring:
+            raise RuntimeError("Teaching restoration is already in progress")
+        if QThread.currentThread() != self.panel.thread():
+            raise RuntimeError("Teaching restoration must run on the panel's Qt thread")
+        current_focus = self.app.focusWidget()
+        foreign_focus = (current_focus is not None and current_focus.isVisible()
+                         and not self._owns_window(current_focus))
+        self.panel._teaching_suspended = True
+        self._teaching_restoring = True
+        self._teaching_restore_windows = weakref.WeakSet(
+            snapshot.window for snapshot in token.windows if snapshot.visible)
+        try:
+            if any(sip.isdeleted(snapshot.window) for snapshot in token.windows):
+                raise RuntimeError("An owned teaching window was destroyed while suspended")
+            if any(sip.isdeleted(snapshot.timer) for snapshot in token.timers):
+                raise RuntimeError("An owned teaching timer was destroyed while suspended")
+            self._cancel_teaching_timer_phases()
+            for timer in self._owned_timers():
+                timer.stop()
+            self._restore_teaching_windows(token)
+            bind = getattr(self.panel, "bind_topmost_stack", None)
+            if bind is not None:
+                self.panel._bound_key = None
+                result = bind()
+                # The existing binding method catches its own native errors.
+                if result is False or getattr(self.panel, "_topmost_error", False):
+                    raise RuntimeError("Cannot rebind the restored teaching window stack")
+            self._restore_teaching_windows(token)
+            for timer in self._owned_timers():
+                timer.stop()
+            focus = token.focus_ref() if token.focus_ref is not None else None
+            if (not foreign_focus and focus is not None and not sip.isdeleted(focus)
+                    and self._owns_window(focus) and focus.isVisible() and focus.isEnabled()
+                    and focus.window() in self._teaching_restore_windows):
+                focus.window().activateWindow()
+                focus.setFocus(Qt.FocusReason.OtherFocusReason)
+            # Focus/activation handlers can run nested event loops. Only restart
+            # the original timers once all such UI work has finished.
+            for snapshot in token.timers:
+                self._restore_teaching_timer(snapshot)
+            if hasattr(self.panel, "_timer_last"):
+                self.panel._timer_last = time.monotonic()
+        except Exception as error:
+            for rollback_error in self._teaching_fail_closed(token):
+                error.add_note(f"Teaching restoration cleanup failed: {rollback_error}")
+            raise
+        else:
+            token.restored = True
+            self._teaching_token = None
+            self.panel._teaching_suspended = False
+        finally:
+            self._teaching_restore_windows.clear()
+            self._teaching_restoring = False
+
     def _remember_tool_windows(self):
         # Selection, text editing, menus and thumbnail previews are transient:
         # switching to safe mouse mode intentionally ends those interactions.
@@ -495,6 +1024,11 @@ class AppLifecycleManager:
 
     def hide_to_background(self):
         """转入后台：隐藏所有窗口，保持托盘图标"""
+        coordinator = self._teaching_coordinator()
+        if coordinator is not None and coordinator.hide_to_background():
+            return
+        if getattr(self, "_teaching_token", None) is not None:
+            return
         if self._quit_dialog_showing or self.state in (LifecycleState.HIDDEN, LifecycleState.QUITTING):
             return
 
@@ -550,6 +1084,11 @@ class AppLifecycleManager:
 
     def restore_from_background(self):
         """从后台恢复完整主界面"""
+        coordinator = self._teaching_coordinator()
+        if coordinator is not None and coordinator.restore_from_background():
+            return
+        if getattr(self, "_teaching_token", None) is not None:
+            return
         if self._quit_dialog_showing or self.state in (LifecycleState.SHOWING, LifecycleState.QUITTING):
             return
 

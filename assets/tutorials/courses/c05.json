@@ -1,0 +1,666 @@
+{
+  "schema_version": 1,
+  "id": "c05",
+  "revision": 2,
+  "compat_revision": 1,
+  "title_key": "teaching_c05_title",
+  "chapters": [
+    {
+      "id": "c05.board",
+      "title_key": "teaching_c05_board_title",
+      "fixture": "pages.c05.board",
+      "steps": [
+        {
+          "id": "intro",
+          "title_key": "teaching_c05_board_intro_title",
+          "body_key": "teaching_c05_board_intro_body",
+          "kind": "information",
+          "next": "enter"
+        },
+        {
+          "id": "enter",
+          "title_key": "teaching_c05_board_enter_title",
+          "body_key": "teaching_c05_board_enter_body",
+          "target": "toolbar.whiteboard",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "whiteboard.entered",
+            "outcome": "success",
+            "equals": {
+              "whiteboard_mode": true
+            }
+          },
+          "next": "black"
+        },
+        {
+          "id": "black",
+          "title_key": "teaching_c05_board_black_title",
+          "body_key": "teaching_c05_board_black_body",
+          "target": "toolbar.board_style",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "board.style_changed",
+            "outcome": "success",
+            "equals": {
+              "style": "BLACK",
+              "whiteboard_mode": true
+            }
+          },
+          "next": "white"
+        },
+        {
+          "id": "white",
+          "title_key": "teaching_c05_board_white_title",
+          "body_key": "teaching_c05_board_white_body",
+          "target": "toolbar.board_style",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "board.style_changed",
+            "outcome": "success",
+            "equals": {
+              "style": "WHITE",
+              "whiteboard_mode": true
+            }
+          },
+          "next": "exit"
+        },
+        {
+          "id": "exit",
+          "title_key": "teaching_c05_board_exit_title",
+          "body_key": "teaching_c05_board_exit_body",
+          "target": "toolbar.whiteboard",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "whiteboard.exited",
+            "outcome": "success",
+            "equals": {
+              "whiteboard_mode": false
+            }
+          },
+          "next": "boundaries"
+        },
+        {
+          "id": "boundaries",
+          "title_key": "teaching_c05_board_boundaries_title",
+          "body_key": "teaching_c05_board_boundaries_body",
+          "kind": "information",
+          "next": "done"
+        },
+        {
+          "id": "done",
+          "title_key": "teaching_c05_board_done_title",
+          "body_key": "teaching_c05_board_done_body",
+          "kind": "information",
+          "next": "end_chapter"
+        }
+      ]
+    },
+    {
+      "id": "c05.add_switch",
+      "title_key": "teaching_c05_add_switch_title",
+      "fixture": "pages.c05.add_switch",
+      "steps": [
+        {
+          "id": "intro",
+          "title_key": "teaching_c05_add_switch_intro_title",
+          "body_key": "teaching_c05_add_switch_intro_body",
+          "kind": "information",
+          "next": "add"
+        },
+        {
+          "id": "add",
+          "title_key": "teaching_c05_add_switch_add_title",
+          "body_key": "teaching_c05_add_switch_add_body",
+          "target": "pages.add",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "page.created",
+            "outcome": "success",
+            "equals": {
+              "pages": 2
+            }
+          },
+          "next": "previous"
+        },
+        {
+          "id": "previous",
+          "title_key": "teaching_c05_add_switch_previous_title",
+          "body_key": "teaching_c05_add_switch_previous_body",
+          "target": "pages.previous",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "page.changed",
+            "outcome": "success",
+            "equals": {
+              "page": 1,
+              "pages": 2
+            }
+          },
+          "next": "next"
+        },
+        {
+          "id": "next",
+          "title_key": "teaching_c05_add_switch_next_title",
+          "body_key": "teaching_c05_add_switch_next_body",
+          "target": "pages.next",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "page.changed",
+            "outcome": "success",
+            "equals": {
+              "page": 2,
+              "pages": 2
+            }
+          },
+          "next": "pen_return_info"
+        },
+        {
+          "id": "pen_return_info",
+          "title_key": "teaching_c05_add_switch_pen_return_info_title",
+          "body_key": "teaching_c05_add_switch_pen_return_info_body",
+          "kind": "information",
+          "next": "done"
+        },
+        {
+          "id": "done",
+          "title_key": "teaching_c05_add_switch_done_title",
+          "body_key": "teaching_c05_add_switch_done_body",
+          "kind": "information",
+          "next": "end_chapter"
+        }
+      ]
+    },
+    {
+      "id": "c05.rename_delete",
+      "title_key": "teaching_c05_rename_delete_title",
+      "fixture": "pages.c05.rename_delete",
+      "steps": [
+        {
+          "id": "intro",
+          "title_key": "teaching_c05_rename_delete_intro_title",
+          "body_key": "teaching_c05_rename_delete_intro_body",
+          "kind": "information",
+          "next": "thumbnails"
+        },
+        {
+          "id": "thumbnails",
+          "title_key": "teaching_c05_rename_delete_thumbnails_title",
+          "body_key": "teaching_c05_rename_delete_thumbnails_body",
+          "target": "pages.thumbnails_button",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "thumbnails.opened",
+            "outcome": "success"
+          },
+          "next": "rename"
+        },
+        {
+          "id": "rename",
+          "title_key": "teaching_c05_rename_delete_rename_title",
+          "body_key": "teaching_c05_rename_delete_rename_body",
+          "target": "pages.rename",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "page.renamed",
+            "outcome": "success",
+            "equals": {
+              "page_id": "3f097c9b-e6fc-5944-922e-e2f57d201434"
+            }
+          },
+          "next": "cancel_delete"
+        },
+        {
+          "id": "cancel_delete",
+          "title_key": "teaching_c05_rename_delete_cancel_delete_title",
+          "body_key": "teaching_c05_rename_delete_cancel_delete_body",
+          "target": "pages.delete",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "page.deleted",
+            "outcome": "cancelled",
+            "equals": {
+              "page_id": "3f097c9b-e6fc-5944-922e-e2f57d201434",
+              "retained": true,
+              "pages": 2
+            }
+          },
+          "next": "delete"
+        },
+        {
+          "id": "delete",
+          "title_key": "teaching_c05_rename_delete_delete_title",
+          "body_key": "teaching_c05_rename_delete_delete_body",
+          "target": "pages.delete",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "page.deleted",
+            "outcome": "success",
+            "equals": {
+              "page_id": "3f097c9b-e6fc-5944-922e-e2f57d201434",
+              "removed": 1,
+              "pages": 1
+            }
+          },
+          "next": "limits"
+        },
+        {
+          "id": "limits",
+          "title_key": "teaching_c05_rename_delete_limits_title",
+          "body_key": "teaching_c05_rename_delete_limits_body",
+          "kind": "information",
+          "next": "done"
+        },
+        {
+          "id": "done",
+          "title_key": "teaching_c05_rename_delete_done_title",
+          "body_key": "teaching_c05_rename_delete_done_body",
+          "kind": "information",
+          "next": "end_chapter"
+        }
+      ]
+    },
+    {
+      "id": "c05.copy_position",
+      "title_key": "teaching_c05_copy_position_title",
+      "fixture": "pages.c05.copy_position",
+      "steps": [
+        {
+          "id": "intro",
+          "title_key": "teaching_c05_copy_position_intro_title",
+          "body_key": "teaching_c05_copy_position_intro_body",
+          "kind": "information",
+          "next": "settings_info"
+        },
+        {
+          "id": "settings_info",
+          "title_key": "teaching_c05_copy_position_settings_info_title",
+          "body_key": "teaching_c05_copy_position_settings_info_body",
+          "kind": "information",
+          "next": "before"
+        },
+        {
+          "id": "before",
+          "title_key": "teaching_c05_copy_position_before_title",
+          "body_key": "teaching_c05_copy_position_before_body",
+          "target": "pages.copy_position",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "page.copy_placement_changed",
+            "outcome": "success",
+            "equals": {
+              "placement": "before"
+            }
+          },
+          "next": "copy_before"
+        },
+        {
+          "id": "copy_before",
+          "title_key": "teaching_c05_copy_position_copy_before_title",
+          "body_key": "teaching_c05_copy_position_copy_before_body",
+          "target": "pages.copy",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "page.copied",
+            "outcome": "success",
+            "equals": {
+              "placement": "before",
+              "added": 1,
+              "content_matches": true
+            }
+          },
+          "next": "after"
+        },
+        {
+          "id": "after",
+          "title_key": "teaching_c05_copy_position_after_title",
+          "body_key": "teaching_c05_copy_position_after_body",
+          "target": "pages.copy_position",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "page.copy_placement_changed",
+            "outcome": "success",
+            "equals": {
+              "placement": "after"
+            }
+          },
+          "next": "copy_after"
+        },
+        {
+          "id": "copy_after",
+          "title_key": "teaching_c05_copy_position_copy_after_title",
+          "body_key": "teaching_c05_copy_position_copy_after_body",
+          "target": "pages.copy",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "page.copied",
+            "outcome": "success",
+            "equals": {
+              "placement": "after",
+              "added": 1,
+              "content_matches": true
+            }
+          },
+          "next": "first"
+        },
+        {
+          "id": "first",
+          "title_key": "teaching_c05_copy_position_first_title",
+          "body_key": "teaching_c05_copy_position_first_body",
+          "target": "pages.copy_position",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "page.copy_placement_changed",
+            "outcome": "success",
+            "equals": {
+              "placement": "first"
+            }
+          },
+          "next": "copy_first"
+        },
+        {
+          "id": "copy_first",
+          "title_key": "teaching_c05_copy_position_copy_first_title",
+          "body_key": "teaching_c05_copy_position_copy_first_body",
+          "target": "pages.copy",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "page.copied",
+            "outcome": "success",
+            "equals": {
+              "placement": "first",
+              "added": 1,
+              "content_matches": true
+            }
+          },
+          "next": "last"
+        },
+        {
+          "id": "last",
+          "title_key": "teaching_c05_copy_position_last_title",
+          "body_key": "teaching_c05_copy_position_last_body",
+          "target": "pages.copy_position",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "page.copy_placement_changed",
+            "outcome": "success",
+            "equals": {
+              "placement": "last"
+            }
+          },
+          "next": "copy_last"
+        },
+        {
+          "id": "copy_last",
+          "title_key": "teaching_c05_copy_position_copy_last_title",
+          "body_key": "teaching_c05_copy_position_copy_last_body",
+          "target": "pages.copy",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "page.copied",
+            "outcome": "success",
+            "equals": {
+              "placement": "last",
+              "added": 1,
+              "content_matches": true
+            }
+          },
+          "next": "limits"
+        },
+        {
+          "id": "limits",
+          "title_key": "teaching_c05_copy_position_limits_title",
+          "body_key": "teaching_c05_copy_position_limits_body",
+          "kind": "information",
+          "next": "done"
+        },
+        {
+          "id": "done",
+          "title_key": "teaching_c05_copy_position_done_title",
+          "body_key": "teaching_c05_copy_position_done_body",
+          "kind": "information",
+          "next": "end_chapter"
+        }
+      ]
+    },
+    {
+      "id": "c05.reorder",
+      "title_key": "teaching_c05_reorder_title",
+      "fixture": "pages.c05.reorder",
+      "steps": [
+        {
+          "id": "intro",
+          "title_key": "teaching_c05_reorder_intro_title",
+          "body_key": "teaching_c05_reorder_intro_body",
+          "kind": "information",
+          "next": "thumbnails"
+        },
+        {
+          "id": "thumbnails",
+          "title_key": "teaching_c05_reorder_thumbnails_title",
+          "body_key": "teaching_c05_reorder_thumbnails_body",
+          "target": "pages.thumbnails_button",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "thumbnails.opened",
+            "outcome": "success"
+          },
+          "next": "select_last"
+        },
+        {
+          "id": "select_last",
+          "title_key": "teaching_c05_reorder_select_last_title",
+          "body_key": "teaching_c05_reorder_select_last_body",
+          "target": "pages.thumbnail_list",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "page.changed",
+            "outcome": "success",
+            "equals": {
+              "page_id": "1e585f16-158e-5825-9fb1-5a9650035e6d",
+              "page": 3,
+              "pages": 3
+            }
+          },
+          "next": "identity_info"
+        },
+        {
+          "id": "identity_info",
+          "title_key": "teaching_c05_reorder_identity_info_title",
+          "body_key": "teaching_c05_reorder_identity_info_body",
+          "kind": "information",
+          "next": "reorder"
+        },
+        {
+          "id": "reorder",
+          "title_key": "teaching_c05_reorder_reorder_title",
+          "body_key": "teaching_c05_reorder_reorder_body",
+          "target": "pages.thumbnail_list",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "page.reordered",
+            "outcome": "success",
+            "equals": {
+              "page_id": "1e585f16-158e-5825-9fb1-5a9650035e6d",
+              "next_page_id": "4002658d-2623-5043-8bda-b298be3ba36e",
+              "destination": 0,
+              "current_page_id": "1e585f16-158e-5825-9fb1-5a9650035e6d",
+              "page": 1,
+              "pages": 3
+            }
+          },
+          "next": "verify_info"
+        },
+        {
+          "id": "verify_info",
+          "title_key": "teaching_c05_reorder_verify_info_title",
+          "body_key": "teaching_c05_reorder_verify_info_body",
+          "kind": "information",
+          "next": "done"
+        },
+        {
+          "id": "done",
+          "title_key": "teaching_c05_reorder_done_title",
+          "body_key": "teaching_c05_reorder_done_body",
+          "kind": "information",
+          "next": "end_chapter"
+        }
+      ]
+    },
+    {
+      "id": "c05.roam",
+      "title_key": "teaching_c05_roam_title",
+      "fixture": "pages.c05.roam",
+      "steps": [
+        {
+          "id": "intro",
+          "title_key": "teaching_c05_roam_intro_title",
+          "body_key": "teaching_c05_roam_intro_body",
+          "kind": "information",
+          "next": "enter_roam"
+        },
+        {
+          "id": "enter_roam",
+          "title_key": "teaching_c05_roam_enter_roam_title",
+          "body_key": "teaching_c05_roam_enter_roam_body",
+          "target": "toolbar.mode",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "mode.changed",
+            "outcome": "success",
+            "equals": {
+              "drawing_mode": false,
+              "whiteboard_mode": true,
+              "board_view_active": true,
+              "roaming": true,
+              "mouse_passthrough": false
+            }
+          },
+          "next": "pan"
+        },
+        {
+          "id": "pan",
+          "title_key": "teaching_c05_roam_pan_title",
+          "body_key": "teaching_c05_roam_pan_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "board.view_changed",
+            "outcome": "success",
+            "equals": {
+              "action": "pan",
+              "changed": true,
+              "content_unchanged": true,
+              "history_unchanged": true,
+              "roaming": true,
+              "mouse_passthrough": false
+            },
+            "min_count": {"distance": 40}
+          },
+          "next": "zoom_in"
+        },
+        {
+          "id": "zoom_in",
+          "title_key": "teaching_c05_roam_zoom_in_title",
+          "body_key": "teaching_c05_roam_zoom_in_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "board.view_changed",
+            "outcome": "success",
+            "equals": {
+              "action": "zoom", "direction": "in", "anchor_preserved": true,
+              "changed": true, "content_unchanged": true, "history_unchanged": true,
+              "roaming": true, "mouse_passthrough": false
+            }
+          },
+          "next": "zoom_out"
+        },
+        {
+          "id": "zoom_out",
+          "title_key": "teaching_c05_roam_zoom_out_title",
+          "body_key": "teaching_c05_roam_zoom_out_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "board.view_changed",
+            "outcome": "success",
+            "equals": {
+              "action": "zoom", "direction": "out", "anchor_preserved": true,
+              "changed": true, "content_unchanged": true, "history_unchanged": true,
+              "roaming": true, "mouse_passthrough": false
+            }
+          },
+          "next": "fit"
+        },
+        {
+          "id": "fit",
+          "title_key": "teaching_c05_roam_fit_title",
+          "body_key": "teaching_c05_roam_fit_body",
+          "target": "settings.view_fit",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "board.view_changed",
+            "outcome": "success",
+            "equals": {
+              "action": "fit", "changed": true, "nonempty": true, "fitted": true,
+              "content_unchanged": true, "history_unchanged": true
+            }
+          },
+          "next": "home"
+        },
+        {
+          "id": "home",
+          "title_key": "teaching_c05_roam_home_title",
+          "body_key": "teaching_c05_roam_home_body",
+          "target": "settings.view_home",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "board.view_changed",
+            "outcome": "success",
+            "equals": {
+              "action": "home", "changed": true, "x": 0, "y": 0, "zoom": 1,
+              "content_unchanged": true, "history_unchanged": true
+            }
+          },
+          "next": "pen"
+        },
+        {
+          "id": "pen",
+          "title_key": "teaching_c05_roam_pen_title",
+          "body_key": "teaching_c05_roam_pen_body",
+          "target": "toolbar.pen",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "mode.changed",
+            "outcome": "success",
+            "equals": {
+              "drawing_mode": true, "whiteboard_mode": true,
+              "board_view_active": true, "roaming": false, "mouse_passthrough": false
+            }
+          },
+          "next": "ink"
+        },
+        {
+          "id": "ink",
+          "title_key": "teaching_c05_roam_ink_title",
+          "body_key": "teaching_c05_roam_ink_body",
+          "target": "canvas.ink",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "ink.committed", "outcome": "success",
+            "equals": {"tool": "PEN", "style": "pen"},
+            "min_count": {"segments": 1}
+          },
+          "next": "done"
+        },
+        {
+          "id": "done",
+          "title_key": "teaching_c05_roam_done_title",
+          "body_key": "teaching_c05_roam_done_body",
+          "kind": "information",
+          "next": "end_chapter"
+        }
+      ]
+    }
+  ]
+}

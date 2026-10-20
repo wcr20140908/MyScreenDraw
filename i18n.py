@@ -149,6 +149,7 @@ _BASE = {
     "board_white": ("白板", "Whiteboard", "Tableau blanc", "Pizarra", "Whiteboard", "Белая доска", "화이트보드", "ホワイトボード"),
     "page_label": ("第 {index} 页", "Page {index}", "Page {index}", "Página {index}", "Seite {index}", "Стр. {index}", "{index} 페이지", "{index} ページ"),
     "page_list": ("页面列表", "Pages", "Pages", "Páginas", "Seiten", "Страницы", "페이지 목록", "ページ一覧"),
+    "close_panel": ("关闭面板", "Close panel", "Fermer le panneau", "Cerrar panel", "Bedienfeld schließen", "Закрыть панель", "패널 닫기", "パネルを閉じる"),
     "page_of": ("页面 {value}", "Page {value}", "Page {value}", "Página {value}", "Seite {value}", "Страница {value}", "페이지 {value}", "ページ {value}"),
 
     # ---------- 主题 ----------
@@ -247,6 +248,27 @@ _BASE = {
                             "이 네트워크에서 확인 요청이 너무 많습니다. 잠시 후 다시 시도하세요(할당량은 네트워크 단위로 공유됩니다)",
                             "このネットワークからの確認が多すぎます。しばらくしてから再試行してください（割り当ては回線単位で共有されます）"),
     "update_hint": ("默认关闭。开启后仅在你点击检查时联网；可选择正式版或预览版，并在应用内确认下载与安装。", "Off by default. When enabled, it connects only when you check; choose stable or preview releases and confirm downloads and installation inside the app.", "Désactivé par défaut. La connexion n'a lieu qu'à la vérification ; choisissez stable ou preview et confirmez le téléchargement et l'installation dans l'application.", "Desactivado por defecto. Solo conecta al comprobar; elige versiones estables o preliminares y confirma la descarga y la instalación dentro de la aplicación.", "Standardmäßig aus. Verbindung nur beim Prüfen; stabile oder Vorschauversion wählen und Download sowie Installation in der Anwendung bestätigen.", "По умолчанию выключено. Сеть используется только при проверке; выберите стабильную или предварительную версию и подтвердите загрузку и установку в приложении.", "기본적으로 꺼져 있습니다. 확인할 때만 연결하며 안정/미리보기 버전을 선택하고 앱 안에서 다운로드와 설치를 확인합니다.", "既定はオフ。確認時のみ通信し、安定版またはプレビュー版を選び、アプリ内でダウンロードとインストールを確認します。"),
+
+    "feedback": ("反馈", "Feedback", "Donner un avis", "Enviar comentarios", "Feedback", "Обратная связь", "의견 보내기", "フィードバック"),
+
+    # ---------- 更新日志与 Release 说明 ----------
+    "update_history": ("更新日志", "Update history", "Historique des mises à jour", "Historial de actualizaciones", "Updateverlauf", "История обновлений", "업데이트 기록", "更新履歴"),
+    "update_history_hint": ("仅记录启用此功能后成功运行的已安装版本；更早的安装历史无法恢复。", "Only installed versions that ran successfully after this feature was enabled are recorded; earlier installation history cannot be recovered.", "Seules les versions installées qui ont été exécutées avec succès après l’activation de cette fonction sont enregistrées ; l’historique des installations antérieures ne peut pas être récupéré.", "Solo se registran las versiones instaladas que se hayan ejecutado correctamente tras activar esta función; no se puede recuperar el historial de instalaciones anteriores.", "Es werden nur installierte Versionen erfasst, die nach Aktivierung dieser Funktion erfolgreich ausgeführt wurden; frühere Installationsverläufe können nicht wiederhergestellt werden.", "Записываются только установленные версии, успешно запущенные после включения этой функции; более раннюю историю установок восстановить невозможно.", "이 기능을 활성화한 후 정상적으로 실행된 설치 버전만 기록됩니다. 이전 설치 기록은 복구할 수 없습니다.", "この機能を有効にした後、正常に実行されたインストール済みバージョンのみ記録されます。それ以前のインストール履歴は復元できません。"),
+    "update_history_current": ("当前版本：{value}", "Current version: {value}", "Version actuelle : {value}", "Versión actual: {value}", "Aktuelle Version: {value}", "Текущая версия: {value}", "현재 버전: {value}", "現在のバージョン：{value}"),
+    "update_history_seen": ("首次运行：{value}", "First run: {value}", "Première exécution : {value}", "Primera ejecución: {value}", "Erster Start: {value}", "Первый запуск: {value}", "최초 실행: {value}", "初回実行：{value}"),
+    "update_history_empty": ("尚无已安装版本记录，可查看当前版本的 Release 说明。", "No installed versions have been recorded yet. You can view the release notes for the current version.", "Aucune version installée n’a encore été enregistrée. Vous pouvez consulter les notes de publication de la version actuelle.", "Aún no hay registros de versiones instaladas. Puede consultar las notas de la versión actual.", "Es wurden noch keine installierten Versionen erfasst. Sie können die Versionshinweise zur aktuellen Version ansehen.", "Установленные версии пока не записаны. Можно просмотреть примечания к текущему выпуску.", "아직 설치된 버전 기록이 없습니다. 현재 버전의 릴리스 노트를 확인할 수 있습니다.", "インストール済みバージョンの記録はまだありません。現在のバージョンのリリースノートを確認できます。"),
+    "update_history_read_failed": ("读取更新日志失败：{detail}", "Failed to read update history: {detail}", "Échec de la lecture de l’historique des mises à jour : {detail}", "Error al leer el historial de actualizaciones: {detail}", "Updateverlauf konnte nicht gelesen werden: {detail}", "Не удалось прочитать историю обновлений: {detail}", "업데이트 기록을 읽지 못했습니다: {detail}", "更新履歴の読み込みに失敗しました：{detail}"),
+    "update_history_write_failed": ("更新日志保存失败：{detail}", "Failed to save update history: {detail}", "Échec de l’enregistrement de l’historique des mises à jour : {detail}", "Error al guardar el historial de actualizaciones: {detail}", "Updateverlauf konnte nicht gespeichert werden: {detail}", "Не удалось сохранить историю обновлений: {detail}", "업데이트 기록을 저장하지 못했습니다: {detail}", "更新履歴の保存に失敗しました：{detail}"),
+    "update_notes_title": ("本次更新内容 · {value}", "What’s new · {value}", "Nouveautés · {value}", "Novedades · {value}", "Neuerungen · {value}", "Что нового · {value}", "이번 업데이트 내용 · {value}", "今回の更新内容 · {value}"),
+    "update_notes_loading": ("正在获取 Release 说明…", "Fetching release notes…", "Récupération des notes de publication…", "Obteniendo notas de la versión…", "Versionshinweise werden abgerufen…", "Получение примечаний к выпуску…", "릴리스 노트를 가져오는 중…", "リリースノートを取得中…"),
+    "update_notes_failed": ("获取 Release 说明失败：{detail}", "Failed to fetch release notes: {detail}", "Échec de la récupération des notes de publication : {detail}", "Error al obtener las notas de la versión: {detail}", "Versionshinweise konnten nicht abgerufen werden: {detail}", "Не удалось получить примечания к выпуску: {detail}", "릴리스 노트를 가져오지 못했습니다: {detail}", "リリースノートの取得に失敗しました：{detail}"),
+    "update_notes_empty": ("该 Release 未提供更新说明。", "No release notes were provided for this release.", "Aucune note de publication n’a été fournie pour cette version.", "No se proporcionaron notas para esta versión.", "Für diese Veröffentlichung wurden keine Versionshinweise bereitgestellt.", "Для этого выпуска примечания не предоставлены.", "이 릴리스에는 업데이트 내용이 제공되지 않았습니다.", "このリリースには更新内容の説明がありません。"),
+    "update_notes_retry": ("重新获取", "Fetch again", "Récupérer à nouveau", "Volver a obtener", "Erneut abrufen", "Получить снова", "다시 가져오기", "再取得"),
+    "update_notes_unavailable": ("当前环境不允许联网获取 Release 说明。", "The current environment does not allow network access to fetch release notes.", "L’environnement actuel n’autorise pas l’accès au réseau pour récupérer les notes de publication.", "El entorno actual no permite acceder a la red para obtener las notas de la versión.", "Die aktuelle Umgebung erlaubt keinen Netzwerkzugriff zum Abrufen der Versionshinweise.", "В текущей среде доступ к сети для получения примечаний к выпуску запрещён.", "현재 환경에서는 릴리스 노트를 가져오기 위한 네트워크 접근이 허용되지 않습니다.", "現在の環境では、リリースノートを取得するためのネットワークアクセスが許可されていません。"),
+    "update_notes_not_found": ("未找到该版本的 Release（HTTP 404）；此版本可能尚未发布。", "No release was found for this version (HTTP 404); it may not have been published yet.", "Aucune publication trouvée pour cette version (HTTP 404) ; elle n’a peut-être pas encore été publiée.", "No se encontró una publicación para esta versión (HTTP 404); es posible que aún no se haya publicado.", "Für diese Version wurde kein Release gefunden (HTTP 404); sie wurde möglicherweise noch nicht veröffentlicht.", "Выпуск для этой версии не найден (HTTP 404); возможно, она ещё не опубликована.", "이 버전의 릴리스를 찾을 수 없습니다(HTTP 404). 아직 게시되지 않은 버전일 수 있습니다.", "このバージョンのリリースが見つかりません（HTTP 404）。まだ公開されていない可能性があります。"),
+    "update_notes_bad_response": ("Release 响应格式错误或版本不匹配。", "The release response is malformed or the version does not match.", "La réponse de publication est mal formée ou la version ne correspond pas.", "La respuesta de la publicación tiene un formato incorrecto o la versión no coincide.", "Die Release-Antwort ist fehlerhaft formatiert oder die Version stimmt nicht überein.", "Неверный формат ответа о выпуске или несовпадение версии.", "릴리스 응답 형식이 잘못되었거나 버전이 일치하지 않습니다.", "リリースの応答形式が不正か、バージョンが一致しません。"),
+    "update_notes_too_large": ("Release 说明超过大小限制。", "The release notes exceed the size limit.", "Les notes de publication dépassent la taille limite.", "Las notas de la versión superan el límite de tamaño.", "Die Versionshinweise überschreiten die Größenbeschränkung.", "Примечания к выпуску превышают допустимый размер.", "릴리스 노트가 크기 제한을 초과했습니다.", "リリースノートがサイズ制限を超えています。"),
+    "update_notes_network": ("网络连接失败或超时。", "The network connection failed or timed out.", "La connexion réseau a échoué ou a expiré.", "La conexión de red falló o agotó el tiempo de espera.", "Die Netzwerkverbindung ist fehlgeschlagen oder hat das Zeitlimit überschritten.", "Сбой сетевого подключения или истекло время ожидания.", "네트워크 연결에 실패했거나 시간이 초과되었습니다.", "ネットワーク接続に失敗したか、タイムアウトしました。"),
 
     # ---------- 通用参数标签 ----------
     "width": ("粗细", "Width", "Épaisseur", "Grosor", "Stärke", "Толщина", "굵기", "太さ"),
@@ -596,6 +618,207 @@ _BASE.update({
     'recovery_preview_unavailable': ('预览不可用', 'Preview unavailable', 'Aperçu indisponible', 'Vista previa no disponible', 'Vorschau nicht verfügbar', 'Предпросмотр недоступен', '미리보기 불가', 'プレビューできません'),
 })
 
+# Fixed software tutorial UI and session messages; course content is separate.
+_BASE.update({
+    'teaching_center_title': ('软件使用教学', 'Software tutorials', 'Tutoriels du logiciel', 'Tutoriales del programa', 'Software-Tutorials', 'Обучение работе с программой', '소프트웨어 사용 안내', 'ソフトウェアの使い方'),
+    'teaching_catalog': ('教程目录', 'Tutorial catalog', 'Catalogue des tutoriels', 'Catálogo de tutoriales', 'Tutorial-Übersicht', 'Каталог руководств', '튜토리얼 목록', 'チュートリアル一覧'),
+    'teaching_status': ('学习状态', 'Learning status', 'État d’avancement', 'Estado de avance', 'Lernstatus', 'Статус прохождения', '학습 상태', '学習状況'),
+    'teaching_search': ('搜索课程或章节', 'Search courses or chapters', 'Rechercher des cours ou des chapitres', 'Buscar cursos o capítulos', 'Kurse oder Kapitel suchen', 'Поиск курсов или глав', '과정 또는 챕터 검색', 'コースや章を検索'),
+    'teaching_filter_all': ('所有', 'All', 'Tous', 'Todos', 'Alle', 'Все', '전체', 'すべて'),
+    'teaching_filter_completed': ('已完成', 'Completed', 'Terminés', 'Completados', 'Abgeschlossen', 'Завершённые', '완료', '完了'),
+    'teaching_filter_unfinished': ('未完成', 'Unfinished', 'Non terminés', 'Sin completar', 'Nicht abgeschlossen', 'Незавершённые', '미완료', '未完了'),
+    'teaching_course_progress': ('已完成章节 {completed}/{total}', 'Chapters completed {completed}/{total}', 'Chapitres terminés {completed}/{total}', 'Capítulos completados {completed}/{total}', 'Abgeschlossene Kapitel {completed}/{total}', 'Завершено глав {completed}/{total}', '완료한 챕터 {completed}/{total}', '完了した章 {completed}/{total}'),
+    'teaching_chapter_switch_confirm': (
+        '切换章节将重新建立练习素材，当前练习中的未保存修改会被丢弃。是否切换？原工作不受影响。',
+        'Switching chapters reloads the practice material and discards unsaved practice changes. Switch chapters? Your original work is unaffected.',
+        'Changer de chapitre recharge les éléments d’exercice et abandonne les modifications non enregistrées de l’exercice. Continuer ? Votre travail d’origine reste intact.',
+        'Cambiar de capítulo vuelve a cargar el material y descarta los cambios sin guardar del ejercicio. ¿Continuar? El trabajo original se conserva.',
+        'Beim Kapitelwechsel wird das Übungsmaterial neu geladen. Ungespeicherte Änderungen der Übung werden verworfen. Fortfahren? Ihre ursprüngliche Arbeit bleibt erhalten.',
+        'При смене главы учебный материал загрузится заново, а несохранённые изменения в упражнении будут отброшены. Продолжить? Исходная работа сохранится.',
+        '장을 바꾸면 연습 자료를 다시 불러오고 연습에서 저장하지 않은 변경 사항을 버립니다. 바꾸시겠습니까? 원래 작업은 유지됩니다.',
+        '章を切り替えると練習素材を再読み込みし、練習中の未保存の変更を破棄します。切り替えますか？元の作業は保持されます。',
+    ),
+    'teaching_context_hint_title': (
+        '这个功能有使用教学', 'A tutorial is available for this feature',
+        'Un tutoriel est disponible pour cette fonction', 'Hay un tutorial para esta función',
+        'Für diese Funktion gibt es ein Tutorial', 'Для этой функции есть обучение',
+        '이 기능의 사용법을 배울 수 있습니다', 'この機能の使い方を学べます',
+    ),
+    'teaching_context_hint_body': (
+        '可以通过「{chapter}」练习这个功能。点击“开始学习”后进入独立练习；结束时回到当前工作。此提示不会自动开始教学。',
+        'Practice this feature in “{chapter}”. Choose Start tutorial to enter a separate practice session, then return to your current work when you finish. This hint does not start the tutorial automatically.',
+        'Exercez-vous à cette fonction dans « {chapter} ». Choisissez Démarrer le tutoriel pour ouvrir une session d’exercice distincte, puis retrouver votre travail actuel à la fin. Ce conseil ne lance pas le tutoriel automatiquement.',
+        'Practique esta función en «{chapter}». Elija Iniciar tutorial para abrir un ejercicio independiente y volver a su trabajo al terminar. Este aviso no inicia el tutorial automáticamente.',
+        'Üben Sie diese Funktion in „{chapter}“. Mit Tutorial starten öffnen Sie eine eigene Übung und kehren anschließend zu Ihrer aktuellen Arbeit zurück. Dieser Hinweis startet das Tutorial nicht automatisch.',
+        'Попробуйте эту функцию в главе «{chapter}». Нажмите «Начать обучение», чтобы открыть отдельное упражнение, а затем вернуться к текущей работе. Подсказка не запускает обучение автоматически.',
+        '「{chapter}」에서 이 기능을 연습할 수 있습니다. 튜토리얼 시작을 누르면 별도 연습이 열리고, 마치면 현재 작업으로 돌아옵니다. 이 안내는 튜토리얼을 자동으로 시작하지 않습니다.',
+        '「{chapter}」でこの機能を練習できます。「チュートリアルを開始」を選ぶと独立した練習が開き、終了後は現在の作業に戻ります。この案内から自動的に学習が始まることはありません。',
+    ),
+    'teaching_context_hint_later': (
+        '暂时不用', 'Not now', 'Pas maintenant', 'Ahora no', 'Jetzt nicht', 'Не сейчас', '나중에', '今はしない',
+    ),
+    'teaching_context_hints': (
+        '首次使用功能时显示教学提示',
+        'Show tutorial hints when using a feature for the first time',
+        'Afficher des conseils du tutoriel à la première utilisation d’une fonctionnalité',
+        'Mostrar consejos del tutorial al usar una función por primera vez',
+        'Tutorial-Hinweise bei der ersten Verwendung einer Funktion anzeigen',
+        'Показывать обучающие подсказки при первом использовании функции',
+        '기능을 처음 사용할 때 튜토리얼 안내 표시',
+        '機能を初めて使うときにチュートリアルのヒントを表示',
+    ),
+    'teaching_reset_progress': ('清除学习进度', 'Clear learning progress', 'Effacer la progression', 'Borrar el progreso de aprendizaje', 'Lernfortschritt löschen', 'Сбросить прогресс обучения', '학습 진행 상황 지우기', '学習の進捗を消去'),
+    'teaching_reset_confirm': (
+        '清除所有章节进度和已显示的功能提示记录。此操作不会修改你的板书、文件或软件设置。',
+        'Clear progress for all chapters and the record of feature hints already shown. This will not change your board content, files, or software settings.',
+        'Effacer la progression de tous les chapitres et l’historique des conseils déjà affichés pour les fonctionnalités. Cette opération ne modifiera pas le contenu de votre tableau, vos fichiers ni les paramètres du logiciel.',
+        'Borrar el progreso de todos los capítulos y el registro de consejos de funciones ya mostrados. Esta acción no modificará el contenido de tu pizarra, tus archivos ni la configuración del programa.',
+        'Den Fortschritt aller Kapitel und die Aufzeichnung bereits angezeigter Funktionshinweise löschen. Dabei werden deine Tafelbilder, Dateien oder Software-Einstellungen nicht geändert.',
+        'Очистить прогресс всех глав и историю уже показанных подсказок по функциям. Это действие не изменит ваши записи на доске, файлы или настройки программы.',
+        '모든 챕터의 진행 상황과 이미 표시된 기능 안내 기록을 지웁니다. 이 작업은 판서, 파일 또는 소프트웨어 설정을 변경하지 않습니다.',
+        'すべての章の進捗と、表示済みの機能ヒントの履歴を消去します。この操作で板書、ファイル、ソフトウェアの設定が変更されることはありません。',
+    ),
+    'teaching_reset_welcome': (
+        '下次启动时再次显示欢迎教学',
+        'Show the welcome tutorial again on next launch',
+        'Afficher à nouveau le tutoriel de bienvenue au prochain démarrage',
+        'Volver a mostrar el tutorial de bienvenida en el próximo inicio',
+        'Willkommens-Tutorial beim nächsten Start erneut anzeigen',
+        'Снова показать вводное обучение при следующем запуске',
+        '다음 실행 시 시작 튜토리얼 다시 표시',
+        '次回起動時に初回チュートリアルを再表示',
+    ),
+    'teaching_reset_accept': ('确认清除', 'Confirm and clear', 'Confirmer l’effacement', 'Confirmar borrado', 'Löschen bestätigen', 'Подтвердить очистку', '지우기 확인', '消去を確認'),
+    'teaching_cancel': ('取消', 'Cancel', 'Annuler', 'Cancelar', 'Abbrechen', 'Отмена', '취소', 'キャンセル'),
+    'teaching_start': ('开始学习', 'Start tutorial', 'Démarrer le tutoriel', 'Iniciar tutorial', 'Tutorial starten', 'Начать обучение', '튜토리얼 시작', 'チュートリアルを開始'),
+    'teaching_replay': ('重新学习', 'Replay tutorial', 'Revoir le tutoriel', 'Repetir tutorial', 'Tutorial wiederholen', 'Пройти заново', '튜토리얼 다시 보기', 'もう一度学習'),
+    'teaching_resume': ('继续学习', 'Resume tutorial', 'Reprendre le tutoriel', 'Reanudar tutorial', 'Tutorial fortsetzen', 'Продолжить обучение', '학습 계속', '学習を再開'),
+    'teaching_close': ('关闭', 'Close', 'Fermer', 'Cerrar', 'Schließen', 'Закрыть', '닫기', '閉じる'),
+    'teaching_status_not_started': ('未开始', 'Not started', 'Non commencé', 'Sin iniciar', 'Nicht begonnen', 'Не начато', '시작 전', '未開始'),
+    'teaching_status_in_progress': ('学习中', 'In progress', 'En cours', 'En curso', 'In Bearbeitung', 'В процессе', '학습 중', '学習中'),
+    'teaching_status_completed': ('已完成', 'Completed', 'Terminé', 'Completado', 'Abgeschlossen', 'Завершено', '완료', '完了'),
+    'teaching_status_skipped': ('已跳过', 'Skipped', 'Ignoré', 'Omitido', 'Übersprungen', 'Пропущено', '건너뜀', 'スキップ済み'),
+    'teaching_status_needs_review': ('需要复习', 'Review needed', 'À revoir', 'Requiere repaso', 'Wiederholung nötig', 'Требуется повторение', '복습 필요', '復習が必要'),
+    'teaching_controller_title': ('教学步骤', 'Tutorial steps', 'Étapes du tutoriel', 'Pasos del tutorial', 'Tutorial-Schritte', 'Шаги обучения', '튜토리얼 단계', 'チュートリアルの手順'),
+    'teaching_previous': ('上一步', 'Previous step', 'Étape précédente', 'Paso anterior', 'Vorheriger Schritt', 'Предыдущий шаг', '이전 단계', '前の手順'),
+    'teaching_next': ('下一步', 'Next step', 'Étape suivante', 'Paso siguiente', 'Nächster Schritt', 'Следующий шаг', '다음 단계', '次の手順'),
+    'teaching_pause': ('暂停', 'Pause', 'Pause', 'Pausar', 'Pausieren', 'Приостановить', '일시 정지', '一時停止'),
+    'teaching_skip': ('跳过', 'Skip', 'Passer', 'Omitir', 'Überspringen', 'Пропустить', '건너뛰기', 'スキップ'),
+    'teaching_retry': ('重试', 'Retry', 'Réessayer', 'Reintentar', 'Erneut versuchen', 'Повторить попытку', '다시 시도', '再試行'),
+    'teaching_exit': ('退出教学', 'Exit tutorial', 'Quitter le tutoriel', 'Salir del tutorial', 'Tutorial beenden', 'Выйти из обучения', '튜토리얼 종료', 'チュートリアルを終了'),
+    'teaching_progress': ('步骤 {current}/{total}', 'Step {current}/{total}', 'Étape {current}/{total}', 'Paso {current}/{total}', 'Schritt {current}/{total}', 'Шаг {current}/{total}', '단계 {current}/{total}', 'ステップ {current}/{total}'),
+    'teaching_paused': ('教学已暂停', 'Tutorial paused', 'Tutoriel en pause', 'Tutorial en pausa', 'Tutorial pausiert', 'Обучение приостановлено', '튜토리얼 일시 정지 중', 'チュートリアルは一時停止中です'),
+    'teaching_target_missing': (
+        '找不到本步骤的操作目标，请重试。',
+        'The control for this step could not be found. Please retry.',
+        'L’élément à utiliser pour cette étape est introuvable. Réessayez.',
+        'No se encuentra el elemento de este paso. Vuelva a intentarlo.',
+        'Das Bedienelement für diesen Schritt wurde nicht gefunden. Bitte erneut versuchen.',
+        'Элемент для этого шага не найден. Повторите попытку.',
+        '이 단계에서 사용할 항목을 찾을 수 없습니다. 다시 시도하세요.',
+        'この手順で操作する対象が見つかりません。再試行してください。',
+    ),
+    'teaching_waiting_operation': (
+        '请按说明完成本步骤的操作。',
+        'Complete the action described in this step.',
+        'Effectuez l’action indiquée dans cette étape.',
+        'Realice la acción indicada en este paso.',
+        'Führen Sie die in diesem Schritt beschriebene Aktion aus.',
+        'Выполните действие, описанное в этом шаге.',
+        '이 단계의 안내에 따라 작업을 완료하세요.',
+        'この手順の説明に従って操作してください。',
+    ),
+    'teaching_practice_badge': ('独立练习', 'Independent practice', 'Exercice indépendant', 'Práctica independiente', 'Separate Übung', 'Отдельное упражнение', '독립 연습', '独立した練習'),
+    'teaching_entry': ('软件使用教学', 'Software tutorials', 'Tutoriels du logiciel', 'Tutoriales del programa', 'Software-Tutorials', 'Обучение работе с программой', '소프트웨어 사용 안내', 'ソフトウェアの使い方'),
+    'teaching_welcome_title': ('学习使用 MyScreenDraw', 'Learn to use MyScreenDraw', 'Découvrez MyScreenDraw', 'Aprenda a usar MyScreenDraw', 'MyScreenDraw kennenlernen', 'Научитесь работать с MyScreenDraw', 'MyScreenDraw 사용법 알아보기', 'MyScreenDraw の使い方を学びましょう'),
+    'teaching_welcome_body': (
+        '通过分步教程了解软件的使用方法。您可以跳过本教程，之后随时从“工具”→“软件使用教学”重新学习。练习在独立环境中进行，不会修改原文档。',
+        'Learn the software step by step. You can skip this tutorial and replay it anytime from Tools → Software tutorials. Practice takes place in a separate environment and does not change your original document.',
+        'Découvrez le logiciel pas à pas. Vous pouvez passer ce tutoriel et le revoir à tout moment via Outils → Tutoriels du logiciel. Les exercices se déroulent dans un environnement séparé et ne modifient pas votre document d’origine.',
+        'Aprenda a usar el programa paso a paso. Puede omitir este tutorial y repetirlo cuando quiera desde Herramientas → Tutoriales del programa. La práctica se realiza en un entorno independiente y no modifica el documento original.',
+        'Lernen Sie die Software Schritt für Schritt kennen. Sie können dieses Tutorial überspringen und jederzeit unter Werkzeuge → Software-Tutorials erneut starten. Die Übungen finden in einer separaten Umgebung statt und verändern Ihr ursprüngliches Dokument nicht.',
+        'Освойте программу шаг за шагом. Обучение можно пропустить и в любой момент пройти заново через «Инструменты» → «Обучение работе с программой». Упражнения выполняются в отдельной среде и не изменяют исходный документ.',
+        '단계별 안내로 소프트웨어 사용법을 배워 보세요. 지금 건너뛰어도 도구 → 소프트웨어 사용 안내에서 언제든 다시 시작할 수 있습니다. 연습은 별도의 환경에서 진행되며 원본 문서를 변경하지 않습니다.',
+        '手順に沿ってソフトウェアの使い方を学べます。スキップしても、後から「ツール」→「ソフトウェアの使い方」でいつでもやり直せます。練習は独立した環境で行われ、元の文書は変更されません。',
+    ),
+    'teaching_welcome_start': ('开始学习', 'Start tutorial', 'Démarrer le tutoriel', 'Iniciar tutorial', 'Tutorial starten', 'Начать обучение', '튜토리얼 시작', 'チュートリアルを開始'),
+    'teaching_welcome_later': ('稍后再说', 'Maybe later', 'Plus tard', 'Más tarde', 'Später', 'Позже', '나중에', '後で'),
+    'teaching_practice_notice': (
+        '练习结束后会丢弃练习文件，不影响您原来的工作。',
+        'Practice files are discarded when the practice session ends. Your original work is not affected.',
+        'Les fichiers d’exercice sont supprimés à la fin de la session. Votre travail d’origine n’est pas affecté.',
+        'Los archivos de práctica se descartan al terminar la sesión. Su trabajo original no se ve afectado.',
+        'Die Übungsdateien werden am Ende der Übung verworfen. Ihre ursprüngliche Arbeit bleibt unverändert.',
+        'После завершения тренировки учебные файлы удаляются. Ваша исходная работа не затрагивается.',
+        '연습이 끝나면 연습 파일은 폐기됩니다. 기존 작업에는 영향을 주지 않습니다.',
+        '練習終了時に練習用ファイルは破棄されます。元の作業には影響しません。',
+    ),
+    'teaching_private_path_rejected': (
+        '练习路径未通过安全检查，已拒绝访问。',
+        'The practice path failed the safety check. Access was denied.',
+        'Le chemin de l’exercice n’a pas passé le contrôle de sécurité. L’accès a été refusé.',
+        'La ruta de práctica no ha superado la comprobación de seguridad. Se ha denegado el acceso.',
+        'Der Übungspfad hat die Sicherheitsprüfung nicht bestanden. Der Zugriff wurde verweigert.',
+        'Путь к учебным файлам не прошёл проверку безопасности. Доступ запрещён.',
+        '연습 경로가 안전성 검사를 통과하지 못해 접근이 차단되었습니다.',
+        '練習用のパスが安全性チェックに失敗したため、アクセスを拒否しました。',
+    ),
+    'teaching_unavailable': (
+        '软件使用教学暂时不可用。',
+        'Software tutorials are currently unavailable.',
+        'Les tutoriels du logiciel sont momentanément indisponibles.',
+        'Los tutoriales del programa no están disponibles en este momento.',
+        'Die Software-Tutorials sind derzeit nicht verfügbar.',
+        'Обучение работе с программой сейчас недоступно.',
+        '현재 소프트웨어 사용 안내를 이용할 수 없습니다.',
+        '使い方のチュートリアルは現在利用できません。',
+    ),
+    'teaching_progress_save_failed': ('无法将学习进度写入磁盘。本次显示的进度可能不会保留到下次启动。', 'Learning progress could not be written to disk. Progress shown in this session may not be kept after restarting.', 'La progression ne peut pas être enregistrée sur le disque. Celle affichée pendant cette session risque de ne pas être conservée après un redémarrage.', 'No se ha podido guardar el progreso en el disco. Es posible que el progreso mostrado en esta sesión no se conserve al reiniciar.', 'Der Lernfortschritt konnte nicht auf dem Datenträger gespeichert werden. Der in dieser Sitzung angezeigte Fortschritt bleibt nach einem Neustart möglicherweise nicht erhalten.', 'Не удалось сохранить прогресс обучения на диск. Прогресс, показанный в этом сеансе, может не сохраниться после перезапуска.', '학습 진행 상황을 디스크에 저장할 수 없습니다. 이번 세션에 표시된 진행 상황은 다시 시작한 후 유지되지 않을 수 있습니다.', '学習の進捗をディスクに保存できませんでした。このセッションで表示された進捗は、再起動後に保持されない可能性があります。'),
+    'teaching_return_to_work': ('本次练习只影响教学副本。点击“退出教学”结束练习，回到原工作。', 'This practice only changes the tutorial copy. Select “Exit tutorial” to end practice and return to your original work.', 'Cet exercice ne modifie que la copie du tutoriel. Sélectionnez « Quitter le tutoriel » pour revenir à votre travail initial.', 'Esta práctica solo modifica la copia del tutorial. Selecciona «Salir del tutorial» para volver a tu trabajo original.', 'Diese Übung ändert nur die Tutorial-Kopie. Wähle „Tutorial beenden“, um zu deiner ursprünglichen Arbeit zurückzukehren.', 'Упражнение изменяет только учебную копию. Выберите «Выйти из обучения», чтобы вернуться к исходной работе.', '이번 연습은 튜토리얼 사본만 변경합니다. “튜토리얼 종료”를 선택하면 원래 작업으로 돌아갑니다.', 'この練習ではチュートリアル用のコピーだけが変更されます。「チュートリアルを終了」を選ぶと、元の作業に戻ります。'),
+    'teaching_session_starting': ('正在启动教学…', 'Starting tutorial…', 'Démarrage du tutoriel…', 'Iniciando tutorial…', 'Tutorial wird gestartet…', 'Запуск обучения…', '튜토리얼 시작 중…', 'チュートリアルを開始しています…'),
+    'teaching_session_stopping': ('正在结束教学…', 'Ending tutorial…', 'Fermeture du tutoriel…', 'Finalizando tutorial…', 'Tutorial wird beendet…', 'Завершение обучения…', '튜토리얼 종료 중…', 'チュートリアルを終了しています…'),
+    'teaching_session_start_failed': ('无法启动教学，请重试。', 'Could not start the tutorial. Please try again.', 'Impossible de démarrer le tutoriel. Réessayez.', 'No se ha podido iniciar el tutorial. Vuelva a intentarlo.', 'Das Tutorial konnte nicht gestartet werden. Bitte erneut versuchen.', 'Не удалось запустить обучение. Повторите попытку.', '튜토리얼을 시작할 수 없습니다. 다시 시도하세요.', 'チュートリアルを開始できませんでした。再試行してください。'),
+    'teaching_session_connection_lost': ('与教学练习的连接已中断。', 'The connection to the practice session was lost.', 'La connexion à la session d’exercice a été interrompue.', 'Se ha perdido la conexión con la sesión de práctica.', 'Die Verbindung zur Übungssitzung wurde unterbrochen.', 'Соединение с сеансом тренировки потеряно.', '연습 세션과의 연결이 끊어졌습니다.', '練習セッションとの接続が切断されました。'),
+    'teaching_session_restore_failed': (
+        '无法恢复教学前的工作界面。',
+        'Could not restore the workspace from before the tutorial.',
+        'Impossible de rétablir l’espace de travail tel qu’il était avant le tutoriel.',
+        'No se ha podido restaurar el espacio de trabajo anterior al tutorial.',
+        'Der Arbeitsbereich vor dem Tutorial konnte nicht wiederhergestellt werden.',
+        'Не удалось восстановить рабочую среду, которая была до обучения.',
+        '튜토리얼 시작 전 작업 환경을 복원할 수 없습니다.',
+        'チュートリアル開始前の作業環境を復元できませんでした。',
+    ),
+})
+
+from teaching.core_copy import CORE_COPY
+_BASE.update(CORE_COPY)
+from teaching.writing_copy import WRITING_COPY
+_BASE.update(WRITING_COPY)
+from teaching.selection_copy import SELECTION_COPY
+_BASE.update(SELECTION_COPY)
+from teaching.pages_copy import PAGES_COPY
+_BASE.update(PAGES_COPY)
+from teaching.geometry_copy import GEOMETRY_COPY
+_BASE.update(GEOMETRY_COPY)
+from teaching.text_copy import TEXT_COPY
+_BASE.update(TEXT_COPY)
+from teaching.file_copy import FILE_COPY
+_BASE.update(FILE_COPY)
+from teaching.media_copy import MEDIA_COPY
+_BASE.update(MEDIA_COPY)
+from teaching.toolbox_copy import TOOLBOX_COPY
+_BASE.update(TOOLBOX_COPY)
+from teaching.interface_copy import INTERFACE_COPY, INTERFACE_PALETTE_NAMES
+_BASE.update(INTERFACE_COPY)
+from teaching.measurement_copy import MEASUREMENT_COPY
+_BASE.update(MEASUREMENT_COPY)
+from teaching.export_copy import EXPORT_COPY
+_BASE.update(EXPORT_COPY)
+
+from appearance_copy import APPEARANCE_COPY
+_BASE.update(APPEARANCE_COPY)
+
 # 每个条目都必须给全 8 种语言：漏一个就在导入时炸掉，而不是在课堂上显示成英文 key。
 for _key, _values in _BASE.items():
     if len(_values) != len(_LANGS):
@@ -620,7 +843,11 @@ def set_language(lang: str) -> str:
 
 
 def tr(key: str) -> str:
-    return TEXT.get(CURRENT, TEXT["en"]).get(key, TEXT["en"].get(key, key))
+    text = TEXT.get(CURRENT, TEXT["en"]).get(key, TEXT["en"].get(key, key))
+    # Only these four tutorial bodies embed another translated UI label. Other
+    # templates keep their placeholders for trf / the caller to supply as before.
+    palette_key = INTERFACE_PALETTE_NAMES.get(key)
+    return text.format(palette_name=tr(palette_key)) if palette_key is not None else text
 
 
 def trf(key: str, **kwargs) -> str:

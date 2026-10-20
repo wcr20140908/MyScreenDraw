@@ -1,9 +1,12 @@
 # Architecture and maintenance boundaries
 
-This document describes the **released v6.0.0 source**, reviewed
-on 2026-10-03; it does not establish final-package acceptance. MyScreenDraw is a
-Windows desktop application built with Python and PyQt6. Packaging targets a
-PyInstaller onedir Windows x64 build; 6.0.0 has been packaged and published.
+This document describes the **v6.2.0 released architecture**, reviewed
+on 2026-10-18. MyScreenDraw is a Windows desktop application built with Python and PyQt6;
+packaging targets a PyInstaller onedir Windows x64 build.
+
+Historical baseline: v6.0.0 was reviewed on 2026-10-03, packaged and published.
+Its source contracts below retain their introduction context; current v6.2.0
+release results are recorded in the release and testing documents.
 
 ## Modules
 
@@ -22,6 +25,13 @@ PyInstaller onedir Windows x64 build; 6.0.0 has been packaged and published.
 | `calculator.py` | AST-whitelisted arithmetic evaluation |
 | `i18n.py` / `ui_icons.py` | Eight-language UI catalogue and generated tool icons |
 | `version.py` | Application version; Windows version resources and build guard must be synchronized |
+| `runtime_paths.py` | Separate installation/resources from ordinary or owned private-practice data paths and capability policy |
+| `teaching/` | Offline catalog, result-driven engine, private-process broker, progress store and teaching presentation/adapters |
+| `board_view.py` | Per-page camera transform and one/two-contact navigation; no in-place scaling of document objects |
+| `page_list.py` | Width-adaptive thumbnail grid and explicit model-order drag requests |
+| `custom_colors.py` | Validated custom light/dark UI colour schemes and editor |
+| `update_notes.py` | Bounded local running-version history and release-note presentation; network fetches supplied by the host |
+| `release_artifact.py` / `teaching/packaging.py` | Source-bound release receipts, package hygiene and exact offline teaching-resource inventory |
 
 `main.py` still owns tightly coupled classroom interaction paths. This is not a
 web application, and it does not use a remote model for shape recognition.
@@ -45,7 +55,93 @@ neon, dashed, rainbow, and arrow. Highlighter and laser are separate tools.
 - PNG/PDF retain texture effects. SVG textures and EPS texture/glow output have
   documented fallbacks; see the [README](../README.en.md).
 
-## Classroom preferences (6.0.0 source)
+## Teaching process and result ownership (6.2.0)
+
+`TeachingCoordinator` in `teaching/application.py` owns the ordinary application's
+entry points and parent-owned `data/tutorial_state.json`. `PracticeSession` in
+`teaching/practice.py` launches an owned `QProcess`, using the same EXE when frozen
+or the source entry point otherwise. After the child's hello/ready handshake, the
+parent suspends ordinary work before authorizing activation. Stop messages alone
+do not prove exit: cleanup/restoration waits for the owned child to exit. Failed
+restoration retains a retryable token rather than claiming the original work is
+restored. A private child cannot launch another practice process.
+
+`teaching/bootstrap.py` binds `RuntimePaths` before logging or widget creation.
+Practice uses a fresh marked temporary root, verified with an installation key,
+session ID and nonce; document I/O is confined to that root. Bundled resources stay
+separate and fixtures are copied into private practice storage. `RuntimeContext`
+disables ordinary recovery, global keyboard hooks, tray, updates, autostart, usage
+tracking and desktop capture in practice. These are application boundaries, not an
+OS sandbox. The local socket protocol (`transport.py`, `protocol.py`) authenticates
+the session, bounds frames/data and rejects malformed or replayed messages; the
+broker validates phase transitions and progress acknowledgements. Only the parent
+persists learning progress; a `persisted=false` acknowledgement must remain visible
+as a save failure, not silently become durable completion.
+
+Courses in `assets/tutorials/` are declarative offline data validated by
+`CatalogLoader`; `TutorialEngine` consumes business results, not click counts.
+Adapters in `main.py` and `teaching/*_actions.py` capture an `OperationContext`
+**at action entry**, carrying session ID, run ID, step epoch and operation ID.
+Only an issued context for the current wait clause can submit a terminal result;
+its outcome and details must match. Success, cancellation, failure and partial
+export results are distinct. Entry to a step, pause/resume and stopping invalidate
+pending contexts; satisfying a sequence clause also retires outstanding operations
+so one earlier action cannot satisfy the next clause. Delayed callbacks must not
+obtain a new token after the step has changed. Fixture setup and programmatic
+reveal/navigation are suppressed, and only information steps accept “Next”.
+
+Document batches retain entry-time tokens across native dialogs and flush results
+after normal UI cleanup. Stroke/recognition adapters wait for the appropriate
+commit/release boundary. `roam_actions.py` checks the actual camera change, page
+identity, preserved document/history and zoom anchor or Fit/Home destination;
+no-op navigation is not completion. Reordering must preserve page identities and
+match the complete expected order, not merely move the requested page to the front.
+Presentation, highlights and example panels must dodge interaction regions; hiding
+or moving blockers in a test is not evidence that the shipped layout is usable.
+
+## Infinite whiteboard and page overview (6.2.0)
+
+`infinite_whiteboard` defaults on. In whiteboard mode, choosing roaming captures
+mouse/single-contact drags and wheel/two-contact zoom; it is not desktop mouse
+passthrough. `BoardView` maps floating-point document coordinates to the viewport,
+with zoom clamped to 0.1–8.0. `BoardGesture` rebases its anchor when contact IDs
+change. Pen/eraser/selection input maps back to document coordinates, while dirty
+rectangles map to the view; navigation must not rewrite ink geometry or history.
+Settings exposes Home (origin, 100%) and Fit (all content on the current page).
+
+Each page stores optional `view = {x, y, zoom}` alongside its identity, name and
+content; missing views use origin/100%, and persistence validates finite offsets
+and bounded zoom. Switching, copying, project save/open and autosave retain that
+view. Content bounds, thumbnails and PNG/PDF/SVG/EPS export include negative and
+offscreen document content rather than just cropping the current camera viewport.
+“Infinite” means a navigable document plane, not unlimited memory, file size or
+removal of existing persistence/export limits.
+
+The overview is positioned above the page rail. `PageListWidget` wraps left to
+right into width-dependent columns (normally 1–4 in the host's capped panel),
+scales the complete thumbnail and reserves space for captions. A single click
+selects the current page while leaving the list open for further operations;
+a double click enters the page and closes the list. Vertical scrolling, positional
+page numbers, close control and visible/revision-keyed rendering remain separate
+from page content.
+
+Internal OLE drag shows a blue insertion line with a white outline and end caps:
+above/below an item in a single column, or left/right in a multi-column grid.
+Gaps resolve to the nearest item, and the cue updates during edge autoscroll.
+The cue and the explicit source/destination reorder share the same insertion-slot
+calculation. The document updates once and retains the active page identity.
+It must not rely on IconMode's free icon placement or remove a newly rebuilt row
+a second time. Cross-row insertion and edge autoscroll require native acceptance,
+not only direct calls to drop handlers.
+
+Default names are persisted in the existing page `name` field, just like renamed
+pages. Legacy empty names are filled in their original order on first load or
+normalization, before reordering; new pages avoid names already in use among the
+default page names. Moving a page preserves its name, identity and content through
+save/reopen. Names do not represent the current ordinal: the page-count control
+continues to show the current position and total.
+
+## Classroom preferences (introduced in 6.0.0)
 
 The controls live in **Settings**: the notice is first in the scrollable content;
 **Drawing** contains **Restore pen after page turn**, followed by the custom-defaults
@@ -146,15 +242,19 @@ F12 and the toolbar close action hide to the tray; they do not quit the process.
 The tray restores the interface or starts the exit/restart flow. Keep callbacks,
 timers, keyboard cleanup, and pending update threads consistent across those paths.
 
-Whiteboard pages are owned by the canvas. The compact page list follows the page
-navigation bar, not the main toolbar. Boundary arrows remain clickable for hints;
+Whiteboard pages are owned by the canvas. The page overview follows the page
+navigation rail, not the main toolbar. Boundary arrows remain clickable for hints;
 deleting a page requires confirmation, and deleting the only page leaves a blank page.
 
 ## Persistence and updates
 
-`ControlPanel.collect_settings()` currently emits 46 top-level fields: the prior
-41 plus the following additions, saved in `data/config.json` through the existing
-atomic settings writer. This source inventory is not a coverage result.
+The 6.0.0 source inventory recorded 46 top-level `collect_settings()` fields: the
+prior 41 plus the following additions, saved in `data/config.json` through the
+atomic settings writer. This is a historical inventory, not today's field count
+or a coverage result. The 6.2.0 release also persists infinite-whiteboard and
+custom-colour-scheme preferences, autosave interval, page-copy placement, timer
+volume and annotation-screen selection. Read `collect_settings()` and its matching
+loader for the current schema; teaching progress has its own parent-owned store.
 
 | Key | Missing/invalid value behaviour | Owner |
 | --- | --- | --- |
@@ -184,6 +284,23 @@ Updates use background workers and GitHub release metadata. Stable/preview chann
 selection and automatic-check preferences are persisted. Download and installation
 require separate confirmation. ZIP validation and user-data preservation are not a
 substitute for publisher authentication; see [SECURITY](../SECURITY.md).
+
+## Release input boundary
+
+`release_artifact.source_snapshot()` includes root source/build files, recursive
+importable source packages (including `teaching/`) and every teaching data file in
+the spec inventory. It excludes user/generated trees, tests and documentation from
+the binary input hash, while publication still requires a clean tree and tracked
+inputs at the specified HEAD commit. Any included source/resource change requires
+a new build and receipt.
+
+For 6.2.0, stage, ZIP and extracted-package checks require the source root and
+byte-identical resources at exact `_internal/assets/tutorials/...` paths. Missing,
+extra or altered teaching resources fail; an image extension or directory prefix
+alone is never a privacy exception. `teaching/packaging.py` rejects unsupported
+files and linked/reparse/hard-linked resource entries. This inventory is not proof
+of catalog semantics, synthetic content or runtime lesson success. See
+[testing](testing.md), [release gates](releasing.md) and [security](../SECURITY.md).
 
 ## Rules for incremental decomposition
 

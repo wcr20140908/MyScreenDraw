@@ -1,5 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 import os
+import sys
 from PyInstaller.utils.hooks import collect_submodules
 
 
@@ -19,6 +20,14 @@ def analyze_with_system_dlls(*args, **kwargs):
             os.environ["PATH"] = previous_path
 
 
+# SPEC is provided by PyInstaller. Unit tests execute this file with runpy, where
+# __file__ is the reliable checkout path and SPEC is not injected.
+_spec_path = globals().get("SPEC") or __file__
+source_root = os.path.dirname(os.path.abspath(_spec_path))
+sys.path.insert(0, source_root)
+from teaching.packaging import collect_teaching_datas
+
+teaching_datas = collect_teaching_datas(source_root)
 hiddenimports = collect_submodules("pynput")
 
 analysis = analyze_with_system_dlls(
@@ -26,7 +35,7 @@ analysis = analyze_with_system_dlls(
     pathex=["."],
     binaries=[],
     # GPL 合规：发行包必须随附许可证与第三方组件声明（见 docs/provenance-audit.md）
-    datas=[("LICENSE", "."), ("THIRD_PARTY_LICENSES.txt", ".")],
+    datas=[("LICENSE", "."), ("THIRD_PARTY_LICENSES.txt", ".")] + teaching_datas,
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
