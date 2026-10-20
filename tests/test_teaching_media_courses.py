@@ -96,6 +96,56 @@ def test_c09_pdf_imports_two_pages_then_keeps_annotation_on_second_only(writing_
     assert_step(host, 'done'); next_info(host); finished(host, progress)
 
 
+@pytest.mark.parametrize('writing_host', ['c09.image', 'c09.pdf_pages'], indirect=True)
+@pytest.mark.parametrize('cancel_picker', [False, True])
+def test_media_picker_shows_and_preselects_the_chapter_sample(writing_host, monkeypatch, cancel_picker):
+    from PyQt6.QtCore import QTimer, Qt
+    from PyQt6.QtTest import QTest
+    from PyQt6.QtWidgets import QApplication, QFileDialog, QDialogButtonBox
+    host, _ = writing_host
+    panel, app = host.panel, QApplication.instance()
+    assert app.platformName() == 'offscreen'
+    sample = Path(panel._teaching_media_source_path)
+    next_info(host)
+    current_step = host.presenter.engine.current_step_id
+    original = panel.canvas.serialized_document_pages()
+    seen, errors = [], []
+
+    def respond():
+        dialog = app.activeModalWidget()
+        try:
+            assert isinstance(dialog, QFileDialog)
+            seen.append(True)
+            assert Path(dialog.directory().absolutePath()) == sample.parent, 'Chooser must display the media sample folder'
+            assert list(map(Path, dialog.selectedFiles())) == [sample], 'Chooser must preselect the chapter PNG/PDF'
+            assert sample.is_file() and sample.is_relative_to(host.request.paths.data_dir)
+            buttons = dialog.findChild(QDialogButtonBox)
+            button = buttons.button(QDialogButtonBox.StandardButton.Cancel if cancel_picker
+                                    else QDialogButtonBox.StandardButton.Open)
+            assert button.isEnabled()
+            QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+        except BaseException as exc:
+            errors.append(exc)
+            if isinstance(dialog, QFileDialog):
+                dialog.reject()
+
+    monkeypatch.setattr(panel, '_create_document_progress', lambda *args: Progress())
+    QTimer.singleShot(100, respond)
+    panel.btn_import_media.click()
+    if errors:
+        raise errors[0]
+    assert seen == [True]
+    if cancel_picker:
+        assert_step(host, current_step)
+        assert panel.canvas.serialized_document_pages() == original
+    elif sample.suffix == '.png':
+        assert_step(host, 'select_mode')
+        assert len(panel.canvas.image_items) == 1
+    else:
+        assert_step(host, 'next_page')
+        assert len(panel.canvas.pages) == 3 and panel.canvas.current_page == 1
+
+
 @pytest.mark.parametrize('writing_host', ['c09.pdf_pages'], indirect=True)
 def test_c09_cancelled_pdf_batch_cannot_advance_lesson(writing_host, monkeypatch):
     host, _ = writing_host

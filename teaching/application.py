@@ -625,6 +625,7 @@ class ApplicationTeachingHost(QObject):
             condition_reader=lambda name, argument: name == 'multiple_monitors' and len(QApplication.screens()) > 1,
             pause_action=self.pause_requested.emit,
             layout_obstacles=self._placement_obstacles, interaction_region=self._interaction_region,
+            input_helpers=self._input_helpers,
             restack_window=self.panel.raise_floating,
             manage_window=self.panel.lifecycle.register_teaching_window,
             unmanage_window=self.panel.lifecycle.unregister_tool_window)
@@ -658,6 +659,17 @@ class ApplicationTeachingHost(QObject):
             return QRect()
         return _canvas_region(canvas, (canvas.text_bounds(item) for item in canvas.text_items))
 
+    def place_aid(self, aid):
+        if self.request.course_id == 'c11':
+            from .measurement_layout import place_aid
+            place_aid(self, aid)
+
+    def _aid_regions(self):
+        canvas = self.panel.canvas
+        if self.request.course_id != 'c11':
+            return ()
+        return tuple(_canvas_region(canvas, (canvas.aid_bounds(aid),)) for aid in canvas.aids)
+
     def _placement_obstacles(self):
         canvas, engine = self.panel.canvas, self.presenter.engine
         editor = getattr(self.panel, 'text_panel', None)
@@ -671,7 +683,7 @@ class ApplicationTeachingHost(QObject):
         if key != self._obstacle_snapshot or not drawing:
             self._obstacle_snapshot = key
             self._obstacle_rects = self._layout_obstacles()
-        return self._obstacle_rects
+        return self._obstacle_rects + self._aid_regions()
 
     def _selection_region(self):
         """Protect the live selection workspace, not a course-specific sample box.
@@ -699,6 +711,10 @@ class ApplicationTeachingHost(QObject):
         return _canvas_region(canvas, bounds)
 
     def _interaction_region(self):
+        canvas = self.panel.canvas
+        if self.request.course_id == 'c11' and canvas.aids:
+            aid = canvas.find_aid(canvas.active_aid_id) or canvas.aids[-1]
+            return _canvas_region(canvas, (canvas.aid_bounds(aid),))
         text = self._text_region()
         if not text.isEmpty():
             return text
@@ -724,7 +740,15 @@ class ApplicationTeachingHost(QObject):
             # uncommitted stroke must not make the card chase the user's pen.
             self._example_bounds = tuple(QRectF(canvas.object_bounds(object_id)) for object_id in examples)
             self._example_snapshot = key
-        return _canvas_region(canvas, self._example_bounds)
+        region = _canvas_region(canvas, self._example_bounds)
+        if step.target == 'magnifier.practice' and not region.isEmpty():
+            # Protect the whole lens sweep over the fixed sample, including its
+            # zoom badge. View-pixel padding stays correct under zoom/DPR and
+            # does not chase the pointer as the user practices.
+            radius = int(canvas.magnifier_size / 2) + 4
+            viewport = canvas.rect().translated(canvas.mapToGlobal(QPoint()))
+            return region.adjusted(-radius, -radius, radius, radius + 30).intersected(viewport)
+        return region
 
     def _reveal_tools(self):
         self.panel.show_only_sub(self.panel.tools_sub)
@@ -806,6 +830,17 @@ class ApplicationTeachingHost(QObject):
             if button is not None and button.property('teaching_symbol') == entry:
                 return button
         return None
+
+    def _input_helpers(self, target_id):
+        # Launching the keyboard is an input aid, not a completed lesson action.
+        # Permit only that button, never the whole text panel or its Done action.
+        if (not target_id or not (target_id.startswith('text.') or target_id == 'canvas.ink')
+                or self.panel.canvas.editing_text_item() is None):
+            return ()
+        button = getattr(self.panel, 'text_action_buttons', {}).get('text_keyboard')
+        if button is None or sip.isdeleted(button) or not button.isVisible():
+            return ()
+        return (button,)
 
     def _reveal_text_input(self):
         if self.panel.canvas.editing_text_item() is None:
@@ -1045,6 +1080,8 @@ class ApplicationTeachingHost(QObject):
             raise ValueError('practice fixture could not be prepared')
         self.panel.project_path = None
         self.panel.project_dirty = False
+        self.panel._teaching_file_open_path = None
+        self.panel._teaching_last_saved_project = None
         self.panel._teaching_export_fixture = None
         self.panel._teaching_media_original_id = None
         self.panel._teaching_media_source_path = None

@@ -304,12 +304,12 @@ class ChapterDriver:
         finally:
             self.dialog_handler = old
 
-    def file_action(self, button, path):
+    def file_action(self, button, path, *, use_default=False):
         paths = self.host.request.paths
         # A chooser can never type an ordinary user-data or exports destination.
         if not Path(path).resolve().is_relative_to(paths.runtime_root):
             raise ValueError('chooser path outside this private chapter')
-        with self.h.mouse.file_chooser(path): self.h.mouse.click(button)
+        with self.h.mouse.file_chooser(path, use_default=use_default): self.h.mouse.click(button)
         self.pump(150)
 
     def message_choice(self, choice, *, required=True):
@@ -352,7 +352,8 @@ class ChapterDriver:
                       'save_then_open': QMessageBox.StandardButton.Save}[name]
             before = c.document_signature()
             expected_pages = c.serialized_document_pages()
-            with self.message_choice(choice): self.file_action(p.btn_open_project, destination)
+            self.h.require('chapter sample exists', destination.is_file())
+            with self.message_choice(choice): self.file_action(p.btn_open_project, destination, use_default=True)
             if name == 'save_then_open':
                 from persistence import normalize_project_data, PROJECT_KIND, read_json_maybe_gz
                 saved = normalize_project_data(read_json_maybe_gz(str(destination)), kind=PROJECT_KIND)
@@ -424,8 +425,15 @@ class ChapterDriver:
         if name == 'frac_edit':
             self.h.mouse.chord(0x24); self.h.mouse.chord(0x27); self.h.mouse.text('Z'); self.pump(80); return
         if name.startswith('root_after_'):
-            self.formula_slot(())
-            self.h.mouse.chord(0x23); self.h.mouse.text('+'); self.pump(80); return
+            stage = self.engine.sequence_index
+            if stage == 0:
+                self.formula_slot(())
+            elif stage == 1:
+                self.formula_slot((), at_end=True)
+                self.h.require('native root-end caret', c.caret_offset == c.caret_limit(c.editing_text_item()))
+            else:
+                self.h.mouse.text('+'); self.pump(80)
+            return
         slot = name.rsplit('_',1)[-1]
         if slot not in ('num','den','base','exp','sub','lo','hi','arg'):
             raise ValueError(f'unimplemented formula step: {name}')
@@ -433,14 +441,17 @@ class ChapterDriver:
         if tuple(c.editing_slot or ()) != path: self.formula_slot(path)
         self.h.mouse.text('xy' if name == 'frac_den' else 'x'); self.pump(80)
 
-    def formula_slot(self, path):
+    def formula_slot(self, path, *, at_end=False):
         from PyQt6.QtCore import QPointF
         import formula
         c = self.canvas; item = c.editing_text_item(); box = c.formula_box(item); rect = c.text_local_rect(item)
         if path:
             _, x, y, w, h = next(row for row in formula.slot_rects(box) if row[0] == path)
             x += w/2; y += h/2
-        else: x, y = 2, -box.ascent/2
+        else:
+            # Just beyond the final atom, inside the text box's padding: don't
+            # accidentally enter the last structure's nested field.
+            x, y = (box.w+2 if at_end else 2), -box.ascent/2
         point = c.text_transform(item).map(QPointF(rect.left()+c.TEXT_PAD+x, rect.top()+c.TEXT_PAD+box.ascent+y))
         self.click_canvas(point)
         self.h.require('native formula slot', tuple(c.editing_slot or ()) == path, path)
@@ -537,6 +548,12 @@ class ChapterDriver:
         if chapter == 'c12.timer' and name == 'pause_up':
             self.until(lambda: self.panel.timer_left > 0, description='real count-up tick')
         if chapter == 'c12.magnifier' and name == 'size': self.h.slider(self.panel.mag_size_slider,320)
+        elif chapter == 'c12.magnifier' and name == 'move':
+            for x, y in ((220, 210), (260, 225)):
+                point = self.point(x, y)
+                self.h.mouse.hit(self.canvas, point)
+                self.h.mouse.move(point)
+                self.pump(80)
         elif chapter == 'c12.spotlight' and name == 'move':
             point = self.point(210,160); self.h.mouse.hit(self.canvas,point); self.h.mouse.move(point)
         else: self.click_target()

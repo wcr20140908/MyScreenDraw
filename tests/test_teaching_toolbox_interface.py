@@ -56,11 +56,14 @@ def test_resource_graphs_private_fixtures_and_all_eight_languages():
     import i18n
     catalog = courses()
     assert [len(c.chapters) for c in catalog] == [5, 4]
-    assert [sum(len(ch.steps) for ch in c.chapters) for c in catalog] == [33, 27]
-    assert len(TOOLBOX_COPY) == 36 and len(INTERFACE_COPY) == 29
+    assert [sum(len(ch.steps) for ch in c.chapters) for c in catalog] == [34, 27]
+    assert len(TOOLBOX_COPY) == 37 and len(INTERFACE_COPY) == 29
     for key, row in (TOOLBOX_COPY | INTERFACE_COPY).items():
         assert len(row) == 8 and all(isinstance(s, str) and s.strip() for s in row)
-        assert all('{' not in s and '}' not in s for s in row)
+        from string import Formatter
+        from teaching.interface_copy import INTERFACE_PALETTE_NAMES
+        fields = {'palette_name'} if key in INTERFACE_PALETTE_NAMES else set()
+        assert all({name for _, name, _, _ in Formatter().parse(s) if name is not None} == fields for s in row)
         for language, value in zip(i18n._LANGS, row):
             assert i18n.TEXT[language][key] == value
     for fixture in TOOLBOX_FIXTURES | INTERFACE_FIXTURES:
@@ -172,6 +175,8 @@ def test_real_up_timer_and_natural_down_completion(tool_panel):
 def test_private_board_magnifier_and_real_spotlight_motion(tool_panel):
     panel = tool_panel
     engine = start(panel, 'c12.magnifier')
+    panel.canvas.show()
+    QTest.qWait(20)
     panel.handle_magnifier_click()
     assert panel._teaching_magnifier_source == 'private_canvas'
     panel.canvas.step_magnifier_zoom(1)
@@ -179,6 +184,12 @@ def test_private_board_magnifier_and_real_spotlight_motion(tool_panel):
     before = panel.canvas.magnifier_pixmap.cacheKey()
     panel.refresh_magnifier()
     assert panel.canvas.magnifier_pixmap.cacheKey() != before
+    assert engine.current_step_id == 'move'
+    panel.canvas.show()
+    for point in (QPointF(220, 210), QPointF(260, 225)):
+        event = QMouseEvent(QEvent.Type.MouseMove, point, point,
+                           Qt.MouseButton.NoButton, Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier)
+        panel.canvas.mouseMoveEvent(event)
     done(engine)
     engine = start(panel, 'c12.spotlight')
     panel.handle_spotlight_click()

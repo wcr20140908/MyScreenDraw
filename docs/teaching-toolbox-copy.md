@@ -1,6 +1,8 @@
 # C12 工具箱课程资源与接线
 
-2026-10-13。独立交付 5 章 33 步：calculator 7、roster 6、timer 9、magnifier 6、spotlight 5。正文与六个明确虚构的名字共 36 键，静态八语言顺序 zh/en/fr/es/de/ru/ko/ja。
+初次交付记录（2026-10-13）：5 章 33 步，calculator 7、roster 6、timer 9、magnifier 6、spotlight 5；正文与六个明确虚构的名字共 36 键。
+
+当前源码（未发布补充）：放大镜新增实际移动使用步骤，C12 共 **5章34步**，其中 **magnifier 7步**，工具箱文案共 **37键**；静态八语言顺序仍为 zh/en/fr/es/de/ru/ko/ja。下方2026-10-14验证记录保留当时范围，不代表新增步骤已包含在那次验收中。
 
 ## 宿主接入
 
@@ -28,11 +30,12 @@
 | Canvas.step_magnifier_zoom | toolbox_action('magnifier.zoom_changed') | 实际zoom变化和increased |
 | on_magnifier_size_changed | toolbox_action('magnifier.size_changed') | 实际size变化 |
 | refresh_magnifier | toolbox_action('magnifier.refreshed') | 新非空pixmap cacheKey、source=private_canvas |
+| Canvas.mouseMoveEvent / Canvas.draw_magnifier | teaching_magnifier_move / record_magnifier_paint；magnifier.moved | 当前步骤中在可见画布上实际绘制私有放大镜，取样覆盖内容且完整镜面可见；有效绘制位置累计相距至少32个逻辑像素，旧epoch或只有设置变化不计完成 |
 | set_tool | toolbox_action('spotlight.changed') | 真实SPOTLIGHT开启/退出 |
 | handle_spotlight_click | toolbox_action('spotlight.changed') | 在工具动作抑制范围外观察实际开/关，覆盖再次点击退出 |
 | Canvas.mouseMoveEvent | teaching_spotlight_move | SPOTLIGHT中实际mouse_pos变化，提交x/y/moved |
 
-TOOLBOX_METHODS 列出常规映射；handle_spotlight_click 需额外使用同一个 toolbox_action 装饰器，三个专用装饰器另接。切章/停止时调用 discard_timer_completion(panel)，取消旧异步上下文；引擎的epoch门禁保留。DOWN不直接调用完成函数、不改计时值来制造结束。
+TOOLBOX_METHODS 列出常规映射；handle_spotlight_click 需额外使用同一个 toolbox_action 装饰器，专用装饰器另接。切章/停止时调用 discard_timer_completion(panel)，取消旧异步上下文；引擎的epoch门禁保留。DOWN不直接调用完成函数、不改计时值来制造结束。
 
 ## 控件引用和targets
 
@@ -43,13 +46,16 @@ TOOLBOX_METHODS 列出常规映射；handle_spotlight_click 需额外使用同�
 | roster.draw/reset | btn_roster_draw / btn_roster_reset |
 | timer.up/down/start_pause/reset | btn_timer_up / btn_timer_down / btn_timer_start / btn_timer_reset |
 | magnifier.zoom_in/size/refresh | btn_mag_zoom_in / mag_size_slider / btn_mag_refresh |
+| magnifier.practice | canvas；进入实际移动步骤时隐藏放大镜设置面板 |
 | 聚光灯移动 | 复用canvas.ink |
 
 工具菜单用原handler.__name__字典，不覆盖现有 tool_buttons() 方法。
 
 ## 私有图像和边界
 
-练习 refresh_magnifier 应执行 canvas.magnifier_pixmap = render_private_magnifier_frame(self)，然后沿用 canvas.update 与业务记录；正常模式沿用 grab_screen。合成函数只用 QPixmap/QPainter 和 canvas.draw_content，绘制本练习白板笔迹、形状、文字、图像，不使用 QWidget.grab 或桌面捕获。练习窗口尚未activate时不得调用普通抓屏分支。
+练习 refresh_magnifier 应执行 canvas.magnifier_pixmap = render_private_magnifier_frame(self)，然后沿用 canvas.update 与业务记录；正常模式沿用 grab_screen。合成函数只用 QPixmap/QPainter 和 canvas.draw_content，按当前白板视图变换和设备像素比绘制本练习白板笔迹、形状、文字、图像，不使用 QWidget.grab 或桌面捕获。练习窗口尚未activate时不得调用普通抓屏分支。
+
+放大镜移动步骤必须在真实可见画布上绘制完整镜面及读数，并覆盖私有样例内容后产生有效位移。仅调整设置、刷新图像、重绘不移动、绘制到另一个QPixmap、空白取样或旧步骤结果均不能代替实际使用；教学卡片避让镜面移动区域。当前 `tests/test_teaching_toolbox_courses.py` 包含这些结果门禁、慢速累计移动、视图变换／设备像素比与卡片避让检查；该范围说明不改写下方历史验收结果。
 
 课程不使用系统剪贴板、真实名单、系统音量、注册表或更新功能。声明完成、文件持久化、计时自然结束都由真实状态验证；不发虚假成功。
 

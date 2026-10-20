@@ -254,7 +254,8 @@ from runtime_paths import RuntimeContext, RuntimePaths
 from teaching.bootstrap import parse_practice_request
 from teaching.measurement_actions import measurement_action, measurement_drag
 from teaching.toolbox_actions import (toolbox_action, teaching_timer_toggle,
-    teaching_timer_finished, teaching_spotlight_move)
+    teaching_timer_finished, teaching_spotlight_move, teaching_magnifier_move,
+    record_magnifier_paint)
 from teaching.interface_actions import interface_action
 from teaching.roam_actions import (begin_roam_action, finish_roam_action,
                                    cancel_roam_action, observe_roam_touch)
@@ -3370,7 +3371,7 @@ class DrawingCanvas(QMainWindow):
         self._teaching_roam_anchor = None
         self.board_style = "WHITE"
         self._page_id = str(uuid.uuid4())
-        self._page_name = ""
+        self._page_name = trf("page_label", index=1)
         self._page_revision = 0
         self._revision_counter = 0
         self._serialized_page_cache = {}
@@ -3982,8 +3983,29 @@ class DrawingCanvas(QMainWindow):
                 len(page.get("shapes", [])), len(page.get("images", [])),
                 (last.x2(), last.y2()) if last is not None else None)
 
+    def ensure_page_names(self):
+        """Materialize legacy default names before any page changes position."""
+        used = {page.get("name") for page in self.pages if page.get("name")}
+        if self._page_name:
+            used.add(self._page_name)
+        for index, page in enumerate(self.pages):
+            if not page.get("name"):
+                if page.get("page_id") == self._page_id and self._page_name:
+                    page["name"] = self._page_name
+                else:
+                    number = index + 1
+                    name = trf("page_label", index=number)
+                    while name in used:
+                        number += 1
+                        name = trf("page_label", index=number)
+                    page["name"] = name
+                used.add(page["name"])
+            if page.get("page_id") == self._page_id and not self._page_name:
+                self._page_name = page["name"]
+
     def document_signature(self):
         """No clones/JSON/painting: page navigation alone is not an edit."""
+        self.ensure_page_names()
         live = self.live_page()
         pages = self.pages or [live]
         for page in pages:
@@ -4041,6 +4063,7 @@ class DrawingCanvas(QMainWindow):
         self._pan_point = None
         self._page_id = page.setdefault("page_id", str(uuid.uuid4()))
         self._page_name = page.get("name", "")
+        self.ensure_page_names()
         self._page_revision = page.get("_revision", 0)
         self._revision_counter = max(self._revision_counter, self._page_revision)
         self.all_segments = [clone_segment(seg) for seg in page.get("segments", [])]
@@ -4071,6 +4094,7 @@ class DrawingCanvas(QMainWindow):
         if timer is not None and timer.isActive():
             timer.stop()
         self.ensure_page_state()
+        self.ensure_page_names()
         if self.page_cache_key(self.pages[self.current_page]) != self.page_cache_key(self.live_page()):
             self.pages[self.current_page] = self.capture_page()
 
@@ -7906,6 +7930,9 @@ class DrawingCanvas(QMainWindow):
         if kind not in defaults:
             return
         item = {"id": uuid.uuid4(), "kind": kind, "pos": center, **defaults[kind]}
+        host = getattr(self.panel, "teaching_host", None)
+        if host is not None:
+            host.place_aid(item)
         self.aids.append(item)
         self.active_aid_id = item["id"]
         # 不把 draw_state 改成 "AID"：教具在任意绘图态下都可直接拖动（mousePressEvent 优先处理 aid_hit），
@@ -7947,6 +7974,28 @@ class DrawingCanvas(QMainWindow):
 
     def aid_map(self, aid, x, y):
         return self.aid_transform(aid).map(QPointF(x, y))
+
+    def aid_bounds(self, aid):
+        kind = aid["kind"]
+        if kind == "ruler":
+            geometry = self.ruler_geometry(aid)
+            local = QRectF(-geometry["length"] / 2 - 8, geometry["top"] - 22,
+                           geometry["length"] + 16, geometry["width"] + 26)
+        elif kind in ("set_square_45", "set_square_30"):
+            size = float(aid.get("size", 260))
+            height = size if kind == "set_square_45" else size / math.sqrt(3)
+            local = QRectF(-8, -8, size + 16, height + 16)
+        else:
+            radius = float(aid.get("radius", 160))
+            local = QRectF(-radius - 12, -radius - 12, 2 * radius + 24, radius + 50)
+        transform = self.aid_transform(aid)
+        radius = 14.0 / aid["scale"]
+        for handle in (self._aid_rotate_handle_local(aid), self._aid_close_handle_local(aid),
+                       self._aid_width_handle_local(aid), self._aid_scale_handle_local(aid)):
+            if handle is not None:
+                local = local.united(QRectF(handle.x() - radius, handle.y() - radius,
+                                           radius * 2, radius * 2))
+        return transform.mapRect(local)
 
     def aid_hit(self, pos):
         """Return the topmost aid and interaction mode under the pointer."""
@@ -8271,6 +8320,7 @@ class DrawingCanvas(QMainWindow):
         painter.setPen(QPen(QColor("#00cec9")))
         painter.setFont(QFont("Microsoft YaHei", 10, QFont.Weight.Bold))
         painter.drawText(badge, Qt.AlignmentFlag.AlignCenter, f"{int(self.magnifier_zoom * 100)}%")
+        record_magnifier_paint(self, painter, target, source)
 
     def draw_spotlight(self, painter):
         """暗化全屏，只在跟随鼠标的圆形亮区透出底层批注/桌面。"""
@@ -8448,6 +8498,8 @@ class DrawingCanvas(QMainWindow):
         self.current_pressure = self.event_pressure(event)
         self.drag_moved = False    # 本次按下是否真的拖动过（纯点选不触发吸附/变换埋点）
         self._discard_teaching_edit()
+        # An abandoned marquee must not overwrite this press's click selection.
+        self.selection_rect = self.selection_start = None
         # 辅助工具优先：任意绘图态下都能拖动已放置的教具
         aid, mode = self.aid_hit(pos)
         if aid is not None and mode == "close" and self.draw_state != "MAGNIFIER":
@@ -8575,6 +8627,7 @@ class DrawingCanvas(QMainWindow):
             self.execute_erase(pos)
 
     @teaching_spotlight_move
+    @teaching_magnifier_move
     def mouseMoveEvent(self, event):
         if self._touch_synthesized(event):
             return
@@ -9860,6 +9913,7 @@ class ControlPanel(QWidget):
         self.thumbnail_list.setResizeMode(QListWidget.ResizeMode.Adjust)
         self.thumbnail_list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.thumbnail_list.currentRowChanged.connect(self._thumbnail_page_changed)
+        self.thumbnail_list.itemDoubleClicked.connect(self._thumbnail_page_activated)
         # 触屏：允许直接用手指按住列表甩动翻页，而不是去够那条细滚动条
         try:
             QScroller.grabGesture(self.thumbnail_list.viewport(),
@@ -10740,6 +10794,12 @@ class ControlPanel(QWidget):
                     events.emit_result(operation, "page.changed", "success", {
                         "previous_page": previous + 1, "page": self.canvas.current_page + 1,
                         "pages": len(self.canvas.pages), "page_id": self.canvas._page_id})
+
+    def _thumbnail_page_activated(self, item):
+        row = self.thumbnail_list.row(item)
+        if self.canvas and self.canvas.whiteboard_mode and 0 <= row < len(self.canvas.pages):
+            self._thumbnail_page_changed(row)
+            self.close_thumbnail_panel()
 
     def close_thumbnail_panel(self):
         """收起缩略图浮窗并停掉实时渲染。
@@ -15442,7 +15502,8 @@ class ControlPanel(QWidget):
         with teaching_document_action(self, ("project.saved", "unsaved.decision", "project.opened")) as events:
             operation = events.operation("project.opened") if events is not None else None
             practice = self.runtime_context.paths.practice
-            default = (getattr(self, "_teaching_last_saved_project", None)
+            default = (getattr(self, "_teaching_file_open_path", None)
+                       or getattr(self, "_teaching_last_saved_project", None)
                        or str(self.runtime_context.paths.data_dir)) if practice else ""
             owner = self.canvas if practice else self
             path, _ = QFileDialog.getOpenFileName(owner, tr("open_project"), default, tr("project_filter_open"))
@@ -16195,6 +16256,7 @@ class ControlPanel(QWidget):
         else:
             for index, entry in enumerate(formula.group_entries(self._open_symbol_group)):
                 btn = QPushButton(formula.entry_label(entry))
+                btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
                 btn.setFixedSize(self.SYMBOL_BTN, self.SYMBOL_BTN)
                 btn.setProperty("teaching_symbol", formula.structure_kind(entry) or entry)
                 btn.clicked.connect(lambda _=False, e=entry: self._symbol_pressed(e))
@@ -16794,7 +16856,8 @@ class ControlPanel(QWidget):
         try:
             options = QFileDialog.Option.DontUseNativeDialog
             context = getattr(self, "runtime_context", RUNTIME_CONTEXT)
-            default = str(context.paths.data_dir) if context.paths.practice else ""
+            default = (getattr(self, "_teaching_media_source_path", None)
+                       or str(context.paths.data_dir)) if context.paths.practice else ""
             path, _ = QFileDialog.getOpenFileName(
                 self, tr("import_media"), default, tr("import_media_filter"), options=options)
             if not path:

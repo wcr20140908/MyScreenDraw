@@ -40,6 +40,8 @@ def prepare_toolbox_fixture(panel, fixture, paths):
         panel.show_only_sub(None)
         panel._teaching_toolbox_fixture = fixture
         panel._teaching_magnifier_source = None
+        panel._teaching_magnifier_frame_key = None
+        canvas._teaching_magnifier_origin = None
         if fixture.endswith('.calculator'):
             panel.open_calculator()
             panel._calc_input('C')
@@ -71,15 +73,23 @@ def render_private_magnifier_frame(panel):
     """Draw app-owned board data; never capture the desktop or a QWidget."""
     if not panel.runtime_context.paths.practice or not panel.runtime_context.ui_active:
         raise ValueError('synthetic magnifier frame requires active private practice')
-    from PyQt6.QtGui import QColor, QPainter, QPixmap
+    from math import ceil
+    from PyQt6.QtGui import QPainter, QPixmap
     canvas = panel.canvas
-    frame = QPixmap(canvas.size())
-    frame.fill(QColor('#f7f7f1'))
+    dpr = canvas.devicePixelRatioF() or 1.0
+    frame = QPixmap(ceil(canvas.width() * dpr), ceil(canvas.height() * dpr))
+    frame.setDevicePixelRatio(dpr)
+    background = canvas.board_background()
+    frame.fill(background)
     painter = QPainter(frame)
     try:
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        if canvas.board_view_active:
+            painter.setWorldTransform(canvas.board_view.transform())
         canvas.draw_content(painter)
     finally:
         painter.end()
     panel._teaching_magnifier_source = 'private_canvas'
+    panel._teaching_magnifier_frame_key = frame.cacheKey()
+    panel._teaching_magnifier_background = background
     return frame

@@ -14,7 +14,8 @@ ROOT = Path(__file__).resolve().parents[1]
 @pytest.mark.skipif(os.name != "nt", reason="Windows system DLL search policy")
 @pytest.mark.parametrize("inherited", [None, r"C:\foreign-tools\bin;C:\Python"])
 @pytest.mark.parametrize("fails", [False, True])
-def test_analysis_prefers_system_dlls_and_restores_path(monkeypatch, inherited, fails):
+@pytest.mark.parametrize("loader", ["runpy", "pyinstaller"])
+def test_analysis_prefers_system_dlls_and_restores_path(monkeypatch, inherited, fails, loader):
     system_dir = os.path.join(os.environ["SystemRoot"], "System32")
     if inherited is None:
         monkeypatch.delenv("PATH", raising=False)
@@ -34,11 +35,18 @@ def test_analysis_prefers_system_dlls_and_restores_path(monkeypatch, inherited, 
 
     globals_ = {"Analysis": analyze, "PYZ": lambda *a, **k: object(),
                 "EXE": lambda *a, **k: object(), "COLLECT": lambda *a, **k: object()}
+    def run_spec():
+        path = ROOT / "MyScreenDraw.spec"
+        if loader == "runpy":
+            return runpy.run_path(str(path), init_globals=globals_)
+        namespace = dict(globals_, SPEC=str(path))
+        exec(compile(path.read_text(encoding="utf-8"), str(path), "exec"), namespace)
+
     with patch("PyInstaller.utils.hooks.collect_submodules", return_value=[]):
         if fails:
             with pytest.raises(RuntimeError, match="analysis failed"):
-                runpy.run_path(str(ROOT / "MyScreenDraw.spec"), init_globals=globals_)
+                run_spec()
         else:
-            runpy.run_path(str(ROOT / "MyScreenDraw.spec"), init_globals=globals_)
+            run_spec()
     assert calls == [True]
     assert os.environ.get("PATH") == inherited

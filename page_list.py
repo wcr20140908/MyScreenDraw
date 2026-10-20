@@ -2,8 +2,8 @@
 """Page thumbnails with explicit model-order dragging, not free icon placement."""
 from contextlib import nullcontext
 
-from PyQt6.QtCore import QEvent, Qt, QPoint, QSize, pyqtSignal
-from PyQt6.QtGui import QDrag, QDragLeaveEvent
+from PyQt6.QtCore import QEvent, Qt, QLine, QPoint, QSize, pyqtSignal
+from PyQt6.QtGui import QColor, QDrag, QDragLeaveEvent, QPainter, QPen
 from PyQt6.QtWidgets import QListWidget, QAbstractItemView
 
 
@@ -17,10 +17,14 @@ class PageListWidget(QListWidget):
         self.setDefaultDropAction(Qt.DropAction.MoveAction)
         self.setDragEnabled(True)
         self.setAcceptDrops(True)
-        self.setDropIndicatorShown(True)
+        self.setDropIndicatorShown(False)
         self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self._drag_source_id = None
         self._drag_source_row = None
+        self._drag_point = None
+        self._drop_insertion = None
+        self._drop_line = None
+        self.verticalScrollBar().valueChanged.connect(self._update_drop_indicator)
         self._fitting_thumbnails = False
         self.setFlow(QListWidget.Flow.LeftToRight)
         self.setWrapping(True)
@@ -81,12 +85,15 @@ class PageListWidget(QListWidget):
                 drag.setMimeData(self.model().mimeData([self.indexFromItem(item)]))
                 pixmap = item.icon().pixmap(self.iconSize())
                 if not pixmap.isNull():
+                    pixmap = pixmap.scaled(120, 80, Qt.AspectRatioMode.KeepAspectRatio,
+                                           Qt.TransformationMode.SmoothTransformation)
                     drag.setPixmap(pixmap)
                     drag.setHotSpot(QPoint(pixmap.width() // 2, pixmap.height() // 2))
                 drag.exec(Qt.DropAction.MoveAction)
             finally:
                 self._drag_source_id = None
                 self._drag_source_row = None
+                self._clear_drop_indicator()
                 try:
                     QAbstractItemView.dragLeaveEvent(self, QDragLeaveEvent())
                 finally:
@@ -109,11 +116,64 @@ class PageListWidget(QListWidget):
         # autoscroll, then accept our before/after-page insertion even though
         # the ordinary QListWidget items aren't drop-into containers.
         QAbstractItemView.dragMoveEvent(self, event)
+        self._drag_point = event.position().toPoint()
+        self._update_drop_indicator()
         event.setDropAction(Qt.DropAction.MoveAction)
         event.accept()
 
     def dragLeaveEvent(self, event):
+        self._clear_drop_indicator()
         QAbstractItemView.dragLeaveEvent(self, event)
+
+    def _insertion_at(self, point):
+        if not self.count():
+            return 0, None
+        rects = [self.visualItemRect(self.item(row)) for row in range(self.count())]
+        # Gaps belong to their nearest thumbnail, not to the end of the document.
+        def distance(rect):
+            dx = max(rect.left() - point.x(), 0, point.x() - rect.right())
+            dy = max(rect.top() - point.y(), 0, point.y() - rect.bottom())
+            return dx * dx + dy * dy
+        target = min(range(self.count()), key=lambda row: distance(rects[row]))
+        rect = rects[target]
+        multi_column = self.viewport().width() >= 2 * self.gridSize().width()
+        if multi_column:
+            after = point.x() >= rect.center().x()
+            if point.y() > rects[-1].bottom():
+                target, rect, after = self.count() - 1, rects[-1], True
+            x = rect.right() + 3 if after else rect.left() - 3
+            x = max(5, min(self.viewport().width() - 6, x))
+            line = QLine(x, rect.top() + 6, x, rect.bottom() - 6)
+        else:
+            after = point.y() >= rect.center().y()
+            y = rect.bottom() + 3 if after else rect.top() - 3
+            y = max(5, min(self.viewport().height() - 6, y))
+            line = QLine(rect.left() + 6, y, rect.right() - 6, y)
+        return target + int(after), line
+
+    def _update_drop_indicator(self, *_):
+        if self._drag_point is not None:
+            self._drop_insertion, self._drop_line = self._insertion_at(self._drag_point)
+            self.viewport().update()
+
+    def _clear_drop_indicator(self):
+        self._drag_point = self._drop_insertion = self._drop_line = None
+        self.viewport().update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self._drop_line is None:
+            return
+        painter = QPainter(self.viewport())
+        line = self._drop_line
+        vertical = line.x1() == line.x2()
+        cap = QPoint(5, 0) if vertical else QPoint(0, 5)
+        for color, width in ((QColor('white'), 7), (QColor('#1688ff'), 3)):
+            painter.setPen(QPen(color, width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            painter.drawLine(line)
+            painter.drawLine(line.p1() - cap, line.p1() + cap)
+            painter.drawLine(line.p2() - cap, line.p2() + cap)
+        painter.end()
 
     def dropEvent(self, event):
         # IconMode's default drop can merely reposition an icon without changing
@@ -123,19 +183,11 @@ class PageListWidget(QListWidget):
             source = next((row for row in range(self.count())
                            if self.item(row).data(Qt.ItemDataRole.UserRole) == self._drag_source_id), -1)
         if event.source() is not self or source < 0:
+            self._clear_drop_indicator()
             event.ignore()
             return
-        point = event.position().toPoint()
-        target = self.indexAt(point).row()
-        if target < 0:
-            insertion = self.count()
-        else:
-            rect = self.visualItemRect(self.item(target))
-            if self.viewport().width() >= 2 * self.gridSize().width():
-                after = point.x() >= rect.center().x()
-            else:
-                after = point.y() >= rect.center().y()
-            insertion = target + after
+        insertion, _ = self._insertion_at(event.position().toPoint())
+        self._clear_drop_indicator()
         destination = insertion - (source < insertion)
         destination = max(0, min(self.count() - 1, destination))
         if destination != source:

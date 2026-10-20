@@ -9,7 +9,7 @@ TOOLBOX_EVENTS = frozenset({
     'roster.opened', 'roster.drawn', 'roster.reset', 'timer.panel_opened',
     'timer.mode_changed', 'timer.running_changed', 'timer.reset', 'timer.finished',
     'magnifier.opened', 'magnifier.zoom_changed', 'magnifier.size_changed',
-    'magnifier.refreshed', 'spotlight.changed', 'spotlight.moved',
+    'magnifier.refreshed', 'magnifier.moved', 'spotlight.changed', 'spotlight.moved',
 })
 TOOLBOX_METHODS = {
     'open_calculator': 'calculator.opened', '_calc_input': 'calculator.input',
@@ -223,6 +223,79 @@ def teaching_spotlight_move(function):
     return wrapped
 
 
+def record_magnifier_paint(canvas, painter, target, source):
+    """Witness the real lens draw, never an export or a requested-but-missing paint."""
+    if not getattr(canvas, '_teaching_magnifier_observing', False):
+        return
+    panel = canvas.panel
+    if (not painter.isActive() or painter.device() is not canvas
+            or not canvas.isVisible() or not canvas.is_drawing_mode
+            or canvas.draw_state != 'MAGNIFIER'
+            or not panel.runtime_context.paths.practice or not panel.runtime_context.ui_active
+            or panel._teaching_magnifier_source != 'private_canvas'
+            or _frame_key(canvas) != getattr(panel, '_teaching_magnifier_frame_key', None)):
+        return
+    from PyQt6.QtCore import QRectF
+    frame = canvas.magnifier_pixmap
+    if (frame is None or frame.isNull() or canvas.magnifier_zoom <= 1
+            or not QRectF(canvas.rect()).contains(target.adjusted(-2, -2, 2, 30))
+            or not QRectF(frame.rect()).contains(source)):
+        return
+    # Empty board alone does not demonstrate magnification. Compare the sampled
+    # source with its known private background in Qt, not a desktop screenshot.
+    patch = frame.copy(source.toAlignedRect()).toImage()
+    blank = patch.copy()
+    blank.fill(panel._teaching_magnifier_background)
+    if patch == blank:
+        return
+    canvas._teaching_magnifier_painted = (target.center().x(), target.center().y())
+
+
+def teaching_magnifier_move(function):
+    @wraps(function)
+    def wrapped(canvas, event):
+        panel = canvas.panel
+        bus = getattr(panel, 'teaching_events', None)
+        if bus is None or canvas.draw_state != 'MAGNIFIER':
+            return function(canvas, event)
+        operation = bus.begin_operation('magnifier.moved')
+        if operation is None:
+            return function(canvas, event)
+        before = canvas.to_view(canvas.mouse_pos)
+        try:
+            result = function(canvas, event)
+            after = canvas.to_view(canvas.mouse_pos)
+            if before == after or not canvas.isVisible() or not canvas.is_drawing_mode:
+                return result
+            # Only this lesson's real pointer path requests a synchronous paint.
+            # A settings change, repaint by itself, or a no-op draw cannot pass.
+            canvas._teaching_magnifier_painted = None
+            canvas._teaching_magnifier_observing = True
+            canvas.repaint()
+            painted = canvas._teaching_magnifier_painted
+            if painted is None or painted != (after.x(), after.y()):
+                return result
+            epoch = (operation.run_id, operation.step_epoch, _frame_key(canvas))
+            origin = getattr(canvas, '_teaching_magnifier_origin', None)
+            if origin is None or origin[0] != epoch:
+                canvas._teaching_magnifier_origin = (epoch, painted)
+                return result
+            # Measure displacement from the first rendered position, not from
+            # the previous event, so slow one-pixel pointer motion also works.
+            distance = ((painted[0] - origin[1][0]) ** 2 + (painted[1] - origin[1][1]) ** 2) ** 0.5
+            if distance >= 32:
+                bus.emit_result(operation, 'magnifier.moved', 'success', {
+                    'moved': True, 'rendered': True, 'source': 'private_canvas',
+                    'content': True, 'distance': distance, 'zoom': canvas.magnifier_zoom,
+                    'x': painted[0], 'y': painted[1]})
+            return result
+        finally:
+            canvas._teaching_magnifier_observing = False
+            canvas._teaching_magnifier_painted = None
+            bus.discard_operation(operation)
+    return wrapped
+
+
 def toolbox_bindings(panel):
     """Lazy real-control resolvers; host supplies Tools/subpanel reveal callbacks."""
     bindings = {f'tools.{tool}': (lambda method=method: panel.tool_menu_buttons.get(method))
@@ -230,6 +303,7 @@ def toolbox_bindings(panel):
                     ('calculator', 'open_calculator'), ('roster', 'open_roster_panel'),
                     ('timer', 'handle_timer_click'), ('magnifier', 'handle_magnifier_click'),
                     ('spotlight', 'handle_spotlight_click'))}
+    bindings['magnifier.practice'] = lambda: panel.canvas
     for target, code in (('two', '2'), ('plus', '+'), ('three', '3'), ('equals', '=')):
         bindings['calculator.' + target] = lambda code=code: getattr(panel, 'calc_buttons', {}).get(code)
     for target, attribute in {
@@ -247,7 +321,7 @@ TOOLBOX_TARGETS = frozenset({
     'tools.calculator', 'tools.roster', 'tools.timer', 'tools.magnifier', 'tools.spotlight',
     'calculator.two', 'calculator.plus', 'calculator.three', 'calculator.equals',
     'roster.draw', 'roster.reset', 'timer.up', 'timer.down', 'timer.start_pause', 'timer.reset',
-    'magnifier.zoom_in', 'magnifier.size', 'magnifier.refresh',
+    'magnifier.zoom_in', 'magnifier.size', 'magnifier.refresh', 'magnifier.practice',
 })
 
 
@@ -269,5 +343,7 @@ def reveal_toolbox_target(panel, target):
                 panel.open_roster_panel()
         elif target.startswith('timer.'):
             panel.show_only_sub(panel.timer_sub)
+        elif target == 'magnifier.practice':
+            panel.show_only_sub(None)
         elif target.startswith('magnifier.'):
             panel.show_only_sub(panel.magnifier_sub)

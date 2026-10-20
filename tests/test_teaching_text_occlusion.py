@@ -153,6 +153,42 @@ def test_formula_originals_stay_clear_through_symbol_groups_and_open_formula(
 
 
 @pytest.mark.parametrize('writing_host', ['c07.formula'], indirect=True)
+def test_dynamic_symbol_press_survives_input_refocus(writing_host, monkeypatch):
+    from PyQt6.QtTest import QTest
+    host, _ = writing_host
+    panel, canvas = host.panel, host.panel.canvas
+    formula_item = fixture_text_item(canvas, 'F = ')
+    layout_scene(host, monkeypatch, (0, 0), 1.0)
+    next_info(host); panel.btn_text.click()
+    click_text(panel, fixture_text_item(canvas, 'Symbols: '))
+    for step, entry, following in (
+            ('greek', 'α', 'operator'), ('operator', '±', 'relation'),
+            ('relation', '∈', 'calculus'), ('calculus', '∫', 'open_formula'),
+            ('frac', 'frac', 'frac_num')):
+        if step == 'frac':
+            click_text(panel, formula_item)
+            panel._symbol_group_buttons['structure'].click()
+        drain(QApplication.instance())
+        assert_step(host, step)
+        panel.text_panel.activateWindow()
+        panel.text_input.setFocus()
+        drain(QApplication.instance())
+        button = symbol_button(panel, entry)
+        QTest.mousePress(button, Qt.MouseButton.LeftButton)
+        try:
+            assert button.isDown()
+            # This is the heartbeat's production focus-repair path, deliberately
+            # between DOWN and UP instead of a timing-dependent timer race.
+            panel._refocus_input()
+            assert button.isDown(), 'Input refocus cancelled the pending symbol click'
+        finally:
+            QTest.mouseRelease(button, Qt.MouseButton.LeftButton)
+        assert_step(host, following)
+    assert formula_item.get('formula') is not None
+    assert canvas.editing_slot[-1] == 'num'
+
+
+@pytest.mark.parametrize('writing_host', ['c07.formula'], indirect=True)
 def test_non_teaching_text_panel_keeps_ordinary_anchor_and_user_position(writing_host, monkeypatch):
     host, _ = writing_host
     panel = host.panel

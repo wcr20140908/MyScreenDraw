@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "id": "c12",
-  "revision": 1,
+  "revision": 2,
   "compat_revision": 1,
   "title_key": "teaching_toolbox_title",
   "chapters": [
@@ -415,6 +415,27 @@
             "equals": {
               "source": "private_canvas",
               "frame": true
+            }
+          },
+          "next": "move"
+        },
+        {
+          "id": "move",
+          "title_key": "magnifier",
+          "body_key": "teaching_magnifier_move",
+          "target": "magnifier.practice",
+          "input_policy": "canvas",
+          "wait": {
+            "event": "magnifier.moved",
+            "outcome": "success",
+            "equals": {
+              "moved": true,
+              "rendered": true,
+              "source": "private_canvas",
+              "content": true
+            },
+            "min_count": {
+              "distance": 32
             }
           },
           "next": "done"

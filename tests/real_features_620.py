@@ -45,7 +45,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 CASES = {
-    'thumbnails': '13 extreme-ink pages; native overview, all-page pixels, wheel, cross-row OLE, edge scroll, X',
+    'thumbnails': '13 default/renamed pages; pixels, before/after insertion cues, cross-row OLE, edge scroll, double-click, X',
     'boxes': 'native CUBE/CUBOID buttons and four drag directions; 3 hidden/9 solid CAPTUREBLT edge checks',
     'c05.reorder.direct': 'A/B/C -> C/A/B; native chapter completion and current-page identity',
     'c05.reorder.intermediate': 'A/B/C -> A/C/B (stays) -> C/A/B (advances)',
@@ -151,6 +151,29 @@ def inspect_thumbnail(rgb, width, height):
             'blue_bounds': right, 'red_pixels': len(red), 'blue_pixels': len(blue)}
 
 
+def inspect_insertion(rgb, width, height, a, b):
+    """Require a continuous blue cue away from the top-edge drag cursor/image."""
+    length = math.dist(a, b)
+    if length < 20:
+        raise AssertionError('insertion cue is too short to judge')
+    nx, ny = -(b[1]-a[1])/length, (b[0]-a[0])/length
+    samples = max(12, round(length*.35))
+    hits = []
+    for index in range(samples):
+        t = .55 + .35*(index+.5)/samples
+        x, y = a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t
+        blue = False
+        for offset in (-2, -1, 0, 1, 2):
+            xx, yy = round(x+nx*offset), round(y+ny*offset)
+            if not (0 <= xx < width and 0 <= yy < height):
+                continue
+            r, g, b_value = rgb(xx, yy)
+            blue |= r < 85 and 105 < g < 185 and b_value > 190
+        hits.append(blue)
+    coverage = sum(hits)/len(hits)
+    return {'passed': coverage >= .85, 'blue_fraction': coverage, 'samples': samples}
+
+
 def reorder_goal(order, current, abc):
     a, b, c = abc
     return list(order) == [c, a, b] and current == c
@@ -219,6 +242,18 @@ def calibrate_pixels():
         if row['passed'] != (content == 'good'):
             raise AssertionError(f'thumbnail calibration failed: {mode}: {row}')
         results.append({'thumbnail': mode, 'correct_verdict': True})
+    for mode in ('good', 'blank', 'short', 'wrong_position', 'page_blue'):
+        image = SyntheticImage(220, 220)
+        a, b = (18, 15), (18, 205)
+        if mode != 'blank':
+            start = (40, 15) if mode == 'wrong_position' else a
+            end = (40, 205) if mode == 'wrong_position' else (18, 80) if mode == 'short' else b
+            color = (32, 80, 238) if mode == 'page_blue' else (22, 136, 255)
+            image.line(start, end, color=color, radius=2)
+        row = inspect_insertion(image.rgb, image.width, image.height, a, b)
+        if row['passed'] != (mode == 'good'):
+            raise AssertionError(f'insertion-cue calibration failed: {mode}: {row}')
+        results.append({'insertion': mode, 'correct_verdict': True})
     if not reorder_goal('CAB', 'C', 'ABC') or any(
             reorder_goal(order, current, 'ABC') for order, current in
             (('CBA', 'C'), ('ACB', 'C'), ('CAB', 'A'), ('ABC', 'C'))):
@@ -385,8 +420,19 @@ class FeatureDriver:
         self.until(lambda: self.canvas.current_page == index, 'native page selection')
         self.require('selected page ID agrees with model', self.canvas._page_id == self.ids()[index])
 
-    def move_before(self, source_id, target_id, *, cross_row=False):
-        from PyQt6.QtCore import QPoint
+    def page_names(self):
+        from PyQt6.QtCore import Qt
+        listing = self.panel.thumbnail_list
+        return {listing.item(row).data(Qt.ItemDataRole.UserRole): listing.item(row).text()
+                for row in range(listing.count())}
+
+    def assert_page_names(self):
+        self.require('default and renamed page captions follow page identities',
+                     self.page_names() == self.original_names, self.page_names())
+
+    def move_before(self, source_id, target_id, *, cross_row=False, after=False, cue=False):
+        from PyQt6.QtCore import QPoint, QTimer
+        from PyQt6.QtGui import QCursor
         listing, viewport = self.panel.thumbnail_list, self.panel.thumbnail_list.viewport()
         before = self.ids()
         source_index, target_index = before.index(source_id), before.index(target_id)
@@ -397,13 +443,71 @@ class FeatureDriver:
         if cross_row:
             self.require('native OLE crosses thumbnail rows', source_rect.top() != target_rect.top())
         source = viewport.mapToGlobal(source_rect.center())
-        target = viewport.mapToGlobal(target_rect.topLeft()+QPoint(5, 5))
-        self.drag(viewport, source, target, hold_ms=350)
-        expected = list(before); expected.remove(source_id); expected.insert(expected.index(target_id), source_id)
+        target = viewport.mapToGlobal((target_rect.topRight()+QPoint(-5, 5)) if after
+                                      else target_rect.topLeft()+QPoint(5, 5))
+        evidence, failures = [], []
+        timer = QTimer()
+        side = 'after' if after else 'before'
+        baseline = self.capture(f'thumbnail-cue-{side}-baseline', self.panel.thumbnail_panel) if cue else None
+        ready_since = None
+
+        def inspect_cue():
+            nonlocal ready_since
+            if evidence or failures:
+                return
+            try:
+                if listing._drag_source_id != source_id or (QCursor.pos()-target).manhattanLength() > 3:
+                    ready_since = None
+                    return
+                if ready_since is None:
+                    ready_since = time.monotonic()
+                    return
+                if time.monotonic()-ready_since < .10:
+                    return
+                insertion, line = listing._drop_insertion, listing._drop_line
+                if insertion != target_index+int(after) or line is None:
+                    raise AssertionError(f'{side} cue has wrong insertion: {insertion}')
+                if abs(line.x1()-line.x2()) > 1 or abs(line.y2()-line.y1()) < target_rect.height()*.6:
+                    raise AssertionError(f'{side} cue is not a full vertical boundary')
+                edge = target_rect.right() if after else target_rect.left()
+                if abs(line.x1()-edge) > 12:
+                    raise AssertionError(f'{side} cue does not match target boundary: {line.x1()}, {edge}')
+                captured = self.capture(f'thumbnail-cue-{side}-dragging', self.panel.thumbnail_panel)
+                a, b = (captured.point(viewport, point) for point in (line.p1(), line.p2()))
+                if a[1] > b[1]: a, b = b, a
+                metrics = inspect_insertion(rgb_reader(captured.image), captured.image.width(),
+                                            captured.image.height(), a, b)
+                absent = inspect_insertion(rgb_reader(baseline.image), baseline.image.width(),
+                                           baseline.image.height(), a, b)
+                evidence.append({'side': side, 'insertion': insertion, 'line': [a, b],
+                                 'painted': metrics, 'baseline': absent})
+            except Exception as exc:
+                failures.append(repr(exc))
+
+        if cue:
+            timer.timeout.connect(inspect_cue)
+            timer.start(40)
+        try:
+            self.drag(viewport, source, target, hold_ms=1000 if cue else 350)
+        finally:
+            timer.stop()
+        if cue:
+            self.require(f'native {side} insertion sampled during held OLE drag',
+                         not failures and bool(evidence), failures)
+            row = evidence[0]
+            self.require(f'native {side} insertion has real visible blue pixels', row['painted']['passed'], row)
+            self.require(f'native {side} insertion pixel oracle rejects no-drag baseline',
+                         not row['baseline']['passed'], row)
+            self.require('drop cue cleaned up after native release',
+                         listing._drop_insertion is None and listing._drop_line is None)
+        expected = list(before)
+        expected.remove(source_id)
+        expected.insert(expected.index(target_id)+int(after), source_id)
         self.until(lambda: self.ids() == expected, 'native OLE changed actual page order')
         self.require('drag preserves active page identity', self.canvas._page_id == source_id)
         self.require('selected row follows page identity', listing.currentRow() == expected.index(source_id))
         self.require('OLE source cleaned up', listing._drag_source_id is None)
+        if self.case == 'thumbnails': self.assert_page_names()
         return expected
 
     def check_thumbnail_layout(self):
@@ -452,41 +556,61 @@ class FeatureDriver:
         self.require('actual native vertical wheel observed', any(r['kind'] == 'wheel' for r in self.inputs))
 
     def thumbnail_drags(self, columns):
-        from PyQt6.QtCore import QPoint
+        from PyQt6.QtCore import QPoint, QTimer
         listing = self.panel.thumbnail_list
         original_content = self.contents()
         self.reveal(0)
         source_id = self.ids()[columns]
-        self.move_before(source_id, self.ids()[0], cross_row=True)
+        self.move_before(source_id, self.ids()[0], cross_row=True, cue=True)
         self.capture('thumbnail-cross-row', self.panel.thumbnail_panel)
+        self.move_before(self.ids()[0], self.ids()[columns+1], cross_row=True, after=True, cue=True)
+        self.capture('thumbnail-after-insertion', self.panel.thumbnail_panel)
         viewport = listing.viewport()
         self.select(0)
         before, active = self.ids(), self.canvas._page_id
         start_value = listing.verticalScrollBar().value()
-        edge_values, drops = [], []
+        edge_values, drops, edge_cues, cue_failures = [], [], [], []
         def scrolled(value):
             if listing._drag_source_id is not None: edge_values.append(value)
         def dropped(source, destination): drops.append((source, destination))
+        def read_edge_cue():
+            try:
+                if listing._drag_source_id is not None and listing._drop_insertion is not None:
+                    edge_cues.append((listing.verticalScrollBar().value(), listing._drop_insertion))
+            except Exception as exc:
+                cue_failures.append(repr(exc))
+        timer = QTimer()
+        timer.timeout.connect(read_edge_cue)
         listing.verticalScrollBar().valueChanged.connect(scrolled)
         listing.reorder_requested.connect(dropped)
         try:
             source_rect = listing.visualItemRect(listing.currentItem())
             destination = QPoint(source_rect.center().x(), viewport.height()-3)
+            timer.start(40)
             self.drag(viewport, viewport.mapToGlobal(source_rect.center()),
                       viewport.mapToGlobal(destination), hold_ms=2400)
         finally:
+            timer.stop()
             listing.verticalScrollBar().valueChanged.disconnect(scrolled)
             listing.reorder_requested.disconnect(dropped)
         self.require('native OLE edge hold autoscrolled during drag',
                      bool(edge_values) and max(edge_values) > start_value, edge_values)
         self.require('edge OLE committed exactly one reorder', len(drops) == 1, drops)
+        self.require('edge insertion cue tracks autoscroll', not cue_failures and bool(edge_cues)
+                     and len({row[1] for row in edge_cues}) > 1, [cue_failures, edge_cues])
         expected = list(before)
         if drops:
             source, destination = drops[0]
+            insertion = edge_cues[-1][1]
+            self.require('edge release uses the final visible insertion cue',
+                         destination == insertion-int(source < insertion), [drops[0], edge_cues[-1]])
             expected.insert(destination, expected.pop(source))
         self.require('edge drop changed real model order', self.ids() == expected and self.ids() != before)
         self.require('edge drag preserves active page identity', self.canvas._page_id == active)
         self.require('edge drag preserves all page contents', self.contents() == original_content)
+        self.assert_page_names()
+        self.require('edge release clears insertion feedback',
+                     listing._drop_insertion is None and listing._drop_line is None)
         self.require('edge drag keeps 13 pages and matching selection',
                      listing.count() == 13 and listing.currentRow() == self.canvas.current_page)
         self.capture('thumbnail-edge-scroll', self.panel.thumbnail_panel)
@@ -498,12 +622,54 @@ class FeatureDriver:
                      and self.canvas._page_id == current and self.contents() == original_content)
         self.capture('thumbnail-X-closed', self.canvas)
 
+    def thumbnail_double_clicks(self):
+        listing, viewport = self.panel.thumbnail_list, self.panel.thumbnail_list.viewport()
+        original_content, order = self.contents(), self.ids()
+        user = self.h.mouse.user32
+        user.GetDoubleClickTime.restype = wintypes.UINT
+        for already_selected in (True, False):
+            self.h.mouse.click(self.panel.rail_count)
+            self.until(lambda: self.panel.thumbnail_panel.isVisible(), 'overview reopens for double-click')
+            index = self.canvas.current_page if already_selected else (0 if self.canvas.current_page else 1)
+            target_id = order[index]
+            rect = self.reveal(index)
+            self.pump(int(user.GetDoubleClickTime())+60)
+            point = viewport.mapToGlobal(rect.center())
+            try:
+                self.h.mouse.hit(viewport, point)
+                self.h.mouse.down_at(point)
+                self.h.mouse.up()
+                self.pump(15)
+                self.require('single native click selects and keeps overview open',
+                             self.canvas._page_id == target_id and self.panel.thumbnail_panel.isVisible())
+                self.h.mouse.hit(viewport, point)
+                self.h.mouse.down_at(point)
+                self.h.mouse.up()
+            finally:
+                self.h.mouse.up()
+            self.pump(800)
+            detail = 'selected' if already_selected else 'another'
+            self.require(f'double-click on {detail} page closes overview past heartbeat',
+                         not self.panel.thumbnail_panel.isVisible())
+            self.require(f'double-click enters the exact {detail} page',
+                         self.canvas._page_id == target_id and self.canvas.current_page == index)
+            self.require('double-click preserves all pages and contents',
+                         self.ids() == order and self.contents() == original_content)
+            self.assert_page_names()
+            self.capture(f'thumbnail-double-click-{detail}-closed', self.canvas)
+
     def thumbnails(self):
         self.action('native thumbnail entry', lambda: self.h.mouse.click(self.panel.rail_count))
         self.until(lambda: self.panel.thumbnail_panel.isVisible(), 'thumbnail overview opens')
         columns = self.check_thumbnail_layout()
+        self.original_names = {page_id: ('Native renamed' if index == 2 else
+                               self.host.module.trf('page_label', index=index+1))
+                               for index, page_id in enumerate(self.initial_ids)}
+        self.assert_page_names()
         self.action('13 full native thumbnail pixel checks and wheel', self.thumbnail_pixels)
-        self.action('cross-row OLE, edge autoscroll, native X', lambda: self.thumbnail_drags(columns))
+        self.action('before/after insertion cues, cross-row OLE, edge autoscroll, native X',
+                    lambda: self.thumbnail_drags(columns))
+        self.action('native single-click and selected/other-page double-click', self.thumbnail_double_clicks)
 
     def box_area(self):
         from PyQt6.QtCore import QPoint
@@ -660,13 +826,13 @@ def initial_feature_setup(host, case):
     if case == 'thumbnails':
         for index in range(13):
             if index: c.new_page()
-            c._page_name = f'Native {index+1:02}'
             c.all_segments = [
                 {'id': f'extreme-left-{index}', 'line': QLineF(-900, -400, -900, 400),
                  'pen': QPen(QColor('#ee2020'), 60)},
                 {'id': f'extreme-right-{index}', 'line': QLineF(900, -400, 900, 400),
                  'pen': QPen(QColor('#2050ee'), 60)}]
             c.mark_content_changed()
+        c.rename_page(2, 'Native renamed')
         c.switch_page(-12)
         c.save_current_page()
     p.update_whiteboard_ui()

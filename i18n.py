@@ -809,7 +809,7 @@ from teaching.media_copy import MEDIA_COPY
 _BASE.update(MEDIA_COPY)
 from teaching.toolbox_copy import TOOLBOX_COPY
 _BASE.update(TOOLBOX_COPY)
-from teaching.interface_copy import INTERFACE_COPY
+from teaching.interface_copy import INTERFACE_COPY, INTERFACE_PALETTE_NAMES
 _BASE.update(INTERFACE_COPY)
 from teaching.measurement_copy import MEASUREMENT_COPY
 _BASE.update(MEASUREMENT_COPY)
@@ -843,7 +843,11 @@ def set_language(lang: str) -> str:
 
 
 def tr(key: str) -> str:
-    return TEXT.get(CURRENT, TEXT["en"]).get(key, TEXT["en"].get(key, key))
+    text = TEXT.get(CURRENT, TEXT["en"]).get(key, TEXT["en"].get(key, key))
+    # Only these four tutorial bodies embed another translated UI label. Other
+    # templates keep their placeholders for trf / the caller to supply as before.
+    palette_key = INTERFACE_PALETTE_NAMES.get(key)
+    return text.format(palette_name=tr(palette_key)) if palette_key is not None else text
 
 
 def trf(key: str, **kwargs) -> str:

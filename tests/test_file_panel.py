@@ -93,6 +93,7 @@ class FilePanelTests(unittest.TestCase):
     def test_file_action_wrappers_close_panel_and_pass_no_boolean_path(self):
         calls = []
         panel = types.SimpleNamespace(
+            runtime_context=self.panel.runtime_context,
             show_only_sub=lambda target: calls.append(("close", target)),
             open_project=lambda: calls.append(("open",)) or True,
             save_project=lambda: calls.append(("save",)) or True,

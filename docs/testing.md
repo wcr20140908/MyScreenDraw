@@ -40,11 +40,13 @@ try {
 | 构建无屏保护、DLL 查找与异常清理 | `test_build_smoke.py`、`test_build_dependencies.py` |
 | 教学目录、epoch、协议、状态与独立进程 | `test_teaching_catalog.py`、`test_teaching_engine.py`、`test_teaching_protocol.py`、`test_teaching_state.py`、`test_teaching_practice.py`、`test_teaching_complete_process.py` |
 | 教学结果与输入、漫游及遮挡 | `test_teaching_business_adapters.py`、`test_teaching_core_input.py`、`test_teaching_page_drag_input.py`、`test_teaching_roam.py`、`test_teaching_example_occlusion.py`、`test_teaching_selection_occlusion.py` |
-| 无限白板、自定义配色与完整缩略图 | `test_infinite_whiteboard.py`、`test_whiteboard_ink_pixels.py`、`test_custom_colors.py`、`test_thumbnail_layout.py`、`test_page_management_610.py` |
+| 无限白板、自定义配色与完整缩略图 | `test_infinite_whiteboard.py`、`test_whiteboard_ink_pixels.py`、`test_custom_colors.py`、`test_thumbnail_layout.py`、`test_thumbnail_interaction.py`、`test_page_management_610.py` |
 | 隐藏棱、设置与更新说明 | `test_box_hidden_edges.py`、`test_settings_collapse.py`、`test_settings_feedback.py`、`test_update_notes.py` |
 | 递归源码与精确教学资源发布门禁 | `test_release_620_scripts.py`、`test_release_artifact.py`、`test_teaching_packaging.py` |
 
 文件名中的旧 beta 编号表示测试引入背景，不表示该测试已失效。单元测试中的 mock 只能验证本地逻辑，不能证明真实桌面窗口收到输入。6.2.0 正式版已发布；公开附件、校验和及实际覆盖范围以对应 Release 和发布收据为准。
+
+当前源码新增 `tests/test_thumbnail_interaction.py`，覆盖单击保留列表、双击进入并关闭、默认／自定义名称随页面重排及保存重开保持、旧空名称补齐、插入提示与真实前后落点一致，以及缝隙、跨行、滚动和离开时的提示更新。这里描述用例范围，不代表本轮离屏或实屏执行结果。
 
 ## 1.1 教学分层与判定负对照
 
@@ -93,7 +95,7 @@ python tests/run_touch_injection.py
 ### 6.2.0 actual native driver（显式选择运行）
 
 - `tests/real_teaching_620.py`：按章节或课程串行运行 C01–C13 原生操作；包含 c05.roam 的平移、滚轮缩放和 Fit/Home。每章是新的源码练习进程；暂停/教学中心使用本地桥接，不声称覆盖正常 IPC/父窗口恢复。系统、自启、更新、托盘相关信息步骤不执行对应系统改动。
-- `tests/real_features_620.py`：独立覆盖 13 页极端笔迹的完整缩略图、多列跨行 OLE 排序/边缘滚动/关闭、CUBE/CUBOID 四方向绘制及三虚九实棱线像素、c05.reorder 直接/中间态/错误顺序路径。
+- `tests/real_features_620.py`：独立覆盖13页默认／自定义名称和极端笔迹的完整缩略图、多列跨行OLE排序、前后插入线实屏像素判定、边缘滚动、默认／自定义名称保持、双击进入关闭及关闭按钮；另有CUBE/CUBOID四方向绘制及三虚九实棱线像素、c05.reorder直接／中间态／错误顺序路径。新增白板项目是当前驱动覆盖范围，实屏结果须按实际运行另记，不从脚本存在推定通过。
 - 两者共用 `tests/native_input_620.py`。Qt 提供几何换算、状态读取和事件循环（光标定位经 QCursor 做 DPI 换算后由 Win32 回读核对）；按钮/按键/滚轮通过 Win32 注入，文字使用 Unicode `SendInput`，拖放进入真实 OLE 循环。不用 QTest、直接业务调用、替换拖放循环或伪造对话框结果取得完成分。初始宿主/夹具构造与收尾不算用户操作。
 
 驱动在按下前核对光标回读、目标 HWND/PID 与预期根窗口，键盘核对前台归属；透明教学高亮的 Qt 命中歧义须由原生命中交叉确认，不能临时隐藏真实遮挡。物理 Escape 为紧急中止。不要与其他原生驱动并行或在运行时操作桌面。超时仅处理所拥有的子进程；强制终止前按输入日志尝试在仍属子进程的目标释放按下状态，无法确认清理时必须记为未确认，不能向其他程序盲发 UP。
@@ -111,6 +113,14 @@ python -B tests/real_features_620.py --all --plan
 
 截图由 `SRCCOPY|CAPTUREBLT` 抓取实际合成屏幕，包含分层窗口，不是 `QWidget.grab()` 或生产渲染函数的替代图。截图、输入日志、逐步 report 和失败现场只保留于本地私有证据目录，不上传/发布或放入便携包；画面仍可能含桌面个人信息。公开记录只摘录脱敏的步骤、命令、退出码、结果/未覆盖项和包哈希，不伪造不存在的截图或报告链接。
 
+### 2026-10-19 白板列表专项（未发布源码）
+
+- 实际执行 `python -B tests/real_features_620.py --case thumbnails --output D:/MyScreenDraw/.ccgui/whiteboard-pages-20261019-01`，使用 Windows QPA 和独立私有进程，退出码0，输入释放及进程收尾确认通过。
+- 13页逐页完整缩略图、原生前插／后插／跨行OLE、边缘自动滚动及提示同步、默认／自定义名称和内容保持、单击保留列表、双击当前页／其他页后关闭、等待800ms仍不重现、关闭按钮均通过。
+- 已查看拖动和关闭后的 CAPTUREBLT 截图；前插与后插提示线采样覆盖率均为100%，无拖动基线均为0%，负对照被拒绝。原始截图与报告仅保存在上述本地私有目录。
+- 白板、页面管理、缩略图布局／交互、文档安全、页面教学同进程、窗口层级与项目往返共8个离屏测试文件最终通过：66项测试、4项子测试。插入线像素断言在临时关闭自定义绘制时必须失败，恢复后通过；原生验证器静态自检另通过22组已知好／坏图像和7组模拟Win32清理检查。
+- 27页中将第19页移到第14页前、旧空名称补齐、保存重开、删除／新建／复制后的名称保持另由离屏用例覆盖。本次实屏不包含物理触屏、冻结包启动或全课程流程，也未构建或发布附件。
+
 Windows 注入测试是原生窗口输入回归的一部分；物理触控设备仍按目标环境记录。正式版在目标大屏继续核对：
 
 - LOGO 横竖布局边缘拖动、继续/反向拖动、分离/折叠，以及释放后按下高亮清理；区分正常悬停反馈。
@@ -118,9 +128,9 @@ Windows 注入测试是原生窗口输入回归的一部分；物理触控设备
 - 11 种笔、颜色与参数独立保存，重启后恢复；已有笔迹不随设置改变。
 - 鼠标／批注／白板反复切换，底层浏览器或演示程序能收到鼠标和键盘。
 - 子菜单、工具栏、文字公式输入、软键盘在亮暗主题和不同缩放下可操作。
-- 页面列表定位、首页末页提示、删除取消／确认、唯一页删除、保存与重新打开。
+- 页面列表定位、单击保留列表、双击进入并关闭、首页末页提示、删除取消／确认、唯一页删除，以及默认／自定义名称在排序、保存与重新打开后保持；计数条始终按当前位置显示。
 - 无限白板的鼠标/单指平移、滚轮/双指缩放、锚点保持、Fit/Home、切回笔输入；逐页视图保存/复制/重开及负坐标和屏外笔迹的缩略图/四格式导出。
-- 多列缩略图完整显示（含首末笔迹与页码）、跨行排序、边缘滚动与关闭；正确中间排序不提前通过，最终完整顺序正确才推进教学。
+- 多列缩略图完整显示（含首末笔迹与页码）、单列上下／多列左右插入提示与实际落点一致、缝隙／首尾／跨行排序、边缘滚动时提示更新与关闭；正确中间排序不提前通过，最终完整顺序正确才推进教学。
 - 教学控制器/提示/示例不遮挡真实操作，完成、跳过、暂停/恢复及退出后原工作和设置保留。
 - F12 隐藏、托盘恢复、取消退出、保存失败后不退出，以及最终正常退出。
 - 多指绘制、抬指与切笔后笔迹正确，撤销顺序符合实际笔完成顺序。

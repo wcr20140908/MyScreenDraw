@@ -28,7 +28,7 @@ MyScreenDraw 是桌面程序，**不上传绘图、名单或日志**。攻击面
   - 发现新版本后，程序会在应用内请求确认下载，再请求确认安装，不打开 GitHub 下载页面。
   - 下载 ZIP 会先做归档校验，拒绝路径穿越、绝对路径、驱动器路径、符号链接、重复条目、过大归档、过多成员、过大解压总量和缺少 `MyScreenDraw.exe` 的归档。
   - 安装设计要求只替换应用文件，跳过 `data/`、`exports/`、配置、名单、日志和自动保存；6.0.1 的合成数据保全与失败路径已通过自动化验证，不能据此保证 6.0.0 的安装链路可靠。
-  - 6.2.0 按版本查看更新说明：需要获取正文时通过 `fetch_release_notes()` 请求固定 GitHub 仓库的 `/releases/tags/<tag>`，受超时及正文大小限制；运行版本历史/说明缓存在本地 `data/update-history.json`。说明按禁用 HTML 的 Markdown 呈现，不自动加载远程图片或本地文件；用户主动点击 HTTP/HTTPS 链接会交给外部浏览器。完全离线环境也应避免主动获取说明或点击外链。
+  - 6.2.0 按版本查看更新说明：需要获取正文时通过 `fetch_release_notes()` 请求固定 GitHub 仓库的 `/releases/tags/<tag>`，受超时及正文大小限制；运行版本历史/说明缓存在本地 `data/update-history.json`。说明按禁用 HTML 的 Markdown 呈现，不自动加载远程图片或本地文件；用户主动点击 HTTP/HTTPS 链接会交给外部浏览器。断网运行环境也应避免主动获取说明或点击外链。
 - **开机自动启动**：只有用户在设置页打开开关，才会在
   `HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run` 下写一条
   名为 `MyScreenDraw` 的值（`main.py` `set_autostart`）。仅限当前用户，

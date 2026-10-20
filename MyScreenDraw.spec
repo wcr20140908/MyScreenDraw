@@ -22,7 +22,7 @@ def analyze_with_system_dlls(*args, **kwargs):
 
 # SPEC is provided by PyInstaller. Unit tests execute this file with runpy, where
 # __file__ is the reliable checkout path and SPEC is not injected.
-_spec_path = globals().get("SPEC", __file__)
+_spec_path = globals().get("SPEC") or __file__
 source_root = os.path.dirname(os.path.abspath(_spec_path))
 sys.path.insert(0, source_root)
 from teaching.packaging import collect_teaching_datas

@@ -64,7 +64,12 @@ def test_open_guard_course_preserves_cancels_discards_then_saves_real_work(writi
     host, progress = writing_host
     panel = host.panel
     sample = Path(panel._teaching_file_open_path)
-    monkeypatch.setattr(host.module.QFileDialog, 'getOpenFileName', lambda *args: (str(sample), ''))
+    defaults = []
+    def choose_sample(owner, title, default, file_filter):
+        defaults.append(default)
+        return str(sample), file_filter
+    monkeypatch.setattr(host.module.QFileDialog, 'getOpenFileName', choose_sample)
+    assert sample.is_file() and sample.is_relative_to(host.request.paths.data_dir)
     next_info(host)
     assert_step(host, 'make_dirty'); draw_ink(panel.canvas)
     original = panel.canvas.document_signature()
@@ -82,6 +87,7 @@ def test_open_guard_course_preserves_cancels_discards_then_saves_real_work(writi
     monkeypatch.setattr(QMessageBox, 'exec', lambda self: QMessageBox.StandardButton.Save)
     panel.btn_open_project.click()
     assert panel.canvas.serialized_document_pages() == expected and not panel.has_unsaved_changes()
+    assert list(map(Path, defaults)) == [sample] * 3, 'Every Open must suggest the chapter sample'
     assert_step(host, 'guard_info'); next_info(host)
     assert_step(host, 'done'); next_info(host); finished(host, progress)
 
@@ -149,6 +155,54 @@ def test_open_picker_cancel_cannot_impersonate_unsaved_dialog_cancel(writing_hos
     monkeypatch.setattr(QMessageBox, 'exec', lambda self: pytest.fail('no unsaved dialog without a file'))
     panel.btn_open_project.click()
     assert_step(host, 'cancel_open')
+
+
+@pytest.mark.parametrize('writing_host', ['c08.open_guard'], indirect=True)
+@pytest.mark.parametrize('cancel_picker', [False, True])
+def test_open_guard_picker_shows_and_preselects_its_private_sample(writing_host, monkeypatch, cancel_picker):
+    from PyQt6.QtCore import QTimer, Qt
+    from PyQt6.QtTest import QTest
+    from PyQt6.QtWidgets import QFileDialog, QDialogButtonBox
+    host, _ = writing_host
+    panel, app = host.panel, QApplication.instance()
+    assert app.platformName() == 'offscreen'
+    sample = Path(panel._teaching_file_open_path)
+    next_info(host); draw_ink(panel.canvas)
+    original = panel.canvas.document_signature()
+    seen, errors, prompts = [], [], []
+
+    def respond():
+        dialog = app.activeModalWidget()
+        try:
+            assert isinstance(dialog, QFileDialog)
+            seen.append(True)
+            assert Path(dialog.directory().absolutePath()) == sample.parent, 'Chooser must display the sample folder'
+            assert list(map(Path, dialog.selectedFiles())) == [sample], 'Chooser must preselect the existing .msd sample'
+            assert sample.is_file()
+            normalize_project_data(read_json_maybe_gz(str(sample)), kind=PROJECT_KIND)
+            buttons = dialog.findChild(QDialogButtonBox)
+            button = buttons.button(QDialogButtonBox.StandardButton.Cancel if cancel_picker
+                                    else QDialogButtonBox.StandardButton.Open)
+            assert button.isEnabled()
+            QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+        except BaseException as exc:
+            errors.append(exc)
+            if isinstance(dialog, QFileDialog):
+                dialog.reject()
+
+    def unsaved_prompt(box):
+        prompts.append(True)
+        return QMessageBox.StandardButton.Cancel
+
+    monkeypatch.setattr(QMessageBox, 'exec', unsaved_prompt)
+    QTimer.singleShot(100, respond)
+    panel.btn_open_project.click()
+    if errors:
+        raise errors[0]
+    assert seen == [True]
+    assert prompts == ([] if cancel_picker else [True])
+    assert panel.canvas.document_signature() == original
+    assert_step(host, 'cancel_open' if cancel_picker else 'discard_open')
 
 
 @pytest.mark.parametrize('writing_host', ['c08.save'], indirect=True)

@@ -43,12 +43,12 @@ def click_text(panel, item, x=None, y=None):
     mouse(panel.canvas, 'release', (int(x), int(y)))
 
 
-def click_root(canvas):
+def click_root(canvas, *, at_end=False):
     item = canvas.editing_text_item()
     box = canvas.formula_box(item)
     rect = canvas.text_local_rect(item)
     point = canvas.text_transform(item).map(QPointF(
-        rect.left() + canvas.TEXT_PAD + 2,
+        rect.left() + canvas.TEXT_PAD + (box.w + 2 if at_end else 2),
         rect.top() + canvas.TEXT_PAD + box.ascent / 2)).toPoint()
     mouse(canvas, 'press', (point.x(), point.y()))
     mouse(canvas, 'release', (point.x(), point.y()))
@@ -183,7 +183,8 @@ def test_c07_format_course_changes_only_the_real_text_object(writing_host, monke
 
 
 @pytest.mark.parametrize('writing_host', ['c07.formula'], indirect=True)
-def test_c07_formula_course_fills_each_structure_and_preserves_symbols(writing_host):
+@pytest.mark.parametrize('navigation', ['click', 'end_key'])
+def test_c07_formula_course_fills_each_structure_and_preserves_symbols(writing_host, navigation):
     host, progress = writing_host
     panel, canvas = host.panel, host.panel.canvas
     symbols = fixture_text_item(canvas, 'Symbols: ')
@@ -227,7 +228,14 @@ def test_c07_formula_course_fills_each_structure_and_preserves_symbols(writing_h
             assert_step(host, 'root_after_'+kind)
             click_root(canvas)
             assert canvas.editing_slot == () or canvas.editing_slot is None
-            press_key(panel, Qt.Key.Key_End); type_text(panel, '+')
+            assert host.presenter.engine.sequence_index == 1
+            if navigation == 'click':
+                click_root(canvas, at_end=True)
+            else:
+                press_key(panel, Qt.Key.Key_End)
+            assert host.presenter.engine.sequence_index == 2
+            assert canvas.caret_offset == canvas.caret_limit(formula_item)
+            type_text(panel, '+')
     assert_step(host, 'navigate_info'); next_info(host)
     assert_step(host, 'finish'); action_button(panel, 'done').click()
     assert canvas.editing_text_id is None and formula_item in canvas.text_items and symbols in canvas.text_items
@@ -287,7 +295,7 @@ def test_reedit_replacement_cannot_impersonate_preserving_append(writing_host):
 
 
 @pytest.mark.parametrize('writing_host', ['c07.formula'], indirect=True)
-def test_root_return_requires_current_end_key_before_append(writing_host):
+def test_root_return_requires_end_position_then_real_append(writing_host):
     host, _ = writing_host
     panel, canvas = host.panel, host.panel.canvas
     next_info(host); panel.btn_text.click(); click_text(panel,fixture_text_item(canvas,'Symbols: '))
@@ -296,12 +304,53 @@ def test_root_return_requires_current_end_key_before_append(writing_host):
     symbol_button(panel,'frac').click(); type_text(panel,'a')
     path = tuple(canvas.editing_slot[:-1])+('den',); click_formula_slot(canvas,path); type_text(panel,'xy')
     press_key(panel,Qt.Key.Key_Home); press_key(panel,Qt.Key.Key_Right); type_text(panel,'Z')
-    assert_step(host,'root_after_frac'); click_root(canvas)
-    from PyQt6.QtGui import QTextCursor
-    cursor = panel.text_input.textCursor(); cursor.movePosition(QTextCursor.MoveOperation.End)
-    panel.text_input.setTextCursor(cursor)
+    assert_step(host,'root_after_frac')
+    # Appending inside the nested denominator is not returning to the root.
     type_text(panel,'+')
-    assert host.presenter.engine.current_step_id == 'root_after_frac'
+    assert host.presenter.engine.sequence_index == 0
+    click_root(canvas)
+    assert host.presenter.engine.sequence_index == 1
+    # Returning alone, or inserting before the existing main row, is not enough.
+    type_text(panel,'+')
+    assert_step(host,'root_after_frac')
+    assert host.presenter.engine.sequence_index == 1
+    click_root(canvas, at_end=True)
+    assert_step(host,'root_after_frac')
+    assert host.presenter.engine.sequence_index == 2
+    type_text(panel,'+')
+    assert_step(host,'sup')
+
+
+@pytest.mark.parametrize('writing_host', ['c07.formula'], indirect=True)
+def test_formula_keyboard_helper_is_available_without_advancing_or_unlocking_done(writing_host, monkeypatch):
+    from PyQt6.QtTest import QTest
+    host, _ = writing_host
+    panel, canvas = host.panel, host.panel.canvas
+    next_info(host); panel.btn_text.click(); click_text(panel, fixture_text_item(canvas, 'Symbols: '))
+    for symbol in ('α', '±', '∈', '∫'):
+        symbol_button(panel, symbol).click()
+    click_text(panel, fixture_text_item(canvas, 'F = ')); panel._symbol_group_buttons['structure'].click()
+    symbol_button(panel, 'frac').click(); type_text(panel, 'a')
+    click_formula_slot(canvas, tuple(canvas.editing_slot[:-1]) + ('den',)); type_text(panel, 'xy')
+    press_key(panel, Qt.Key.Key_Home); press_key(panel, Qt.Key.Key_Right); type_text(panel, 'Z')
+    calls = []
+    # Exercise the actual button/filter/handler, but never launch an OS keyboard
+    # from an offscreen test. This verifies reachability, not OS availability.
+    monkeypatch.setattr(panel, '_request_keyboard', lambda: calls.append('requested'))
+    for stage in range(3):
+        assert_step(host, 'root_after_frac')
+        assert host.presenter.engine.sequence_index == stage
+        before = canvas.document_signature()
+        QTest.mouseClick(action_button(panel, 'keyboard'), Qt.MouseButton.LeftButton)
+        assert len(calls) == stage + 1
+        QTest.mouseClick(action_button(panel, 'done'), Qt.MouseButton.LeftButton)
+        assert canvas.editing_text_id is not None
+        assert canvas.document_signature() == before
+        assert host.presenter.engine.sequence_index == stage
+        if stage < 2:
+            click_root(canvas, at_end=stage == 1)
+    type_text(panel, '+')
+    assert_step(host, 'sup')
 
 
 @pytest.mark.parametrize('writing_host', ['c07.edit'], indirect=True)

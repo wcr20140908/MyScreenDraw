@@ -119,13 +119,27 @@ removal of existing persistence/export limits.
 
 The overview is positioned above the page rail. `PageListWidget` wraps left to
 right into width-dependent columns (normally 1–4 in the host's capped panel),
-scales the complete thumbnail and reserves space for captions. Vertical scrolling,
+scales the complete thumbnail and reserves space for captions. A single click
+selects the current page while leaving the list open for further operations;
+a double click enters the page and closes the list. Vertical scrolling, positional
 page numbers, close control and visible/revision-keyed rendering remain separate
-from page content. Internal OLE drag emits an explicit source/destination reorder;
-the document updates once and retains the active page identity. It must not rely
-on IconMode's free icon placement or remove a newly rebuilt row a second time.
-Cross-row insertion and edge autoscroll require native acceptance, not only direct
-calls to drop handlers.
+from page content.
+
+Internal OLE drag shows a blue insertion line with a white outline and end caps:
+above/below an item in a single column, or left/right in a multi-column grid.
+Gaps resolve to the nearest item, and the cue updates during edge autoscroll.
+The cue and the explicit source/destination reorder share the same insertion-slot
+calculation. The document updates once and retains the active page identity.
+It must not rely on IconMode's free icon placement or remove a newly rebuilt row
+a second time. Cross-row insertion and edge autoscroll require native acceptance,
+not only direct calls to drop handlers.
+
+Default names are persisted in the existing page `name` field, just like renamed
+pages. Legacy empty names are filled in their original order on first load or
+normalization, before reordering; new pages avoid names already in use among the
+default page names. Moving a page preserves its name, identity and content through
+save/reopen. Names do not represent the current ordinal: the page-count control
+continues to show the current position and total.
 
 ## Classroom preferences (introduced in 6.0.0)
 

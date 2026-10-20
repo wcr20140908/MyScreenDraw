@@ -133,15 +133,15 @@ class WhiteboardPagesTests(unittest.TestCase):
         self.assertEqual(self.panel.rail_count.text(), "1/1")
         self.assertTrue(self.panel.project_dirty)
 
-    def test_compact_placement_tracks_rail_and_clamps_to_screen(self):
+    def test_overview_placement_tracks_rail_and_clamps_to_screen(self):
         self.assertLess(self.panel.thumbnail_list.minimumWidth(), 580)
         with patch.object(main.toolbar_windows, "_available_rect", return_value=QRect(-800, 20, 800, 600)), patch.object(self.panel, "_floating_anchor", side_effect=AssertionError("must not anchor to toolbar")):
             self.panel._position_page_rail()
             self.panel.toggle_thumbnail_panel()
             rect = self.panel.thumbnail_panel.geometry()
             rail = self.panel.page_rail.geometry()
-            self.assertLessEqual(rect.width(), 320)
-            self.assertLessEqual(rect.height(), 300)
+            self.assertEqual(rect.width(), 560)
+            self.assertLessEqual(rect.height(), 600)
             self.assertEqual(rect.right(), rail.right())
             self.assertLess(rect.bottom(), rail.top())
             self.assertTrue(QRect(-800, 20, 800, 600).contains(rect))

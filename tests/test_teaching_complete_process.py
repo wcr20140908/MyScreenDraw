@@ -95,6 +95,9 @@ BRIDGE = BRIDGE.replace("        elif chapter.startswith('c10.'):", r"""        
                 assert canvas.magnifier_pixmap is not None and not canvas.magnifier_pixmap.isNull()
             elif name == 'zoom': panel.btn_mag_zoom_in.click()
             elif name == 'size': panel.mag_size_slider.setValue(320)
+            elif name == 'move':
+                mouse(canvas, 'move', 220, 210)
+                mouse(canvas, 'move', 260, 225)
             else: panel.btn_mag_refresh.click()
         elif chapter == 'c12.spotlight':
             if name == 'move': mouse(canvas, 'move', 210, 160)
@@ -120,5 +123,5 @@ BRIDGE = BRIDGE.replace("        elif chapter.startswith('c10.'):", r"""        
 
 def test_all_courses_one_process_restores_parent_and_cleans_private_files(parent_coordinator, tmp_path, monkeypatch):
     proof = run_course_process(parent_coordinator, tmp_path, monkeypatch,
-        chapters=CHAPTERS, bridge_source=BRIDGE, expected_steps=399)
+        chapters=CHAPTERS, bridge_source=BRIDGE, expected_steps=400)
     assert proof['c13_paused'] and proof['c13_resumed']

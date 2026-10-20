@@ -368,8 +368,11 @@ class NativeInput(NativeMouse):
         self.path(points, hold_ms=hold_ms)
 
     @contextmanager
-    def file_chooser(self, path, *, timeout=20):
-        """Native Windows common dialog: Alt+N, select filename, type, Enter.
+    def file_chooser(self, path, *, timeout=20, use_default=False):
+        """Native Windows common dialog: type a path or accept the existing default.
+
+        use_default deliberately sends no filename or folder navigation, so a
+        missing suggested sample cannot be concealed by driver path injection.
 
         The worker is armed BEFORE the toolbar click: Qt timers alone can starve
         inside IFileDialog/OLE. It only reads HWNDs and sends Win32 input. A Qt
@@ -394,12 +397,13 @@ class NativeInput(NativeMouse):
                 if hwnd is None:
                     raise TimeoutError('native file chooser did not appear')
                 time.sleep(.25)
-                self.chord(0x12, 0x4E, expected=hwnd)  # Alt+N: File name (also zh-CN).
-                time.sleep(.12)
-                self.chord(0x11, 0x41, expected=hwnd)
-                self.text(path, expected=hwnd)
+                if not use_default:
+                    self.chord(0x12, 0x4E, expected=hwnd)  # Alt+N: File name (also zh-CN).
+                    time.sleep(.12)
+                    self.chord(0x11, 0x41, expected=hwnd)
+                    self.text(path, expected=hwnd)
                 self.chord(0x0D, expected=hwnd)
-                self._log('file_chooser_submitted', path=path)
+                self._log('file_chooser_submitted', path=path, use_default=use_default)
             except Exception as exc:
                 failures.append(exc)
                 self.errors.append(repr(exc))

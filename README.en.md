@@ -17,9 +17,13 @@ Current version **v6.2.0** — stable release. The UI follows the system languag
 
 Stable 6.2.0 is published with a Windows x64 portable package. The download and checksum instructions below refer to the current release.
 
-## 6.2.0 features and fixes
+## 6.2.0 release update (2026-10-20)
 
-- Software tutorials now cover **C01–C13: 13 courses, 47 chapters and 400 defined steps**. The single-display route has **399 steps**; the complete route passed in one real QProcess, including original-work, undo/redo and configuration-hash restoration checks. Windows native mouse/keyboard acceptance is tracked separately from offscreen tests.
+The magnifier tutorial now includes actual movement and use. The current catalog has **13 courses, 47 chapters and 401 defined steps**, with a **400-step single-display route**. This update includes double-click page navigation, a visible insertion cue and stable default page names, plus fixes for formula focus, practice file defaults and measurement tool placement. Test layers and coverage limits are recorded separately; catalog counts are not acceptance results.
+
+## 6.2.0 features and fixes (initial release record, 2026-10-18)
+
+- At release, software tutorials covered **C01–C13: 13 courses, 47 chapters and 400 defined steps**. That **399-step single-display route** passed in one real QProcess, including original-work, undo/redo and configuration-hash restoration checks. Windows native mouse/keyboard acceptance is tracked separately from offscreen tests.
 - A new **whiteboard navigation tutorial** covers entering Pan mode, panning, zooming in/out, fitting all content on the current page, resetting the view, and returning to ink. Progress follows actual view and document results.
 - **Full multi-column page thumbnails** adapt to 1–4 columns, with page labels, scrolling, reordering and a close button. Correct staged reorders now advance the lesson, while incorrect remaining page order is rejected.
 - Cubes and cuboids show three hidden edges as dashed lines consistently in the preview, canvas and all four export formats. Cube bounds include the projected rear face and stroke width to prevent clipping.
@@ -111,10 +115,12 @@ The historical version sections below remain for migration and traceability.
 - Geometry construction: circumcircle, incircle, medians, altitudes, diagonals, angle bisector, etc.
 
 ### Whiteboard
-- The compact page list is anchored to the page navigation bar.
+- The page list is anchored to the page navigation bar and adapts to 1–4 columns. Single-click a thumbnail to select its page and keep the list open for **Copy**, **Rename** or **Delete**; double-click to enter that page and close the list without clicking the page-count button again.
+- While dragging, a blue insertion line with a white outline and end caps marks the drop position: above/below a page in one column, or left/right in multiple columns. Gaps resolve to the nearest page, and the cue updates during edge autoscroll. Release when it shows the intended position.
+- Default names such as **Page 19** and custom names stay with their pages, including after saving and reopening. A name is not the current position: moving Page 19 before Page 14 gives Page 13, Page 19, Page 14, Page 15; the page-count control still shows the current position, such as **14/27**.
 - First/last-page arrows appear grey but show a boundary hint when clicked.
 - Select a page and use the red **Delete** button below the list. Confirmation defaults to cancel; deleting the only page leaves one blank page.
-- Multi-page management with thumbnail navigation; use **Copy** / **Rename** below the list and drag thumbnails to reorder. Copies default to after the source; Settings can choose before, first or last
+- Copies default to after the source; Settings can choose before, first or last.
 - White / black board switching
 - Page-by-page export to PNG / PDF / SVG / EPS (page numbers on multi-page exports; SVG/EPS are vector and stay editable)
 

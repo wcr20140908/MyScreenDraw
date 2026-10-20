@@ -65,6 +65,7 @@ class TeachingPresenter(QObject):
                  available_geometry: Callable[[QWidget | None], QRect] = _work_area,
                  layout_obstacles: Callable[[], Iterable[QRect]] | None = None,
                  interaction_region: Callable[[], QRect] | None = None,
+                 input_helpers: Callable[[str | None], Iterable[QWidget]] | None = None,
                  restack_window: Callable[[QWidget], None] | None = None,
                  manage_window: Callable[[QWidget], None] | None = None,
                  unmanage_window: Callable[[QWidget], None] | None = None,
@@ -89,6 +90,9 @@ class TeachingPresenter(QObject):
         self._prepare_fixture, self._prepare_step = prepare_fixture, prepare_step
         self._reveal_actions, self._available_geometry = actions, available_geometry
         self._layout_obstacles, self._interaction_region = layout_obstacles, interaction_region
+        if input_helpers is not None and not callable(input_helpers):
+            raise ValueError('input helper source must be a trusted callable')
+        self._input_helpers = input_helpers
         self._restack_window = restack_window
         self._placing_layout = False
         self._layout_signature: tuple | None = None
@@ -308,7 +312,10 @@ class TeachingPresenter(QObject):
         anchor = self._place_controller(target)
         if anchor is None or not self._still_current(snapshot):
             return
-        self.barrier.activate(step.input_policy, targets=(target,) if target else (),
+        helpers = tuple(self._input_helpers(self.active_target_id)) if self._input_helpers else ()
+        if not self._still_current(snapshot):
+            return
+        self.barrier.activate(step.input_policy, targets=((target,) if target else ()) + helpers,
                               canvas=canvas if _live(canvas) else None, controller=self.controller)
         self.highlight.highlight(anchor if self.active_target_id is not None else None)
         self._restack_floating(self.highlight)

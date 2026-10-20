@@ -207,7 +207,8 @@ def test_internal_drag_move_uses_generic_autoscroll_and_accepts_page_insertion(d
     housekeeping = Mock()
     monkeypatch.setattr(QAbstractItemView, "dragMoveEvent", housekeeping)
     accepted = []
-    event = SimpleNamespace(source=lambda: widget, setDropAction=lambda _: None,
+    event = SimpleNamespace(source=lambda: widget, position=lambda: QPointF(10, 10),
+                            setDropAction=lambda _: None,
                             accept=lambda: accepted.append(True), ignore=lambda: accepted.append(False))
     widget.dragMoveEvent(event)
     housekeeping.assert_called_once_with(widget, event)
