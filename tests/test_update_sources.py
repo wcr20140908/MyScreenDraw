@@ -199,3 +199,31 @@ def test_gitcode_release_upload_preserves_provider_signed_headers(monkeypatch, t
     assert calls[0][1]["Content-Type"]=="application/octet-stream"
     assert int(calls[0][1]["Content-Length"])==path.stat().st_size
     assert calls[0][2]==path.read_bytes()
+
+
+@pytest.mark.parametrize("source,channel", [("github", "preview"), ("gitcode", "stable")])
+def test_obsolete_worker_is_rejected_before_teaching_deferral(panel, monkeypatch, source, channel):
+    panel.build_settings_panel()
+    worker = main.UpdateCheckWorker(channel, panel, source=source)
+    monkeypatch.setattr(panel, "sender", lambda: worker)
+    monkeypatch.setattr(main, "update_work_is_blocked", lambda panel: True)
+    panel._on_update_result({"tag":"v99.0.0-beta.1", "source":source}, None)
+    assert getattr(panel, "_teaching_deferred_update_result", None) is None
+
+
+@pytest.mark.parametrize("selection", ["source", "channel"])
+def test_scheduled_teaching_reply_does_not_restore_after_selection_change(panel, monkeypatch, selection):
+    from PyQt6.QtTest import QTest
+    panel.build_settings_panel()
+    monkeypatch.setattr(panel, "save_settings", Mock())
+    monkeypatch.setattr(main, "teaching_blocks_updates", lambda panel: False)
+    monkeypatch.setattr(main, "update_work_is_blocked", lambda panel: False)
+    panel._teaching_deferred_update_result = (None, "obsolete_route_error")
+    panel._resume_teaching_updates()
+    if selection=="source":
+        panel.set_update_source(panel.update_source_combo.findData("gitcode"))
+    else:
+        panel.set_update_channel(panel.update_channel_combo.findData("preview"))
+    QTest.qWait(10)
+    assert panel._update_status_text == ""
+    assert panel._pending_update_release is None

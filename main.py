@@ -14315,6 +14315,7 @@ class ControlPanel(QWidget):
         if channel not in ("stable", "preview") or channel == self.update_channel:
             return
         self.update_channel = channel
+        self._teaching_deferred_update_result = None
         self._remember_available_update(None)
         self._set_update_status("")
         self.save_settings()
@@ -14414,14 +14415,16 @@ class ControlPanel(QWidget):
             return
         if getattr(self, '_updates_stopping', False):
             return
+        sender = self.sender()
+        if isinstance(sender, UpdateCheckWorker) and (sender.channel != self.update_channel
+                or sender.source != self.update_source):
+            if not update_work_is_blocked(self):
+                self._set_update_check_enabled(bool(self.update_check_enabled))
+            return
         if update_work_is_blocked(self):
             self._teaching_deferred_update_result = (release, error)
             return
         self._set_update_check_enabled(bool(self.update_check_enabled))
-        sender = self.sender()
-        if isinstance(sender, UpdateCheckWorker) and (sender.channel != self.update_channel
-                or sender.source != self.update_source):
-            return
         if error == "rate_limited":
             self._set_update_status(tr("update_rate_limited"))
             track_event("update_check_rate_limited")
@@ -14586,10 +14589,14 @@ class ControlPanel(QWidget):
             pending = getattr(self, field, None)
             if pending is not None:
                 setattr(self, field, None)
-                QTimer.singleShot(0, lambda field=field, pending=pending, callback=callback:
-                    self._deliver_teaching_update(field, pending, callback))
+                selection = (getattr(self, "update_source", "github"), getattr(self, "update_channel", "stable"))
+                QTimer.singleShot(0, lambda field=field, pending=pending, callback=callback, selection=selection:
+                    self._deliver_teaching_update(field, pending, callback, selection))
 
-    def _deliver_teaching_update(self, field, pending, callback):
+    def _deliver_teaching_update(self, field, pending, callback, selection=None):
+        current = (getattr(self, "update_source", "github"), getattr(self, "update_channel", "stable"))
+        if field == "_teaching_deferred_update_result" and selection is not None and selection != current:
+            return
         # Scheduling is not authority to run inside a later confirmation or lesson.
         if (not self.runtime_context.updates or update_work_is_blocked(self)
                 or getattr(self, "_updates_stopping", False)
