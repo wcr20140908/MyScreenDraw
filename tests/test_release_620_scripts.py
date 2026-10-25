@@ -33,6 +33,7 @@ def release_tree(tmp_path):
         "assets/tutorials/fixtures/media-c09-sample.png": b"synthetic bundled image",
         "assets/tutorials/fixtures/media-c09-sample.pdf": b"%PDF-synthetic fixture",
         "assets/tutorials/fixtures/core.interface.msd": b'{"synthetic":true}',
+        "assets/tutorials/fixtures/toolbox.c12.scientific_calculator.msd": b'{"synthetic":true}',
     }
     for name, data in files.items():
         path = root / name
@@ -41,7 +42,7 @@ def release_tree(tmp_path):
     return root
 
 
-def archive(root, *, extras=None, omit=(), version="6.2.0"):
+def archive(root, *, extras=None, omit=(), version=VERSION):
     exe = fake_pe()
     files = {name: b"synthetic dependency" for name in artifact.REQUIRED_FILES}
     files["MyScreenDraw.exe"] = exe
@@ -99,7 +100,8 @@ def test_exact_source_teaching_inventory_survives_archive_validation(release_tre
 
 
 @pytest.mark.parametrize("member", ["catalog.json", "courses/c01.json",
-    "fixtures/media-c09-sample.png", "fixtures/media-c09-sample.pdf", "fixtures/core.interface.msd"])
+    "fixtures/media-c09-sample.png", "fixtures/media-c09-sample.pdf", "fixtures/core.interface.msd",
+    "fixtures/toolbox.c12.scientific_calculator.msd"])
 def test_missing_teaching_resource_blocks_release(release_tree, member):
     path = archive(release_tree, omit=[TUTORIAL + member])
     with pytest.raises(ValueError, match="teaching|required"):
@@ -107,7 +109,8 @@ def test_missing_teaching_resource_blocks_release(release_tree, member):
 
 
 @pytest.mark.parametrize("member", ["courses/c01.json", "fixtures/media-c09-sample.png",
-                                     "fixtures/core.interface.msd"])
+                                     "fixtures/core.interface.msd",
+                                     "fixtures/toolbox.c12.scientific_calculator.msd"])
 def test_tampered_known_resource_blocks_release(release_tree, member):
     path = archive(release_tree, extras={TUTORIAL + member: b"different bytes"})
     with pytest.raises(ValueError, match="teaching.*(hash|content|mismatch)"):

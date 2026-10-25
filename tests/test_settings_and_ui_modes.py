@@ -551,8 +551,8 @@ class UpdateCheckTests(_PanelCase):
         import textwrap
         from unittest.mock import patch
         cases = [
-            ('_on_update_result', 'self._pending_update_release = release',
-             'self._pending_update_release = release; self._offer_update_page(release)',
+            ('_on_update_result', 'self._remember_available_update(release)',
+             'self._remember_available_update(release); self._offer_update_page(release)',
              self.test_default_check_only_notifies),
             ('download_pending_update', 'self._offer_update_page(release)', 'pass',
              self.test_manual_download_is_separate_from_check),

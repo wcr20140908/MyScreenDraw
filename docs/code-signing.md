@@ -1,38 +1,19 @@
-# Code signing and release integrity
+# Code signing and update integrity
 
-The **v6.0.0** release is in preparation and has not been packaged or published.
-The current build process does not sign binaries; published beta.8 builds are
-unsigned. Windows SmartScreen or security
-software may warn about an unfamiliar publisher. This alone proves neither
-malware nor safety; check the source and investigate warnings rather than
-instructing users to disable protection.
+The 6.3.0 build does not apply Windows Authenticode signatures to MyScreenDraw.exe. Its package manifest continues to record signature: none. The Ed25519 signature on update metadata is a separate mechanism.
 
-## What the checks establish when run
+## What the update checks establish
 
-- The release `.zip.sha256` checks the ZIP against the published checksum.
-- `RELEASE-MANIFEST.json` records the EXE hash and currently says `signature: none`.
-- The updater validates archive structure, paths, and size limits. Those checks
-  are not Authenticode verification or an independent proof of publisher identity.
-- An attacker controlling both an asset and its checksum could replace both.
-  HTTPS and checksums do not remove the trust placed in the release account.
+- Both GitHub and GitCode publish identical accepted ZIP bytes, a ZIP SHA-256 file and MyScreenDraw-v6.3.0-update.json.
+- The client verifies the descriptor with its embedded Ed25519 public key. The signed manifest binds version/tag, exact ZIP name, size and SHA-256, executable SHA-256 and the accepted source commit.
+- Downloads are checked against the signed size and hash. Archive paths, member limits, required executable, package manifest and executable hash are checked locally before installation.
+- A maintainer signs only a package that already has a valid build receipt. The private key stays outside tracked source and release output; account credentials are not embedded in the client.
+- Legacy GitHub releases through 6.2.0 remain readable for version and release-note compatibility. New releases from 6.3.0 require signed descriptors.
 
-The planned 6.0.0 manifest and checksums do not exist as verified release evidence
-yet. See the [validation record](release-validation-6.0.0.md) for pending checks
-and the [release guide](releasing.md) for packaging and verification steps. Pinned
-application dependencies help rebuild the project, but do not promise byte-for-byte
-identical binaries across machines or toolchains.
+A checksum alone can be replaced together with an asset by an attacker controlling its hosting account. The signed descriptor protects the new client from that replacement while the independent private signing key remains secure. It does not replace build review, make the executable Authenticode-signed or guarantee security in every environment. Existing older clients do not gain this verification until they are upgraded.
 
-## If signed builds are introduced
+See the [release guide](releasing.md) for receipt verification and dual-platform publishing. Pinned dependencies do not promise identical binaries across different build machines.
 
-Use a certificate controlled by the release owner. Keep signing keys outside the
-repository, runtime data, and build output. Sign the executable before generating
-its manifest and ZIP hashes; otherwise the recorded hashes will be stale.
+## If Windows code signing is introduced
 
-The current build script does not perform signing and writes `signature: none`.
-Add and verify a signing step before describing a release as signed. Validate the
-signature and publisher identity on a clean Windows machine, then publish the
-signing identity and final artifact checksums. Review any native-binary signing
-requirements without overwriting third-party signatures indiscriminately.
-
-Signing improves publisher identification; it does not guarantee that reputation
-warnings disappear or that the software is free from vulnerabilities.
+Sign the executable before generating its manifest and archive hashes. Verify the certificate and publisher identity on the resulting executable and keep that key separate from runtime data and published source. Metadata signing must still use the client-compatible update key. Publishing a new key without a compatible client migration would make updates fail verification.

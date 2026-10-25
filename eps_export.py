@@ -336,6 +336,8 @@ def _eps_lines(page, width: int, height: int, board_style: str, decoded_images: 
         scale, x, y = content_transform
         L.append(f"{_fmt(x)} {_fmt(height * (1 - scale) - y)} translate")
         L.append(f"{_fmt(scale)} {_fmt(scale)} scale")
+    for img in page.get("images", []):
+        _emit_image(L, img, height, decoded_images)
     dash_positions = {}
     for seg in page.get("segments", []):
         key = seg.get("id")
@@ -348,8 +350,6 @@ def _eps_lines(page, width: int, height: int, board_style: str, decoded_images: 
             dash_positions[key] = (offset + math.hypot(p2[0] - p1[0], p2[1] - p1[1]), p2)
     for item in page.get("shapes", []):
         _emit_shape(L, item, height, board_style)
-    for img in page.get("images", []):
-        _emit_image(L, img, height, decoded_images)
     for item in page.get("texts", []):
         _emit_text(L, item, height, board_style)
     L.append("grestore")

@@ -109,6 +109,8 @@ def test_reverse_selection_rejects_original_empty_rectangle_check(core_host, mon
 
 
 def all_objects_contract(host):
+    # This legacy contract deliberately includes editable images.
+    host.panel.set_preserve_original_images(False, persist=False)
     canvas = host.panel.canvas
     canvas.create_text_item(QPointF(500, 100), text='Private example')
     shape = canvas.make_shape_item(QRectF(520, 250, 80, 70))

@@ -53,7 +53,7 @@ class Response(io.BytesIO):
         return "https://api.github.com/repos/wcr20140908/MyScreenDraw/releases/tags/v6.1.0"
 
 
-def release(tag="v99.0.0", **extra):
+def release(tag="v6.2.0", **extra):
     name = f"MyScreenDraw-{tag}-windows-x64.zip"
     return {"tag_name": tag, "draft": False, "prerelease": False, "body": "# Exact release\n\n- Change",
             "assets": [{"name": name, "browser_download_url":
@@ -63,10 +63,10 @@ def release(tag="v99.0.0", **extra):
 def test_selected_release_keeps_its_own_body_and_notes_failure_does_not_hide_update(monkeypatch):
     for body, error in [("# right release", None), (None, None), (42, "bad_release_notes")]:
         monkeypatch.setattr(main.urllib.request, "urlopen", Mock(return_value=Response([
-            release("v98.0.0", body="wrong release"), release(body=body)])))
+            release("v6.1.0", body="wrong release"), release(body=body)])))
         found, failure = main.fetch_release()
         assert failure is None
-        assert found["tag"] == "v99.0.0"
+        assert found["tag"] == "v6.2.0"
         assert found["notes_error"] == error
         assert found["body"] == ("" if body is None else None if error else body)
 
@@ -302,7 +302,7 @@ def panel():
     _dispose_offscreen_widgets(QApplication.instance(), [panel])
 
 
-def test_real_settings_wires_result_to_cached_fold_and_clears_stale_target(panel):
+def test_real_settings_keeps_known_release_on_error_and_clears_when_current(panel):
     panel.build_settings_panel()
     assert panel.btn_update_history.text() == main.tr("update_history")
     panel._on_update_result({"tag": "v99.0.0", "body": "# Specific notes"}, None)
@@ -314,10 +314,10 @@ def test_real_settings_wires_result_to_cached_fold_and_clears_stale_target(panel
     assert panel._release_notes.history.notes["v99.0.0"] == "# Specific notes"
     assert not panel._release_notes.history.installed
     panel._on_update_result(None, "network failure")
-    assert section.isHidden() and panel._pending_update_release is None
-    assert not panel.btn_download_update.isEnabled()
+    assert not section.isHidden() and panel._pending_update_release['tag'] == 'v99.0.0'
+    assert panel.btn_download_update.isEnabled()
+    assert section.toggle.isChecked() and section.view.browser.toPlainText() == 'Specific notes'
     panel._on_update_result({"tag": "v99.0.0"}, None)
-    section.toggle.click()
     assert main.tr("update_notes_bad_response") in section.view.status.text()
     panel._on_update_result({"tag": "v0.0.1", "body": "old"}, None)
     assert section.isHidden()
@@ -397,10 +397,13 @@ def test_channel_change_hides_candidate_and_rejects_late_old_channel_result(pane
     monkeypatch.setattr(panel, "save_settings", Mock())
     panel.set_update_channel(index)
     assert panel._pending_update_release is None and panel.update_notes_section.isHidden()
+    assert not panel.icon_buttons['settings']._update_indicator.available
+    assert not panel.icon_buttons['settings'].accessibleDescription()
     worker = main.UpdateCheckWorker(old_channel, panel)
     monkeypatch.setattr(panel, "sender", lambda: worker)
     panel._on_update_result({"tag": "v99.0.1", "body": "obsolete reply"}, None)
     assert panel._pending_update_release is None and panel.update_notes_section.isHidden()
+    assert not panel.icon_buttons['settings']._update_indicator.available
 
 
 def test_opening_settings_preserves_already_detected_preview(panel, monkeypatch):
@@ -418,7 +421,7 @@ def test_malformed_unicode_is_a_notes_error_not_a_lost_update(monkeypatch, contr
     http = Mock(return_value=Response([release(body="\ud800")]))
     monkeypatch.setattr(main.urllib.request, "urlopen", http)
     found, error = main.fetch_release()
-    assert error is None and found["tag"] == "v99.0.0"
+    assert error is None and found["tag"] == "v6.2.0"
     assert found["notes_error"] == "bad_release_notes"
     controller.prime("v1.0.0", [], None)
     assert controller.state("v1.0.0") == (None, "bad_release_notes")

@@ -11,7 +11,7 @@ The write allowlist is exactly:
 - [README.md](../../README.md)
 - [README.en.md](../../README.en.md)
 - [CHANGELOG.md](../../CHANGELOG.md)
-- [release-notes-v6.0.0.md](../../release-notes-v6.0.0.md)
+- [release-notes-v6.0.0.md](../releases/release-notes-v6.0.0.md)
 - [docs/architecture.md](../architecture.md)
 - [this implementation plan](2026-10-03-classroom-preferences.md)
 - [the design plan](2026-10-03-classroom-preferences-design.md)

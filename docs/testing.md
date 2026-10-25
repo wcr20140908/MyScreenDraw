@@ -34,7 +34,8 @@ try {
 | 保存与异常文件 | `test_project_roundtrip.py`、`test_persistence_safety.py`、`test_autosave_size.py` |
 | 文字、公式、键盘 | `test_text_workflow.py`、`test_formula.py`、`test_touch_keyboard.py` |
 | 升级设置恢复与旧共享画笔迁移 | `test_upgrade_settings.py` |
-| LOGO 整体边界与按下状态清理 | `test_logo_drag_regressions.py` |
+| LOGO／工具栏整体拖动、折叠恢复、旧配置迁移与按下状态清理 | `test_logo_drag_regressions.py` |
+| 启动语言／缩放、设置布局与单实例唤起 | `test_startup_preferences.py`、`test_interface_preferences.py`、`test_interface_scaling.py`、`test_single_instance.py` |
 | 更新与发布元数据 | `test_beta6_updater.py`、`test_release_hygiene.py`、`test_release_artifact.py` |
 | 后台窗口、主题与调色盘、粉笔集成 | `test_background_windows.py`、`test_pen_defaults.py`、`test_chalk_texture.py`、`test_final_ui_integration.py` |
 | 构建无屏保护、DLL 查找与异常清理 | `test_build_smoke.py`、`test_build_dependencies.py` |
@@ -45,6 +46,8 @@ try {
 | 递归源码与精确教学资源发布门禁 | `test_release_620_scripts.py`、`test_release_artifact.py`、`test_teaching_packaging.py` |
 
 文件名中的旧 beta 编号表示测试引入背景，不表示该测试已失效。单元测试中的 mock 只能验证本地逻辑，不能证明真实桌面窗口收到输入。6.2.0 正式版已发布；公开附件、校验和及实际覆盖范围以对应 Release 和发布收据为准。
+
+2026-10-24 的单实例隔离探针分别启动两个源码进程、两个现有正式 EXE、两个现有触控修复 EXE，以及源码与旧 EXE 的组合。当前源码的第二个进程以退出码 0 结束，首个进程继续运行；两个旧 EXE 及源码／旧 EXE 混合仍同时存活，因为已构建二进制不能追溯获得新启动逻辑。只有未来从当前源码重新构建的 EXE 才能与源码共享单实例端点，本轮未构建或修改公开附件。
 
 当前源码新增 `tests/test_thumbnail_interaction.py`，覆盖单击保留列表、双击进入并关闭、默认／自定义名称随页面重排及保存重开保持、旧空名称补齐、插入提示与真实前后落点一致，以及缝隙、跨行、滚动和离开时的提示更新。这里描述用例范围，不代表本轮离屏或实屏执行结果。
 
@@ -123,7 +126,7 @@ python -B tests/real_features_620.py --all --plan
 
 Windows 注入测试是原生窗口输入回归的一部分；物理触控设备仍按目标环境记录。正式版在目标大屏继续核对：
 
-- LOGO 横竖布局边缘拖动、继续/反向拖动、分离/折叠，以及释放后按下高亮清理；区分正常悬停反馈。
+- LOGO／工具栏横竖布局整体边缘拖动、继续／反向拖动、触控抖动、折叠后移动再展开、旧分离配置启动自愈，以及释放后按下高亮清理；区分正常悬停反馈。
 - 用旧配置恢复有效偏好；用单字段损坏样本确认后续设置仍恢复，尤其是关闭更新检查的偏好。单元测试不替代打包升级保留用户文件的验证。
 - 11 种笔、颜色与参数独立保存，重启后恢复；已有笔迹不随设置改变。
 - 鼠标／批注／白板反复切换，底层浏览器或演示程序能收到鼠标和键盘。
@@ -173,3 +176,36 @@ python tests/verify_updater_restart.py MyScreenDraw-v6.0.0-windows-x64.zip MyScr
 ```
 
 证据目录必须是新目录。该脚本使用当前源码的更新事务替换旧包副本，验证新进程正常启动、版本、EXE 哈希、配置与合成用户文件，并检查手动再次打开。它不证明旧版内嵌更新器已经修好，也不覆盖真实触控交互。源码回归还覆盖新进程早退回滚、存活但未就绪时保留备份，不能以“进程未退出”代替启动就绪确认。
+
+
+## 课堂综合计算器回归
+
+五模式、规范化历史、键盘提交与完整复制、缩放布局及教学隔离使用 `test_calculator_*.py` 和 `test_teaching_calculator_*.py` 验证。布局矩阵覆盖八语言、横竖屏和 75%–200% 缩放。2026-10-25 的源码实屏高度复现、修复结果、测试命令与硬件边界见 [课堂综合计算器验证记录](calculator-validation-2026-10-25.md)。黑白板目标按钮文字的回归见 `test_board_style_label.py`。
+
+
+## 启动更新提示回归（2026-10-25）
+
+`tests/test_update_indicator.py` 使用假的更新工作线程验证启动立即检查、重复请求合并、旧禁用偏好及私有进程保护；还覆盖新版/当前/临时错误、设置点击、主题、尺寸变化、后台隐藏恢复和收起展开。指示器是透明且不可聚焦的按钮子控件，没有额外顶层窗口或关闭入口。动画仅在提示可见时运行。
+
+本轮更新、设置、后台、Logo 和教学相关命令通过 **168 tests、44 subtests in 67.34s**：
+
+```powershell
+$env:QT_QPA_PLATFORM='offscreen'
+python -m pytest -q tests/test_update_indicator.py tests/test_settings_and_ui_modes.py tests/test_update_notes.py tests/test_beta6_updater.py tests/test_background_windows.py tests/test_logo_drag_regressions.py tests/test_i18n_and_telemetry.py tests/test_teaching_toolbox_interface.py tests/test_teaching_calculator_visibility.py --disable-warnings --tb=short
+```
+
+实屏采用隔离正常运行目录和合成新版数据，启动只完成一次后台检查；原生点击设置成功且不清除提示。Windows 175% 缩放下检查了深浅主题、横竖布局。私有截图与日志位于忽略目录 `.superpowers/sdd/startup-update-indicator/native-final/`。这组检查没有请求真实发布信息、下载或安装更新，也不表示已构建新 EXE。
+
+
+## 设置页文字一致性（2026-10-25）
+
+`test_settings_typography.py` 检查设置页及嵌入文档、笔预设控件的正文字号与文字颜色一致，分组标题只加粗；深浅色及经典/暖靛蓝主题都有覆盖。设置、偏好、笔预设、触控、更新提示、计算器桥接和 75%–200% 缩放相关回归为 **203 passed、375 subtests passed in 63.20s**。Windows 实屏 175% 缩放的隔离设置页深浅色截图已检查，私有证据保存在 `.superpowers/sdd/settings-typography/native-final/`；未重新构建发行 EXE。
+
+
+## 保留原图回归（2026-10-25）
+
+“保留原图”默认开启，位于设置 → 项目与教学。tests/test_preserve_original_images.py 覆盖缺失／非法配置的安全默认值、实际复选框交互、关闭后重启读取、点选／框选／变换保护、圆形及整笔擦除、清空及撤销／重做、真实 PDF 导入、项目保存重开，以及图片与笔迹叠放顺序。图片在批注下方，PNG／PDF／SVG 和 EPS 的顺序保持一致。
+
+完整配置审计 tests/test_upgrade_settings.py 包含该字段的非默认值、损坏值及其他健康配置的保留。C09 图片编辑课程只在已校验的私有练习环境关闭保护；日常配置不受影响。设置提示使用统一字号及主题颜色。
+
+源码回归命令、结果与用户协助的实屏状态见 [保留原图验证记录](preserve-original-images-validation-2026-10-25.md)。原始日志、JUnit 和合成实屏状态留在忽略目录 .superpowers/sdd/preserve-original/，不混入发行包。本轮没有构建或发布新 EXE。

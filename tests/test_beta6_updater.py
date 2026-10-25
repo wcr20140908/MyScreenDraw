@@ -186,7 +186,7 @@ class Beta6UpdaterTests(unittest.TestCase):
                     source = source.replace('if self.isInterruptionRequested():', 'if False:')
                 namespace['_https_response'] = lambda response: None
                 exec(source, namespace)
-                fake = SimpleNamespace(url=worker.url, isInterruptionRequested=lambda: True,
+                fake = SimpleNamespace(url=worker.url, integrity=None, isInterruptionRequested=lambda: True,
                                        progress=SimpleNamespace(emit=lambda received, total: None),
                                        finished_download=SimpleNamespace(emit=lambda path, error: errors.append((path, error))))
                 with patch('urllib.request.urlopen', return_value=response), patch.object(main, '_https_response'):

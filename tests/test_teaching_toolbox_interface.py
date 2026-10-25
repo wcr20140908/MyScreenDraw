@@ -55,9 +55,10 @@ def courses():
 def test_resource_graphs_private_fixtures_and_all_eight_languages():
     import i18n
     catalog = courses()
-    assert [len(c.chapters) for c in catalog] == [5, 4]
-    assert [sum(len(ch.steps) for ch in c.chapters) for c in catalog] == [34, 27]
-    assert len(TOOLBOX_COPY) == 37 and len(INTERFACE_COPY) == 29
+    assert [(c.revision, c.compat_revision) for c in catalog] == [(3, 1), (1, 1)]
+    assert [len(c.chapters) for c in catalog] == [6, 4]
+    assert [sum(len(ch.steps) for ch in c.chapters) for c in catalog] == [45, 27]
+    assert len(TOOLBOX_COPY) == 46 and len(INTERFACE_COPY) == 29
     for key, row in (TOOLBOX_COPY | INTERFACE_COPY).items():
         assert len(row) == 8 and all(isinstance(s, str) and s.strip() for s in row)
         from string import Formatter
@@ -73,6 +74,12 @@ def test_resource_graphs_private_fixtures_and_all_eight_languages():
         assert data['metadata']['fixture_id'] == fixture
         assert data['whiteboard_mode'] and len(data['pages']) == 1
         assert len(data['pages'][0]['segments']) == 1 and len(data['pages'][0]['shapes']) == 1
+    index = json.loads((ROOT / 'assets/tutorials/catalog.json').read_text('utf-8'))
+    assert index['fixtures']['toolbox.c12.scientific_calculator'] == (
+        'fixtures/toolbox.c12.scientific_calculator.msd')
+    assert [chapter.id for chapter in catalog[0].chapters] == [
+        'c12.calculator', 'c12.scientific_calculator', 'c12.roster', 'c12.timer',
+        'c12.magnifier', 'c12.spotlight']
     system = catalog[1].chapters[-1]
     assert all(step.kind == 'information' and step.target is None for step in system.steps)
 
@@ -127,8 +134,46 @@ def test_real_calculator_keys_and_private_nonrepeating_roster(tool_panel):
     open_button.click()  # Exercises the zero-argument decorated Qt slot.
     assert engine.current_step_id == 'two'
     for code in ('2', '+', '3', '='):
-        button(panel.calc_panel, code).click()
+        panel.calc_buttons[code].click()
     assert panel._calc_expr == panel._calc_display.text() == '5'
+    done(engine)
+
+
+def test_scientific_calculator_private_lesson_uses_angle_ans_and_history(tool_panel):
+    panel = tool_panel
+    engine = start(panel, 'c12.scientific_calculator')
+    panel.open_calculator()
+    assert engine.current_step_id == 'mode'
+    panel.calculator_widget.mode_buttons['scientific'].click()
+    assert engine.current_step_id == 'angle'
+    assert panel.calculator_widget.engine.angle_mode == 'rad'
+    panel.calculator_widget.scientific_buttons['angle'].click()
+    assert engine.current_step_id == 'expression'
+    assert panel.calculator_widget.engine.angle_mode == 'deg'
+
+    edit = panel.calculator_widget.expression_edit
+    edit.setText('sin(30)+√16')
+    edit.textEdited.emit(edit.text())
+    assert engine.current_step_id == 'calculate'
+    panel.calculator_widget.scientific_buttons['equals'].click()
+    assert edit.text() == '4.5' and engine.current_step_id == 'ans_expression'
+
+    edit.setText('Ans×2')
+    edit.textEdited.emit(edit.text())
+    assert engine.current_step_id == 'ans_calculate'
+    panel.calculator_widget.scientific_buttons['equals'].click()
+    assert edit.text() == '9' and engine.current_step_id == 'history_open'
+
+    panel.calculator_widget.history_toggle.click()
+    assert engine.current_step_id == 'history_restore'
+    history = panel.calculator_widget.history_list
+    entry = next(entry for entry in panel.calculator_widget.history.entries
+                 if entry.mode == 'scientific' and entry.input == 'sin(30)+√16')
+    target = next(history.item(index) for index in range(history.count())
+                  if history.item(index).data(Qt.ItemDataRole.UserRole) == entry.id)
+    history.setCurrentItem(target)
+    history.itemClicked.emit(target)
+    assert edit.text() == 'sin(30)+√16'
     done(engine)
     panel.teaching_events = None  # Ordinary no-bus path still calculates.
     for code in ('C', '2', '+', '3', '='):

@@ -29,6 +29,8 @@ def prepare_media_fixture(panel, loader, fixture, paths):
         panel.close_text_input()
         if getattr(panel, "_open_symbol_group", None) is not None:
             panel._toggle_symbol_group(panel._open_symbol_group)
+        # C09 teaches image editing in the already verified private practice.
+        panel.set_preserve_original_images(False, persist=False)
         panel.pen_defaults_enabled = False
         panel.choose_pen_style("pen")
         panel.set_drawing_mode(True)

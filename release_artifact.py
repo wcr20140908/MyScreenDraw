@@ -186,7 +186,7 @@ def _check_private_member(name, teaching, *, is_directory=False):
     parts = name.split('/')
     lowered = [part.casefold() for part in parts]
     if (set(lowered) & {'data', 'exports', 'build', 'dist', 'autosave', 'screenshots', '__pycache__'}
-            or lowered[-1] in {'config.json', 'roster.json', 'events.jsonl', 'app.log'}
+            or lowered[-1] in {'config.json', 'roster.json', 'events.jsonl', 'app.log', 'agent.md', 'update-ed25519.pem'}
             or (Path(lowered[-1]).suffix in {'.py', '.pyc', '.jsonl', '.tmp', '.log', '.png', '.jpg', '.jpeg'}
                 and name not in teaching)):
         raise ValueError('private/source file in archive or package')

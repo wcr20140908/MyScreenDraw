@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Bounded C12 setup in the host's already isolated practice runtime."""
 from contextlib import nullcontext
+from decimal import Decimal
 
 TOOLBOX_FIXTURES = frozenset('toolbox.c12.' + chapter for chapter in
-                             ('calculator', 'roster', 'timer', 'magnifier', 'spotlight'))
+                             ('calculator', 'scientific_calculator', 'roster', 'timer',
+                              'magnifier', 'spotlight'))
 
 
 def prepare_toolbox_fixture(panel, fixture, paths):
@@ -43,9 +45,9 @@ def prepare_toolbox_fixture(panel, fixture, paths):
         panel._teaching_magnifier_frame_key = None
         canvas._teaching_magnifier_origin = None
         if fixture.endswith('.calculator'):
-            panel.open_calculator()
-            panel._calc_input('C')
-            panel.calc_panel.hide()
+            _prepare_calculator(panel, 'deg')
+        elif fixture.endswith('.scientific_calculator'):
+            _prepare_calculator(panel, 'rad')
         elif fixture.endswith('.roster'):
             names = tuple(tr('teaching_roster_fiction_' + str(i)) for i in range(1, 7))
             panel._teaching_fictional_roster = names
@@ -67,6 +69,26 @@ def prepare_toolbox_fixture(panel, fixture, paths):
             panel.update_magnifier_ui()
         panel.update_whiteboard_ui()
         canvas.update()
+
+
+def _prepare_calculator(panel, angle):
+    panel.open_calculator()
+    widget = panel.calculator_widget
+    widget.history.clear()
+    widget.engine.ans = Decimal(0)
+    widget.engine.memory_clear()
+    widget.engine.set_angle_mode(angle)
+    panel.calculator_angle_mode = angle
+    widget.scientific_buttons['angle'].setText(angle.upper())
+    # Clear each retained draft through the normal clear action, including its
+    # repeat-equals guard, before returning to the initial basic page.
+    for mode in ('scientific', 'basic'):
+        widget.set_mode(mode)
+        panel._calc_input('C')
+    widget.history_toggle.setChecked(False)
+    widget.history_search.clear()
+    widget.history_filter.setCurrentIndex(0)
+    panel.calc_panel.hide()
 
 
 def render_private_magnifier_frame(panel):

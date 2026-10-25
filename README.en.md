@@ -11,11 +11,25 @@ MyScreenDraw is a fullscreen annotation / whiteboard / math-teaching tool built 
 - **Random name picker, timer, presentation spotlight, calculator** — a whole lesson without switching apps
 - **No account; drawings, rosters and logs are not uploaded**. Automatic update checks are enabled by default and can be disabled in Settings. Downloads and installation each require separate confirmation; neither happens silently
 
-Current version **v6.2.0** — stable release. The UI follows the system language in 8 languages: English, 中文, Français, Español, Deutsch, Русский, 한국어, 日本語.
+Current version **v6.3.0** — stable release. The UI follows the system language in 8 languages: English, 中文, Français, Español, Deutsch, Русский, 한국어, 日本語.
 
 > Product screenshots are not included in the public release yet; the current local captures contain development-environment details and must not be committed to GitHub.
 
-Stable 6.2.0 is published with a Windows x64 portable package. The download and checksum instructions below refer to the current release.
+6.3.0 provides the same Windows x64 portable ZIP, checksum and signed update descriptor on GitHub and GitCode.
+
+## 6.3.0 features and fixes (October 25, 2026)
+
+- **Two update sources**: choose International (GitHub) or China (GitCode) in Settings. Checks, release notes and downloads use the saved choice. Releases from 6.3.0 require an Ed25519 descriptor verified with the built-in public key; downloaded sizes, hashes and installer metadata are verified locally.
+
+- **Keep original images**: on by default. Imported PDF pages and images survive erasing and clearing and cannot be selected or moved accidentally. Turn it off under Settings → Document & classroom to edit or delete images. Changes apply immediately and persist across restarts; annotations appear above images.
+
+- **Startup update indicator**: normal startup checks immediately by default. A newer release adds a neon ring and red-and-white **NEW！** sticker to Settings, with no dismiss control. The manual check remains; existing disabled-update preferences are respected.
+
+Settings now includes an interface language, 75%–200% whole-application scaling, and an option to skip the ordinary startup autosave-recovery prompt. Language and scale take effect after restart; manual recovery and autosave remain available. Long translations and high scale factors can add toolbar rows and widen Settings to the available logical screen instead of clipping text or controls.
+
+Ordinary startup is now single-instance: launching the 6.3.0 application, asks the existing process to reveal its UI and then exits. In-app restart waits for the predecessor before restoring its temporary snapshot. Teaching practice processes and bounded build smoke modes remain independent. The already-built October 20/21 portable EXEs do not contain this change and can still run alongside another instance. These changes are included in 6.3.0; historical 6.2.0 assets remain unchanged.
+
+See [domestic hosting feasibility](docs/domestic-hosting-feasibility-2026-10-24.md) for background. GitCode attachments are uploaded separately by the dual-platform publisher; 6.3.0 now verifies signed update descriptors for that source.
 
 ## 6.2.0 release update (2026-10-20)
 
@@ -42,7 +56,7 @@ The magnifier tutorial now includes actual movement and use. The current catalog
 - Duplicate, rename and reorder pages; visible thumbnail and stroke geometry caches.
 - Annotation monitor selection and timer-alarm volume without changing the Windows primary display or system volume.
 
-**Published and publicly re-downloaded for verification.** The final build passed 1488 tests and 1208 subtests, with 7 skipped. Native dark/light acceptance passed 102 existing-flow and 37 new-feature checks per theme, plus 4 injected-touch tests. Frozen document reopen, updater restart, PNG/PDF output, public ZIP/checksum verification and extracted-EXE startup all passed. Injected touch is not physical-touchscreen acceptance; Windows 11, multi-monitor/mixed-DPI, audible output and long classroom sessions remain unverified. See the [6.1.0 validation record](docs/release-validation-6.1.0.md) and [release notes](release-notes-v6.1.0.md).
+**Published and publicly re-downloaded for verification.** The final build passed 1488 tests and 1208 subtests, with 7 skipped. Native dark/light acceptance passed 102 existing-flow and 37 new-feature checks per theme, plus 4 injected-touch tests. Frozen document reopen, updater restart, PNG/PDF output, public ZIP/checksum verification and extracted-EXE startup all passed. Injected touch is not physical-touchscreen acceptance; Windows 11, multi-monitor/mixed-DPI, audible output and long classroom sessions remain unverified. See the [6.1.0 validation record](docs/release-validation-6.1.0.md) and [release notes](docs/releases/release-notes-v6.1.0.md).
 
 ## 6.0.1: download progress and verified restart (released)
 
@@ -51,7 +65,7 @@ The magnifier tutorial now includes actual movement and use. The current catalog
 - Verify the version and EXE SHA-256. Launch literal paths containing Unicode, spaces, and brackets. Delete backups only after the new event loop acknowledges readiness; attempt rollback on early exit and retain backups if a live process is not ready.
 - Preserve user data. Rollback does not guarantee recovery from power, permission, or disk failures; back up before upgrading.
 
-Final build regression: **1347 passed, 7 skipped, 1197 subtests passed; build exit code 0**. Isolated real-package restart, manual reopen, new-directory migration, public download hashes, and extracted-EXE offscreen startup were verified. Physical touchscreens, Windows 11, multiple monitors/DPI, and long classroom sessions remain unverified. See the [6.0.1 validation record](docs/release-validation-6.0.1.md) and [release notes](release-notes-v6.0.1.md). The 6.0.0 figures below are historical only.
+Final build regression: **1347 passed, 7 skipped, 1197 subtests passed; build exit code 0**. Isolated real-package restart, manual reopen, new-directory migration, public download hashes, and extracted-EXE offscreen startup were verified. Physical touchscreens, Windows 11, multiple monitors/DPI, and long classroom sessions remain unverified. See the [6.0.1 validation record](docs/release-validation-6.0.1.md) and [release notes](docs/releases/release-notes-v6.0.1.md). The 6.0.0 figures below are historical only.
 
 ### Historical migration example: from 6.0.0 to 6.1.0 using a new directory
 
@@ -65,6 +79,10 @@ Final build regression: **1347 passed, 7 skipped, 1197 subtests passed; build ex
 4. Back up the old `data/`, `exports/`, and projects saved elsewhere. Then copy `data/` and `exports/` into the new directory. Never overwrite private settings, rosters, autosaves, or logs with package defaults or sample files. If the destination already contains user files, back up both sets and resolve conflicts individually, not by overwriting whole folders. Keep the old directory and backups for recovery.
 5. Point desktop, Start menu, and taskbar shortcuts to the new `MyScreenDraw.exe`. If Start with Windows is enabled, check and update that path too so it does not launch the old app.
 6. Launch only the new EXE, confirm **v6.1.0**, check settings, projects, and exports, then fully exit and restart to verify. Never run both versions against the same data.
+
+## Touchscreen toolbar fix (October 21, 2026; local build)
+
+Dragging the LOGO or the toolbar background moves both windows together. Small pointer movements do not start a drag. Expanding, restarting, and changing orientation restore their attached layout. Old configurations are repaired automatically while retaining the valid LOGO position; deleting settings is unnecessary. Offscreen regressions and the local Windows portable EXE startup check passed. The physical classroom display still needs retesting, and public release downloads have not been updated.
 
 ## Historical features and fixes in 6.0.0 (released)
 
@@ -81,9 +99,11 @@ These changes are included in the stable 6.0.0 portable release. The older beta.
 
 ## Quick start
 
-**[Download Windows x64 portable v6.2.0 (includes EXE, no installation)](https://github.com/wcr20140908/MyScreenDraw/releases/download/v6.2.0/MyScreenDraw-v6.2.0-windows-x64.zip)**
+**[Download Windows x64 portable v6.3.0 (includes EXE, no installation)](https://github.com/wcr20140908/MyScreenDraw/releases/download/v6.3.0/MyScreenDraw-v6.3.0-windows-x64.zip)**
 
-[Release page and notes](https://github.com/wcr20140908/MyScreenDraw/releases/tag/v6.2.0) · [SHA-256 checksum](https://github.com/wcr20140908/MyScreenDraw/releases/download/v6.2.0/MyScreenDraw-v6.2.0-windows-x64.zip.sha256)
+**[China download on GitCode](https://gitcode.com/wcr20140908/MyScreenDraw/releases/download/v6.3.0/MyScreenDraw-v6.3.0-windows-x64.zip)** · [Release notes](release-notes-v6.3.0.md)
+
+[Release page and notes](https://github.com/wcr20140908/MyScreenDraw/releases/tag/v6.3.0) · [SHA-256 checksum](https://github.com/wcr20140908/MyScreenDraw/releases/download/v6.3.0/MyScreenDraw-v6.3.0-windows-x64.zip.sha256)
 
 The historical version sections below remain for migration and traceability.
 
@@ -235,7 +255,7 @@ A: Yes, since v5.2.0. The pen and highlighter accept several contacts at once �
 ## Privacy & data safety
 
 - **Drawings, rosters and logs are not uploaded**. Update checks retrieve public release metadata.
-- **Update checks**: The current version enables them for new installations (since beta.7) and respects an existing disabled setting. Choose stable or preview releases. A 24-hour timer starts when settings load; the first automatic check is about 24 hours later, not immediately at startup. You can also click **Check now**. Checks contact GitHub's release API (`api.github.com/repos/wcr20140908/MyScreenDraw/releases?per_page=30`). Automatic results only notify you; they never start a download or installation.
+- **Update checks**: The current version enables them for new installations (since beta.7) and respects an existing disabled setting. Choose stable or preview releases. The current source checks asynchronously on normal startup, then every 24 hours. You can also click **Check now**. An available update adds a neon ring and a red-and-white **NEW！** sticker to Settings. There is no dismiss control; closing Settings or a transient check failure does not clear a known update. Checks contact the selected public release API: GitHub (`api.github.com/repos/wcr20140908/MyScreenDraw/releases?per_page=30`) or GitCode (`api.gitcode.com/api/v5/repos/wcr20140908/MyScreenDraw/releases`). Signed update metadata is verified before offering downloads. Automatic results only notify you; they never start a download or installation.
   - The existing design downloads in a background thread; see the known 6.0.0 download/installation defects and manual migration steps above, rather than assuming its updater works
   - The app asks before downloading and asks again before installing
   - ZIP validation rejects path traversal, symlinks, duplicate entries, oversized archives, excessive member counts, and archives missing `MyScreenDraw.exe`

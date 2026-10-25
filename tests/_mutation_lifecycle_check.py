@@ -65,7 +65,7 @@ extra = [
     (main.ControlPanel, "restore_from_restart", 'if not ok:', 'if False:',
      regressions.QuitRegressionTests("test_failed_restart_restore_keeps_recovery_file")),
     (main.ControlPanel, "_sync_split_geometry",
-     'if follow and self.orientation == "portrait" and not getattr(self, "_toolbar_detached", False) and toolbar.isVisible():',
+     'if self.orientation == "portrait" and toolbar.isVisible():',
      'if False:', regressions.FloatingLifecycleTests("test_portrait_group_near_bottom_does_not_cover_logo")),
     (app_lifecycle.AppLifecycleManager, "hide_to_background", 'self.panel.close_thumbnail_panel()',
      'pass', regressions.FloatingLifecycleTests("test_preview_hide_stops_timer_and_restore_does_not_reopen")),

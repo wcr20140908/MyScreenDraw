@@ -123,3 +123,12 @@
 - Anonymous public verification session73793 exited0: release page available; ZIP (39,900,831 bytes) and .sha256 downloaded without credentials/cookies; hashes, archive validation, all extracted files and public EXE offscreen smoke passed. Evidence build/public-release-610/public-verification.json.
 - Final README links and migration examples now point to 6.1.0; CHANGELOG and acceptance matrix record publication. Production/build source is unchanged from the accepted release.
 - Final documentation gate: 42 passed, 167 subtests passed in 7.27s; tracked-tree credential-pattern/private-path scan clean. Only six Markdown files changed after release; accepted source and public ZIP/EXE receipts still agree.
+
+
+---
+
+# 6.3.0 进度
+
+2026-10-25：读取项目领域／工单／发布规则与国内分发调研；核对本地工作树和远端；保存本地凭据而未打印。开始真实平台接口与匿名访问核实。尚未修改更新器、提交、推送、构建或发布。
+
+GitCode合成预发布上传和匿名GET已成功，69字节SHA一致；原测试附件已按官方API删除204。Release删除不支持（405）。Git删除自己创建标签的首个askpass认证未能供给密码，正在改用仅存在于子进程环境的Git HTTP Basic认证验证；不会把凭据写入远端URL或git配置。

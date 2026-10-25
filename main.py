@@ -252,18 +252,6 @@ import os
 from pathlib import Path
 from runtime_paths import RuntimeContext, RuntimePaths
 from teaching.bootstrap import parse_practice_request
-from teaching.measurement_actions import measurement_action, measurement_drag
-from teaching.toolbox_actions import (toolbox_action, teaching_timer_toggle,
-    teaching_timer_finished, teaching_spotlight_move, teaching_magnifier_move,
-    record_magnifier_paint)
-from teaching.interface_actions import interface_action
-from teaching.roam_actions import (begin_roam_action, finish_roam_action,
-                                   cancel_roam_action, observe_roam_touch)
-from teaching.file_actions import teaching_autosave_setting
-from teaching.text_actions import (teaching_text_change, teaching_input_change,
-    teaching_text_input_action, teaching_text_panel_action, teaching_text_finish,
-    teaching_formula_insert, teaching_cursor_move, teaching_symbol_group, teaching_text_format,
-    teaching_symbol_action, same_original)
 
 # Private arguments must be validated before importing Qt, configuring logs or
 # creating ordinary directories. A malformed internal launch must never fall back.
@@ -278,6 +266,33 @@ except (ValueError, OSError):
 RUNTIME_CONTEXT = RuntimeContext(PRACTICE_REQUEST.paths if PRACTICE_REQUEST is not None
                                  else RuntimePaths.for_normal(Path(APP_DIR), Path(RESOURCE_DIR)))
 globals().update(RUNTIME_CONTEXT.paths.module_aliases())
+
+# Ordinary Windows startup claims its per-session mutex before importing Qt,
+# pynput, or the rest of this large module. A duplicate process can therefore
+# notify the existing QLocalServer and exit without constructing any UI.
+_INSTANCE_STARTUP = None
+if __name__ == "__main__" and PRACTICE_REQUEST is None:
+    from single_instance_bootstrap import preflight_startup
+    try:
+        _INSTANCE_STARTUP = preflight_startup(sys.argv[1:])
+    except (OSError, RuntimeError) as exc:
+        sys.stderr.write(f"MyScreenDraw: single-instance preflight failed: {exc}\n")
+        raise SystemExit(1)
+    if _INSTANCE_STARTUP.role == "secondary":
+        raise SystemExit(0)
+
+from teaching.measurement_actions import measurement_action, measurement_drag
+from teaching.toolbox_actions import (toolbox_action, teaching_timer_toggle,
+    teaching_timer_finished, teaching_spotlight_move, teaching_magnifier_move,
+    record_magnifier_paint)
+from teaching.interface_actions import interface_action
+from teaching.roam_actions import (begin_roam_action, finish_roam_action,
+                                   cancel_roam_action, observe_roam_touch)
+from teaching.file_actions import teaching_autosave_setting
+from teaching.text_actions import (teaching_text_change, teaching_input_change,
+    teaching_text_input_action, teaching_text_panel_action, teaching_text_finish,
+    teaching_formula_insert, teaching_cursor_move, teaching_symbol_group, teaching_text_format,
+    teaching_symbol_action, same_original)
 import errno
 import ctypes
 import ctypes.wintypes
@@ -316,7 +331,10 @@ from persistence import (atomic_write_json, atomic_write_json_gz, atomic_write_p
                          cleanup_temp_files, normalize_project_data, make_project_data,
                          ensure_file_size, PROJECT_KIND, AUTOSAVE_KIND, MAX_ABS_COORD,
                          MAX_IMAGES_PER_PAGE, MAX_PAGES)
-from calculator import evaluate as safe_calculate, CalculatorError
+from calculator import evaluate as safe_calculate, CalculatorError, CalculatorEngine
+from calculator_history import CalculatorHistoryStore, normalize_retention, MODES as CALCULATOR_MODES
+from update_indicator import UpdateIndicator
+from calculator_panel import CalculatorPanel
 from display_utils import (clamp_rect, choose_screen, clamp_ruler_width, pixels_per_mm_from_dpi, sane_dpi,
                            valid_pixels_per_mm, screen_key, normalize_calibrations,
                            protractor_angle_degrees, ruler_geometry as physical_ruler_geometry,
@@ -327,11 +345,18 @@ from page_list import PageListWidget
 from version import APP_VERSION
 import formula
 import touch_keyboard
+import i18n
 from i18n import tr, trf, CURRENT
+from startup_preferences import (InterfacePreferences, LANGUAGE_NAMES, SCALE_MIN, SCALE_MAX,
+                                 ACTIVE_LANGUAGE_ENV, normalize_language, normalize_scale,
+                                 read_interface_preferences, apply_scale_environment)
 import eps_export
 from app_lifecycle import AppLifecycleManager, LifecycleState
 import toolbar_windows
 from release_notice import ReleaseNoticeCard, begin_notice_session, normalize_notice_state
+from update_sources import (SOURCES as UPDATE_SOURCES, releases_url, official_asset_url,
+                            download_url as source_download_url, descriptor_name,
+                            verify_descriptor, verify_downloaded_manifest, MAX_DESCRIPTOR_BYTES)
 from update_notes import NotesController, ReleaseNotesSection, UpdateHistoryDialog, release_body, version_tag
 from chalk_texture import make_chalk_texture
 from themed_controls import apply_combo_theme, controls_stylesheet, theme_palette
@@ -341,9 +366,11 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QLabel, QPushButton,
                              QVBoxLayout, QHBoxLayout, QWidget, QFrame, QGridLayout, QColorDialog, QSlider,
                              QInputDialog, QMessageBox, QMenu, QFileDialog, QLineEdit, QTextEdit, QListWidget,
                              QAbstractItemView, QSizePolicy, QListWidgetItem, QDialog, QDoubleSpinBox,
-                             QScroller, QToolTip, QScrollArea, QComboBox, QProgressBar, QProgressDialog)
+                             QScroller, QToolTip, QScrollArea, QComboBox, QProgressBar, QProgressDialog,
+                             QGraphicsOpacityEffect)
 from PyQt6.QtCore import (Qt, QPoint, QPointF, QRect, QRectF, QTimer, QTranslator, QLibraryInfo, QLine, QLineF, pyqtSignal, QLocale, QEvent,
-                          QSizeF, QMarginsF, QEventLoop, QSize, QUrl, QBuffer, QIODevice, QThread)
+                          QSizeF, QMarginsF, QEventLoop, QSize, QUrl, QBuffer, QIODevice, QThread,
+                          QPropertyAnimation, QParallelAnimationGroup, QEasingCurve)
 from PyQt6.QtGui import (QPainter, QPen, QColor, QFont, QPainterPath, QFontMetricsF, QTransform, QPolygonF,
                          QPixmap, QPdfWriter, QPageSize, QCursor, QGuiApplication, QIcon, QImage, QImageReader,
                          QEventPoint, QInputDevice, QPaintEngine, QBrush, QConicalGradient, QDesktopServices)
@@ -1028,6 +1055,21 @@ def page_signature(page):
 def page_has_content(page):
     return bool(page.get("segments") or page.get("texts") or page.get("shapes") or page.get("images"))
 
+def initialize_interface_preferences():
+    """Select language and Qt scale before constructing the application."""
+    global CURRENT
+    if RUNTIME_CONTEXT.paths.practice:
+        # Private teaching processes inherit the active UI, not pending settings.
+        language = normalize_language(os.environ.get(ACTIVE_LANGUAGE_ENV))
+    else:
+        preferences = read_interface_preferences(CONFIG_FILE)
+        language = preferences.language
+        apply_scale_environment(preferences.ui_scale_percent)
+    CURRENT = i18n.set_language(i18n.system_language() if language == "auto" else language)
+    os.environ[ACTIVE_LANGUAGE_ENV] = CURRENT
+    QLocale.setDefault(QLocale("zh_CN" if CURRENT == "zh" else CURRENT))
+
+
 def install_qt_translations(app):
     """Install Qt's standard-dialog translations for the app's active language."""
     translator = QTranslator(app)
@@ -1065,11 +1107,29 @@ _user32.SetWindowPos.argtypes = [
     ctypes.c_uint,                        # uFlags
 ]
 _user32.SetWindowPos.restype = ctypes.c_int   # BOOL
+_user32.SystemParametersInfoW.argtypes = [
+    ctypes.c_uint, ctypes.c_uint, ctypes.c_void_p, ctypes.c_uint,
+]
+_user32.SystemParametersInfoW.restype = ctypes.c_int
 # SetWindowLongPtrW 仅在 64 位 user32.dll 以独立符号导出；32 位上是宏（→SetWindowLongW），
 # 直接访问会 AttributeError 让整个程序在 32 位解释器上启动失败。用 hasattr 守卫。
 if hasattr(_user32, "SetWindowLongPtrW"):
     _user32.SetWindowLongPtrW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
     _user32.SetWindowLongPtrW.restype = ctypes.c_void_p
+
+SPI_GETCLIENTAREAANIMATION = 0x1042
+
+
+def client_area_animations_enabled():
+    """Return the Windows reduce-motion preference, defaulting safely to enabled."""
+    enabled = ctypes.wintypes.BOOL(True)
+    try:
+        if not _user32.SystemParametersInfoW(
+                SPI_GETCLIENTAREAANIMATION, 0, ctypes.byref(enabled), 0):
+            return True
+    except (AttributeError, OSError):
+        return True
+    return bool(enabled.value)
 
 NI_COMPOSITIONSTR = 0x0015
 CPS_CANCEL = 0x0004
@@ -1639,14 +1699,8 @@ def parse_version(text):
     return (int(major), int(minor), int(patch), {"beta": 0, "rc": 1, None: 2}[kind], int(number or 0))
 
 
-def _official_asset_url(url, tag, name):
-    if not isinstance(url, str) or not isinstance(tag, str) or not isinstance(name, str):
-        return False
-    parsed = urllib.parse.urlsplit(url)
-    return (parsed.scheme == "https" and parsed.hostname == "github.com"
-            and parsed.port is None and not parsed.username and not parsed.password
-            and not parsed.query and not parsed.fragment
-            and parsed.path == f"/wcr20140908/MyScreenDraw/releases/download/{tag}/{name}")
+def _official_asset_url(url, tag, name, source="github"):
+    return official_asset_url(url, tag, name, source)
 
 
 def _https_response(response):
@@ -1663,10 +1717,13 @@ def _read_limited(response, limit):
     return data
 
 
-def fetch_release(channel="stable", url=UPDATE_RELEASES_URL, timeout=UPDATE_TIMEOUT_S):
+def fetch_release(channel="stable", url=None, timeout=UPDATE_TIMEOUT_S, source="github"):
     """返回所选频道的完整 release 元数据。"""
+    if source not in UPDATE_SOURCES:
+        return None, "bad_source"
     if channel not in ("stable", "preview"):
         return None, "bad_channel"
+    url = url or releases_url(source)
     if urllib.parse.urlsplit(url).scheme != "https":
         return None, "insecure_url"
     request = urllib.request.Request(url, headers={
@@ -1700,13 +1757,40 @@ def fetch_release(channel="stable", url=UPDATE_RELEASES_URL, timeout=UPDATE_TIME
                 if not isinstance(asset, dict) or asset.get("name") != name:
                     continue
                 download_url = asset.get("browser_download_url")
-                if _official_asset_url(download_url, tag, name):
+                if source == "gitcode" and asset.get("type") != "attach":
+                    continue
+                if _official_asset_url(download_url, tag, name, source):
                     body, notes_error = release_body(release)
                     candidates.append((version, {"tag": tag, "download_url": download_url,
                                                  "asset_name": name, "prerelease": prerelease,
-                                                 "body": body, "notes_error": notes_error}))
+                                                 "body": body, "notes_error": notes_error, "source": source,
+                                                 "_assets": assets, "_asset_size": asset.get("size")}))
         if candidates:
-            return max(candidates, key=lambda item: item[0])[1], None
+            selected_version, selected = max(candidates, key=lambda item: item[0])
+            assets = selected.pop("_assets")
+            size = selected.pop("_asset_size")
+            tag, name = selected["tag"], selected["asset_name"]
+            if selected_version[:3] >= (6, 3, 0):
+                metadata_name = descriptor_name(tag)
+                metadata = [a for a in assets if isinstance(a, dict)
+                            and a.get("name") == metadata_name
+                            and (source != "gitcode" or a.get("type") == "attach")
+                            and _official_asset_url(a.get("browser_download_url"), tag, metadata_name, source)]
+                if len(metadata) != 1:
+                    return None, "missing_update_signature"
+                metadata_request = urllib.request.Request(source_download_url(source, tag, metadata_name),
+                    headers={"User-Agent": f"MyScreenDraw/{APP_VERSION}"})
+                with urllib.request.urlopen(metadata_request, timeout=timeout) as response:
+                    _https_response(response)
+                    raw = _read_limited(response, MAX_DESCRIPTOR_BYTES)
+                manifest = verify_descriptor(raw, tag, name)
+                if type(size) is not int or size != manifest["size"]:
+                    return None, "update_size_mismatch"
+                selected["integrity"] = manifest
+            elif source == "gitcode":
+                return None, "missing_update_signature"
+            selected["download_url"] = source_download_url(source, tag, name)
+            return selected, None
         return None, "no_release"
     except urllib.error.HTTPError as exc:
         try:
@@ -1724,12 +1808,14 @@ def fetch_release(channel="stable", url=UPDATE_RELEASES_URL, timeout=UPDATE_TIME
         return None, f"error_{type(exc).__name__}"
 
 
-def fetch_release_notes(tag, timeout=UPDATE_TIMEOUT_S):
+def fetch_release_notes(tag, timeout=UPDATE_TIMEOUT_S, source="github"):
     """Fetch an exact tag, independently of asset selection or the latest channel."""
     tag = version_tag(tag)
     if tag is None:
         return None, "bad_release_notes"
-    url = UPDATE_API_URL.rsplit("/", 1)[0] + "/tags/" + urllib.parse.quote(tag, safe="")
+    if source not in UPDATE_SOURCES:
+        return None, "bad_source"
+    url = UPDATE_SOURCES[source][0] + "/tags/" + urllib.parse.quote(tag, safe="")
     request = urllib.request.Request(url, headers={
         "Accept": "application/vnd.github+json", "User-Agent": f"MyScreenDraw/{APP_VERSION}",
     })
@@ -2135,9 +2221,10 @@ class UpdateDownloadWorker(QThread):
     finished_download = pyqtSignal(object, object)
     progress = pyqtSignal(int, int)
 
-    def __init__(self, url, parent=None):
+    def __init__(self, url, parent=None, *, integrity=None):
         super().__init__(parent)
         self.url = url
+        self.integrity = integrity
         self.download_path = None
 
     def run(self):
@@ -2151,7 +2238,12 @@ class UpdateDownloadWorker(QThread):
                 declared = int(response.headers.get("Content-Length") or 0)
                 if declared < 0 or declared > MAX_UPDATE_ARCHIVE_BYTES:
                     raise ValueError("archive_too_large")
-                self.progress.emit(0, declared)
+                integrity = self.integrity
+                if integrity and declared and declared != integrity["size"]:
+                    raise ValueError("update_size_mismatch")
+                expected = integrity["size"] if integrity else declared
+                digest = hashlib.sha256()
+                self.progress.emit(0, expected)
                 with open(path, "wb") as out:
                     total = 0
                     while True:
@@ -2163,10 +2255,15 @@ class UpdateDownloadWorker(QThread):
                         total += len(chunk)
                         if total > MAX_UPDATE_ARCHIVE_BYTES:
                             raise ValueError("archive_too_large")
+                        if expected and total > expected:
+                            raise ValueError("update_size_mismatch")
+                        digest.update(chunk)
                         out.write(chunk)
-                        self.progress.emit(total, declared)
+                        self.progress.emit(total, expected)
                 if declared and total != declared:
                     raise ValueError("download_incomplete")
+                if integrity and (total != integrity["size"] or digest.hexdigest() != integrity["sha256"]):
+                    raise ValueError("update_hash_mismatch")
             if self.isInterruptionRequested():
                 raise InterruptedError("download_cancelled")
             self.download_path = path
@@ -2184,12 +2281,13 @@ class UpdateCheckWorker(QThread):
     """在后台线程里读取所选频道的 release 元数据。"""
     finished_check = pyqtSignal(object, object)
 
-    def __init__(self, channel="stable", parent=None):
+    def __init__(self, channel="stable", parent=None, *, source="github"):
         super().__init__(parent)
         self.channel = channel
+        self.source = source
 
     def run(self):
-        release, error = fetch_release(self.channel)
+        release, error = fetch_release(self.channel, source=self.source)
         self.finished_check.emit(release, error)
 
 
@@ -3730,7 +3828,19 @@ class DrawingCanvas(QMainWindow):
             painter.drawArc(base, 180 * 16, 180 * 16)
         painter.restore()
 
+    @property
+    def preserve_original_images(self):
+        return getattr(self.panel, "preserve_original_images", True)
+
+    def editable_image_items(self):
+        return () if self.preserve_original_images else self.image_items
+
+    def _exclude_preserved_images_from_selection(self):
+        if self.preserve_original_images:
+            self.selected_ids.difference_update(item["id"] for item in self.image_items)
+
     def selection_bounds(self):
+        self._exclude_preserved_images_from_selection()
         bounds = [self.object_bounds(object_id) for object_id in self.selected_ids]
         bounds = [rect for rect in bounds if not rect.isNull()]
         if not bounds:
@@ -4660,7 +4770,7 @@ class DrawingCanvas(QMainWindow):
         for item in self.shape_items:
             if normalized.intersects(self.shape_bounds(item)):
                 self.selected_ids.add(item["id"])
-        for item in self.image_items:
+        for item in self.editable_image_items():
             if normalized.intersects(self.image_bounds(item)):
                 self.selected_ids.add(item["id"])
         self.selection_rect = None
@@ -6141,9 +6251,8 @@ class DrawingCanvas(QMainWindow):
 
     def hit_object_at(self, pos):
         px, py = float(pos.x()), float(pos.y())
-        # 命中顺序与绘制顺序（draw_content：segments → images → shapes → texts）严格相反，
-        # 这样点击重叠区域时命中的的是视觉上最上层的对象，而非固定某一类。
-        # 文本画在最上层，因此最优先；笔迹最底层，最后才命中。
+        # 与 draw_content 的 images → segments → shapes → texts 绘制顺序相反。
+        # 原图保持在批注下方，点选优先命中可见的批注。
         for item in reversed(self.text_items):
             if self.text_bounds(item).contains(QPointF(pos)):
                 return item["id"]
@@ -6152,14 +6261,14 @@ class DrawingCanvas(QMainWindow):
         for item in reversed(self.shape_items):          # 图形优先，后画的在上
             if self._shape_outline_hit(px, py, item, max(float(TOUCH_HIT_SLOP), item["width"] + 5.0)):
                 return item["id"]
-        for item in reversed(self.image_items):          # 图片按外接包围盒命中
-            if self.image_bounds(item).contains(QPointF(pos)):
-                return item["id"]
         for seg in reversed(self.all_segments):
             line = seg["line"]
             tol = max(float(TOUCH_HIT_SLOP), self.segment_ink_radius(seg) + 4.0)
             if self._point_segment_dist(px, py, line.p1().x(), line.p1().y(), line.p2().x(), line.p2().y()) <= tol:
                 return seg["id"]
+        for item in reversed(self.editable_image_items()):
+            if self.image_bounds(item).contains(QPointF(pos)):
+                return item["id"]
         return None
 
     def _shape_outline_hit(self, px, py, item, tol):
@@ -6199,6 +6308,7 @@ class DrawingCanvas(QMainWindow):
 
     # --- 复制 / 删除选中对象 ---
     def duplicate_selection(self):
+        self._exclude_preserved_images_from_selection()
         if not self.selected_ids:
             return
         operation = self._begin_teaching_operation("selection.duplicated")
@@ -6282,6 +6392,7 @@ class DrawingCanvas(QMainWindow):
             self._discard_teaching_operation(operation)
 
     def delete_selection(self):
+        self._exclude_preserved_images_from_selection()
         if not self.selected_ids:
             return
         operation = self._begin_teaching_operation("selection.deleted")
@@ -6556,6 +6667,7 @@ class DrawingCanvas(QMainWindow):
         track_event("shape_op", shape_type="ANGLE", op="bisector")
 
     def capture_selection_state(self):
+        self._exclude_preserved_images_from_selection()
         return {
             "segments": [
                 {
@@ -6607,6 +6719,9 @@ class DrawingCanvas(QMainWindow):
             self.shape_items[saved["index"]] = self.clone_shape(saved["item"])
 
     def move_selection(self, delta):
+        self._exclude_preserved_images_from_selection()
+        if not self.selected_ids:
+            return
         for seg in self.all_segments:
             if seg["id"] in self.selected_ids:
                 line = seg["line"]
@@ -6635,6 +6750,7 @@ class DrawingCanvas(QMainWindow):
         self.mark_content_changed()
 
     def scale_selection(self, factor, emit_event=True):
+        self._exclude_preserved_images_from_selection()
         if not self.selected_ids:
             return
         center = self.selection_bounds().center()
@@ -6685,6 +6801,7 @@ class DrawingCanvas(QMainWindow):
         self.mark_content_changed()
 
     def rotate_selection(self, degrees, emit_event=True):
+        self._exclude_preserved_images_from_selection()
         if not self.selected_ids:
             return
         center = self.selection_bounds().center()
@@ -7209,11 +7326,11 @@ class DrawingCanvas(QMainWindow):
         skip_text_id 是正在编辑的那一框：paintEvent 后面会带虚框和插入点再画一次，
         这里跳过它，正好省下打字时最贵的那一次文字渲染。同样只在屏幕上跳，导出不跳。
         """
-        self.draw_segments(painter, self.all_segments if segments is None else segments, clip=clip)
         for item in (self.image_items if images is None else images):
             if clip is not None and not clip.intersects(self.image_bounds(item)):
                 continue
             self.draw_image_item(painter, item)
+        self.draw_segments(painter, self.all_segments if segments is None else segments, clip=clip)
         for item in (self.shape_items if shapes is None else shapes):
             if clip is not None and not clip.intersects(self.shape_bounds(item)):
                 continue
@@ -8768,15 +8885,17 @@ class DrawingCanvas(QMainWindow):
             self.shape_items = [item for item in self.shape_items
                                 if not self._shape_outline_hit(px, py, item, r)]
             self.text_items = [item for item in self.text_items if not self.text_bounds(item).contains(point)]
-            self.image_items = [item for item in self.image_items if not self.image_bounds(item).contains(point)]
+            if not self.preserve_original_images:
+                self.image_items = [item for item in self.image_items if not self.image_bounds(item).contains(point)]
         else:
             hit_shape = next((item["id"] for item in self.shape_items
                               if self._shape_outline_hit(px, py, item, r)), None)
             if hit_shape: self.shape_items = [item for item in self.shape_items if item["id"] != hit_shape]
             hit_text = next((item["id"] for item in self.text_items if self.text_bounds(item).contains(point)), None)
             if hit_text: self.text_items = [item for item in self.text_items if item["id"] != hit_text]
-            hit_image = next((item["id"] for item in self.image_items if self.image_bounds(item).contains(point)), None)
-            if hit_image: self.image_items = [item for item in self.image_items if item["id"] != hit_image]
+            if not self.preserve_original_images:
+                hit_image = next((item["id"] for item in self.image_items if self.image_bounds(item).contains(point)), None)
+                if hit_image: self.image_items = [item for item in self.image_items if item["id"] != hit_image]
         if self.selected_ids:
             alive = ({s["id"] for s in self.all_segments}
                      | {t["id"] for t in self.text_items}
@@ -9518,6 +9637,35 @@ class _ColorSchemeFocusRing(QWidget):
         painter.drawRoundedRect(rect, 4, 4)
 
 
+class SubmenuCloseOverlay(QWidget):
+    """Input-transparent snapshot used after the real submenu closes."""
+
+    def __init__(self):
+        super().__init__()
+        self._snapshot = QPixmap()
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint
+                            | Qt.WindowType.WindowStaysOnTopHint
+                            | Qt.WindowType.Tool
+                            | Qt.WindowType.WindowTransparentForInput)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+    def set_snapshot(self, pixmap):
+        self._snapshot = QPixmap(pixmap)
+        self.update()
+
+    def clear_snapshot(self):
+        self._snapshot = QPixmap()
+
+    def paintEvent(self, event):
+        if self._snapshot.isNull():
+            return
+        painter = QPainter(self)
+        painter.drawPixmap(0, 0, self._snapshot)
+
+
 class ControlPanel(QWidget):
     exit_requested = pyqtSignal()
     # F12 由 pynput 在它自己的线程里回调；隐藏窗口/停计时器必须回到 Qt 主线程做，
@@ -9525,6 +9673,10 @@ class ControlPanel(QWidget):
     background_requested = pyqtSignal()
 
     HEARTBEAT_MS = 500   # 置顶心跳间隔：200ms 会让分层窗口频繁重新合成产生闪烁
+    SUBMENU_OPEN_DURATION_MS = 140
+    SUBMENU_CLOSE_DURATION_MS = 100
+    SUBMENU_ANIMATION_OFFSET = 10
+    SUBMENU_OPEN_START_OPACITY = 0.15
 
     # 圆角：以「外框圆角」为基准值，其余部件按比例派生（见 radius_tokens）。
     # 默认 12 必须与 5.4.x 的硬编码值一致，否则老用户升级后界面会莫名变形。
@@ -9745,11 +9897,23 @@ class ControlPanel(QWidget):
         self.ui_mode = "icon"
         self.ui_radius = self.RADIUS_DEFAULT
         self.ui_opacity = 100           # 百分比；作用于浮窗，不作用于画布（否则墨迹跟着淡）
+        self.submenu_animations_enabled = True
+        self.calculator_history_retention = "session"
+        self.calculator_last_mode = "basic"
+        self.calculator_angle_mode = "deg"
+        self._calculator_saved_pos = None
+        self._calculator_saved_screen = None
+        self.calculator_widget = None
+        self.language = "auto"
+        self.ui_scale_percent = 100
+        self.never_prompt_autosave_recovery = False
         self.update_check_enabled = True    # 默认自动检查；下载和安装始终需用户确认
         self.update_channel = "stable"
+        self.update_source = "github"
         self.whiteboard_auto_pen = True
         self.infinite_whiteboard = True
         self.page_copy_placement = "after"
+        self.preserve_original_images = True
         self.autosave_interval_seconds = AUTOSAVE_INTERVAL
         self.timer_alarm_volume = 100
         self.annotation_screen = ""
@@ -9767,6 +9931,9 @@ class ControlPanel(QWidget):
         self._update_worker = None
         self._update_download_worker = None
         self._pending_update_release = None
+        self._update_available_tag = None
+        self._update_indicators = []
+        self._startup_update_check_scheduled = False
         self._release_notes = NotesController(
             os.path.join(DATA_DIR, "update-history.json"), fetch_release_notes,
             self._release_notes_allowed, self)
@@ -9947,6 +10114,11 @@ class ControlPanel(QWidget):
         self.menu_panel.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
         self.menu_panel.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.menu_panel.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)   # 不抢焦点
+        self._menu_open_animation = None
+        self._menu_open_effect = None
+        self._menu_open_final_pos = None
+        self._menu_close_overlay = SubmenuCloseOverlay()
+        self._menu_close_animation = None
         self.menu_layout = QVBoxLayout(self.menu_panel)
         self.menu_layout.setContentsMargins(0, 0, 0, 0)
         self.menu_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
@@ -10050,6 +10222,9 @@ class ControlPanel(QWidget):
         # 创建工具栏按钮
         self.icon_buttons = {}
         self.build_toolbar_buttons()
+        for button in (self.btn_settings, self.icon_buttons['settings']):
+            indicator = button._update_indicator = UpdateIndicator(button)
+            self._update_indicators.append(indicator)
 
         self.main_frame.setVisible(False)      # 默认图标 UI；load_settings 里按配置切换
 
@@ -10141,6 +10316,23 @@ class ControlPanel(QWidget):
             QLabel#MiniTimer {{ background-color: {t["frame"]}; border: 2px solid {t["accent"]}; border-radius: {rad["mini"]}px; font-size: 20px; font-weight: bold; color: {t["accent"]}; font-family: Consolas, "Microsoft YaHei"; padding: 5px 16px; }}
             QLabel#SettingsSection {{ color: {t["accent"]}; font-size: 12px; font-weight: bold; padding: 6px 2px 2px 2px; }}
             QLabel#SettingsHint {{ color: {t["hint"]}; font-size: 10px; padding: 0px 2px 4px 2px; }}
+            QWidget#SettingsWindow QLabel {{ color: {t["text"]}; font-size: 12px; }}
+            QWidget#SettingsContent QLabel,
+            QWidget#SettingsContent QCheckBox,
+            QWidget#SettingsContent QRadioButton {{ color: {t["text"]}; font-size: 12px; }}
+            QWidget#SettingsContent QPushButton,
+            QWidget#SettingsContent QToolButton,
+            QWidget#SettingsContent QComboBox,
+            QWidget#SettingsContent QSpinBox,
+            QWidget#SettingsContent QLineEdit,
+            QWidget#SettingsContent QTextBrowser {{ font-size: 12px; }}
+            QWidget#SettingsContent QLabel#SettingsSection {{
+                color: {t["text"]}; font-size: 12px; font-weight: bold;
+                padding: 12px 2px 4px 2px;
+            }}
+            QWidget#SettingsContent QLabel#SettingsHint {{
+                color: {t["text"]}; font-size: 12px; padding: 0px 2px 4px 2px;
+            }}
             QWidget#TeachingSurface {{ background-color: {t["panel"]}; color: {t["text"]}; }}
             QDialog#UpdateHistory {{ background-color: {t["panel"]}; color: {t["text"]}; }}
             QTextBrowser#ReleaseNotesBrowser {{ background-color: {t["panel"]}; color: {t["text"]}; border: 1px solid {border}; padding: 6px; }}
@@ -10325,12 +10517,14 @@ class ControlPanel(QWidget):
         self.toggle_toolbar_collapsed()
 
     def _on_toolbar_dragged(self, new_toolbar_pos):
-        """工具栏独立拖动时保留其位置；后续 LOGO 拖动不覆盖用户的布局。
-
-        拖动中每移动一像素都会进来一次，配置文件不能跟着每像素写一遍，攒到停手再写。
-        """
-        self._toolbar_detached = True
-        self._toolbar_saved_pos = (new_toolbar_pos.x(), new_toolbar_pos.y())
+        """Move both windows from the toolbar's requested position."""
+        logo = self.logo_window
+        gap = toolbar_windows.LOGO_GAP
+        if self.orientation == "portrait":
+            logo.move(new_toolbar_pos.x(), new_toolbar_pos.y() - logo.height() - gap)
+        else:
+            logo.move(new_toolbar_pos.x() - logo.width() - gap, new_toolbar_pos.y())
+        self._reposition_toolbar_next_to_logo()
         self._schedule_split_save()
         if getattr(self, "menu_panel", None) is not None and self.menu_panel.isVisible():
             self.position_menu_panel()
@@ -10346,8 +10540,8 @@ class ControlPanel(QWidget):
         timer.start()
 
     def _on_logo_dragged(self, new_logo_pos):
-        """LOGO拖动时，工具栏跟随移动，除非用户已独立拖动工具栏。"""
-        if self.toolbar_window.isVisible() and not getattr(self, "_toolbar_detached", False):
+        """LOGO 拖动时，展开的工具栏始终跟随移动。"""
+        if self.toolbar_window.isVisible():
             self._reposition_toolbar_next_to_logo()
             if getattr(self, "menu_panel", None) is not None and self.menu_panel.isVisible():
                 self.position_menu_panel()
@@ -10383,12 +10577,10 @@ class ControlPanel(QWidget):
 
         toolbar = self.toolbar_window
         logo = self.logo_window
+        # Repair legacy split layouts before every show/relayout/drag.
+        self._toolbar_detached = False
+        self._toolbar_saved_pos = None
         if not toolbar.isVisible():
-            return
-        if getattr(self, "_toolbar_detached", False):
-            if self._toolbar_saved_pos:
-                toolbar.move(*self._toolbar_saved_pos)
-            toolbar.clamp_into_screen()
             return
 
         x, y = self._toolbar_slot_next_to_logo()
@@ -10485,12 +10677,8 @@ class ControlPanel(QWidget):
         # 初始同步状态
         self.sync_icon_buttons()
 
-    def _sync_split_geometry(self, follow=True):
-        """让 LOGO 与工具栏保持一体：竖版同宽、横版同高，工具栏贴在 LOGO 旁边。
-
-        follow=False 只同步尺寸并收进屏幕，不动工具栏位置（用户独立拖过工具栏时）。
-        心跳每拍也会调，所以尺寸没变就不做任何事。
-        """
+    def _sync_split_geometry(self):
+        """Keep LOGO and toolbar attached while fitting the current screen."""
         logo = getattr(self, "logo_window", None)
         toolbar = getattr(self, "toolbar_window", None)
         if logo is None or toolbar is None:
@@ -10502,16 +10690,13 @@ class ControlPanel(QWidget):
         area = toolbar_windows._available_rect(logo)
         lx, ly = toolbar_windows.clamp_point_into(logo.x(), logo.y(), logo.width(), logo.height(), area)
         # 竖栏贴底时不能把工具栏单独 clamp 回屏幕：会把中段盖到 LOGO 上。
-        # 未分离的两扇窗口作为一个整体收进可用区，始终让 LOGO 位于工具栏上方。
-        if follow and self.orientation == "portrait" and not getattr(self, "_toolbar_detached", False) and toolbar.isVisible():
+        # 两扇窗口作为一个整体收进可用区，始终让 LOGO 位于工具栏上方。
+        if self.orientation == "portrait" and toolbar.isVisible():
             combined_height = logo.height() + toolbar_windows.LOGO_GAP + toolbar.height()
             lx, ly = toolbar_windows.clamp_point_into(lx, ly, max(logo.width(), toolbar.width()), combined_height, area)
         if (lx, ly) != (logo.x(), logo.y()):
             logo.move(lx, ly)
-        if follow:
-            self._reposition_toolbar_next_to_logo()
-        else:
-            toolbar.clamp_into_screen()
+        self._reposition_toolbar_next_to_logo()
 
     def _relayout_icon_frame(self, orientation):
         """分体设计：重新布局独立的工具栏窗口"""
@@ -10559,7 +10744,7 @@ class ControlPanel(QWidget):
             self.logo_window.apply_theme(self.theme, rad["frame"], self.ui_opacity,
                                          self._make_logo_icon(self.logo_window.icon_size()))
             if relayout:
-                self._sync_split_geometry(follow=not getattr(self, "_toolbar_detached", False))
+                self._sync_split_geometry()
 
     def sync_icon_buttons(self):
         """把经典按钮的状态单向投影到图标按钮上。
@@ -10606,14 +10791,14 @@ class ControlPanel(QWidget):
             if text and key not in ("pages",):
                 btn.setToolTip(text)
                 btn.setAccessibleName(text)
-                if key in ("mode", "whiteboard") and btn.text() != text:
+                if key in ("mode", "whiteboard", "board_style") and btn.text() != text:
                     btn.setText(text)
         if self.color_scheme != "classic":
             self.refresh_annotate_badge()
         # 鼠标模式只保留基础入口；进入批注后恢复完整工具集。
         if layout_changed and self.ui_mode == "icon" and hasattr(self, "toolbar_window"):
             self.toolbar_window.refresh_layout()
-            self._sync_split_geometry(follow=not getattr(self, "_toolbar_detached", False))
+            self._sync_split_geometry()
         page_btn = buttons.get("pages")
         if page_btn is not None and getattr(self, "page_label", None) is not None:
             label = self.page_label.text().strip()
@@ -10629,7 +10814,7 @@ class ControlPanel(QWidget):
                 self.toolbar_window.icon_wb_box.setVisible(want_visible)
                 if self.ui_mode == "icon":
                     self.toolbar_window.refresh_layout()
-                    self._sync_split_geometry(follow=not getattr(self, "_toolbar_detached", False))
+                    self._sync_split_geometry()
                     if getattr(self, "menu_panel", None) is not None and self.menu_panel.isVisible():
                         self.position_menu_panel()
 
@@ -10637,6 +10822,7 @@ class ControlPanel(QWidget):
         """图标主面板是唯一界面，分体设计：显示LOGO和工具栏窗口。"""
         if mode not in ("classic", "icon"):
             return
+        self._stop_submenu_animations(hide_overlay=True, snap_open=True)
         # 统一为图标式分体设计
         self.ui_mode = "icon"
         self.main_frame.setVisible(False)
@@ -10832,6 +11018,7 @@ class ControlPanel(QWidget):
             # 反向也要让位：否则「开子菜单→缩略图关」之后再开缩略图，子菜单还在，
             # 两个浮窗又并存，争抢原样复现。
             self.show_only_sub(None)
+            self._stop_menu_close_animation(hide_overlay=True)
             self._position_thumbnail_panel()
             self.thumbnail_panel.show()
             self.refresh_page_thumbnails(force=True)
@@ -11013,7 +11200,6 @@ class ControlPanel(QWidget):
             self.btn_view_home.setEnabled(self.canvas.board_view_active)
             self.btn_view_fit.setEnabled(self.canvas.board_view_active)
         self.sync_canvas_input_mode()
-        self.sync_icon_buttons()
         total = max(1, len(self.canvas.pages))
         current = self.canvas.current_page + 1
         if hasattr(self, "page_label"):
@@ -11043,6 +11229,7 @@ class ControlPanel(QWidget):
         # 名为「第 1 页」的误导性整屏截图缩略图，直到重启程序。
         if not self.canvas.whiteboard_mode:
             self.close_thumbnail_panel()
+        self.sync_icon_buttons()
         self.refresh_page_thumbnails()
 
     def toggle_whiteboard(self):
@@ -12153,6 +12340,141 @@ class ControlPanel(QWidget):
                 self.laser_sub, self.tools_sub, self.file_sub, self.aid_sub,
                 self.magnifier_sub, self.timer_sub)
 
+    def _submenu_animations_allowed(self):
+        if not self.submenu_animations_enabled or not client_area_animations_enabled():
+            return False
+        if not self.runtime_context.ui_active or self._teaching_suspended:
+            return False
+        lifecycle = getattr(self, "lifecycle", None)
+        if lifecycle is not None and lifecycle.state in (LifecycleState.HIDDEN, LifecycleState.QUITTING):
+            return False
+        return True
+
+    def _submenu_animation_delta(self, final_pos):
+        """Offset the menu toward its toolbar anchor before it moves outward."""
+        offset = self.SUBMENU_ANIMATION_OFFSET
+        if self.ui_mode == "icon" and hasattr(self, "toolbar_window") and self.toolbar_window.isVisible():
+            frame = self.toolbar_window.frameGeometry()
+        else:
+            frame = self.frameGeometry()
+        menu = QRect(final_pos, self.menu_panel.size())
+        if self.orientation == "landscape":
+            return QPoint(0, offset if menu.bottom() <= frame.top() else -offset)
+        return QPoint(offset if menu.right() <= frame.left() else -offset, 0)
+
+    def _stop_menu_open_animation(self, snap_open=True):
+        group = getattr(self, "_menu_open_animation", None)
+        final_pos = getattr(self, "_menu_open_final_pos", None)
+        self._menu_open_animation = None
+        self._menu_open_final_pos = None
+        if group is not None:
+            group.stop()
+            group.deleteLater()
+        effect = getattr(self, "_menu_open_effect", None)
+        self._menu_open_effect = None
+        if effect is not None:
+            effect.setOpacity(1.0)
+            if self.menu_panel.graphicsEffect() is effect:
+                self.menu_panel.setGraphicsEffect(None)
+        if snap_open and final_pos is not None and self.menu_panel.isVisible():
+            self.menu_panel.move(final_pos)
+
+    def _stop_menu_close_animation(self, hide_overlay=True):
+        group = getattr(self, "_menu_close_animation", None)
+        self._menu_close_animation = None
+        if group is not None:
+            group.stop()
+            group.deleteLater()
+        overlay = getattr(self, "_menu_close_overlay", None)
+        if overlay is None:
+            return
+        if hide_overlay:
+            overlay.hide()
+            overlay.clear_snapshot()
+        overlay.setWindowOpacity(1.0)
+
+    def _stop_submenu_animations(self, hide_overlay=True, snap_open=True):
+        self._stop_menu_open_animation(snap_open=snap_open)
+        self._stop_menu_close_animation(hide_overlay=hide_overlay)
+
+    def _start_menu_close_animation(self, snapshot, start_pos, delta):
+        self._stop_menu_close_animation(hide_overlay=True)
+        overlay = self._menu_close_overlay
+        overlay.set_snapshot(snapshot)
+        overlay.setGeometry(QRect(start_pos, self.menu_panel.size()))
+        start_opacity = max(self.OPACITY_MIN, min(self.OPACITY_MAX, int(self.ui_opacity))) / 100.0
+        overlay.setWindowOpacity(start_opacity)
+        overlay.show()
+        self.raise_floating(overlay)
+
+        end_pos = start_pos + delta
+        group = QParallelAnimationGroup(self)
+        movement = QPropertyAnimation(overlay, b"pos", group)
+        movement.setDuration(self.SUBMENU_CLOSE_DURATION_MS)
+        movement.setStartValue(start_pos)
+        movement.setEndValue(end_pos)
+        movement.setEasingCurve(QEasingCurve.Type.InCubic)
+        opacity = QPropertyAnimation(overlay, b"windowOpacity", group)
+        opacity.setDuration(self.SUBMENU_CLOSE_DURATION_MS)
+        opacity.setStartValue(start_opacity)
+        opacity.setEndValue(0.0)
+        opacity.setEasingCurve(QEasingCurve.Type.InCubic)
+        group.addAnimation(movement)
+        group.addAnimation(opacity)
+        self._menu_close_animation = group
+
+        def finish():
+            if self._menu_close_animation is not group:
+                return
+            self._menu_close_animation = None
+            overlay.hide()
+            overlay.clear_snapshot()
+            overlay.setWindowOpacity(1.0)
+            group.deleteLater()
+
+        group.finished.connect(finish)
+        group.start()
+
+    def _start_menu_open_animation(self, final_pos):
+        self._stop_menu_open_animation(snap_open=False)
+        effect = QGraphicsOpacityEffect(self.menu_panel)
+        effect.setOpacity(self.SUBMENU_OPEN_START_OPACITY)
+        self.menu_panel.setGraphicsEffect(effect)
+        start_pos = final_pos + self._submenu_animation_delta(final_pos)
+        self.menu_panel.move(start_pos)
+
+        group = QParallelAnimationGroup(self)
+        movement = QPropertyAnimation(self.menu_panel, b"pos", group)
+        movement.setDuration(self.SUBMENU_OPEN_DURATION_MS)
+        movement.setStartValue(start_pos)
+        movement.setEndValue(final_pos)
+        movement.setEasingCurve(QEasingCurve.Type.OutCubic)
+        opacity = QPropertyAnimation(effect, b"opacity", group)
+        opacity.setDuration(self.SUBMENU_OPEN_DURATION_MS)
+        opacity.setStartValue(self.SUBMENU_OPEN_START_OPACITY)
+        opacity.setEndValue(1.0)
+        opacity.setEasingCurve(QEasingCurve.Type.OutCubic)
+        group.addAnimation(movement)
+        group.addAnimation(opacity)
+
+        self._menu_open_animation = group
+        self._menu_open_effect = effect
+        self._menu_open_final_pos = QPoint(final_pos)
+
+        def finish():
+            if self._menu_open_animation is not group:
+                return
+            self._menu_open_animation = None
+            self._menu_open_final_pos = None
+            self._menu_open_effect = None
+            self.menu_panel.move(final_pos)
+            if self.menu_panel.graphicsEffect() is effect:
+                self.menu_panel.setGraphicsEffect(None)
+            group.deleteLater()
+
+        group.finished.connect(finish)
+        group.start()
+
     def show_only_sub(self, target=None):
         """同一时间只展开一个子面板，并收起浮动的选中面板。
 
@@ -12161,16 +12483,35 @@ class ControlPanel(QWidget):
         """
         self.select_panel.hide()
         if target is not None:
+            self._stop_menu_close_animation(hide_overlay=True)
             self.close_thumbnail_panel()    # 缩略图让位，避免两个浮窗抢置顶
         if target is not None and target.isVisible() and self.menu_panel.isVisible():
+            self._stop_menu_open_animation(snap_open=True)
             self._menu_anchor = self.sub_anchor_button(target)
             self.position_menu_panel()          # 已是目标状态，只校正位置，避免无谓的隐藏重显
             return
+        was_visible = self.menu_panel.isVisible()
+        opening = self._menu_open_animation is not None
+        close_snapshot = None
+        close_pos = None
+        close_delta = None
+        if (target is None and was_visible and not opening and self.runtime_context.desktop_capture
+                and self._submenu_animations_allowed()):
+            close_snapshot = self.menu_panel.grab()
+            close_pos = QPoint(self.menu_panel.pos())
+            close_delta = self._submenu_animation_delta(close_pos)
+        self._stop_menu_open_animation(snap_open=False)
         self.menu_panel.hide()
         for sub in self.all_subs():
             sub.setVisible(sub is target)
         self._menu_anchor = self.sub_anchor_button(target) if target is not None else None
         if target is None:
+            if close_snapshot is not None and not close_snapshot.isNull():
+                try:
+                    self._start_menu_close_animation(close_snapshot, close_pos, close_delta)
+                except (RuntimeError, TypeError) as exc:
+                    LOGGER.warning("submenu close animation unavailable: %s", exc)
+                    self._stop_menu_close_animation(hide_overlay=True)
             if hasattr(self, "timer_display"):
                 self.update_timer_ui()   # 关闭计时面板后，计时中→迷你计时器接管
             return
@@ -12179,12 +12520,25 @@ class ControlPanel(QWidget):
         layout.activate()
         self.menu_panel.setFixedSize(layout.sizeHint())
         self.position_menu_panel()
+        final_pos = QPoint(self.menu_panel.pos())
+        animate_open = not was_visible and self._submenu_animations_allowed()
+        if animate_open:
+            # Install the effect and starting geometry while the native window is
+            # still hidden, so the compositor never exposes a one-frame flash at
+            # the final anchor before the first animation tick.
+            try:
+                self._start_menu_open_animation(final_pos)
+            except (RuntimeError, TypeError) as exc:
+                LOGGER.warning("submenu open animation unavailable: %s", exc)
+                self._stop_menu_open_animation(snap_open=False)
+                self.menu_panel.move(final_pos)
         self.menu_panel.show()
         # 只 force_topmost 不够：画布也是 TOPMOST，HWND_TOPMOST 决定不了同层兄弟的高低，
         # 刚显示的子菜单可能落在全屏画布之下——点它等于点画布（橡皮态下直接擦掉内容，
         # 还会在菜单上画出橡皮光标圈），表现就是「子菜单点不动、其他功能失灵」。
         # raise_floating 会重绑 owner 并补上 force_above(菜单, 画布)。
         self.raise_floating(self.menu_panel)
+        # 子菜单间切换不重播整段动画；只有隐藏→显示才弹出。
         if hasattr(self, "timer_display"):
             self.update_timer_ui()      # 计时面板开/关联动迷你计时器显隐
         contexts = {self.annotate_sub: "toolbar.pen", self.draw_sub: "toolbar.pen",
@@ -12196,6 +12550,7 @@ class ControlPanel(QWidget):
             self.maybe_show_teaching_context_hint(context_id)
 
     def position_menu_panel(self):
+        self._stop_menu_open_animation(snap_open=True)
         x, y = self._floating_anchor(self.menu_panel.width(), self.menu_panel.height(), gap=6,
                                      anchor=getattr(self, "_menu_anchor", None))
         self.menu_panel.move(x, y)
@@ -13101,6 +13456,7 @@ class ControlPanel(QWidget):
         """在竖版 / 横版工具栏之间切换：分体设计中更新工具栏窗口方向。"""
         if orientation not in ("portrait", "landscape") or orientation == self.orientation:
             return
+        self._stop_submenu_animations(hide_overlay=True, snap_open=True)
         self.orientation = orientation
 
         # 更新工具栏窗口方向
@@ -13148,6 +13504,8 @@ class ControlPanel(QWidget):
         # 图标面板不固定宽度：它的宽度由 3 列图标决定（约 110px），套用 150 会白留一截
         self.title_label.setText(f" ⠿ {tr('app')} {APP_VERSION}")
         self._resize_to_content()                        # 内部会 clamp_into_screen 收回屏幕
+        if self.menu_panel.isVisible():
+            self.position_menu_panel()
         # 竖版 150 宽 ↔ 横版几百宽，尺寸变化比换 UI 模式还大，开着的设置页必须重新让位
         self.reposition_settings_panel()
         track_event("orientation_set", orientation=orientation)
@@ -13245,8 +13603,9 @@ class ControlPanel(QWidget):
         self.sync_icon_buttons()      # 可用性变了，图标树跟上
 
     def clear(self):
+        images = () if self.canvas.preserve_original_images else self.canvas.image_items
         count = sum(len(items) for items in (self.canvas.all_segments, self.canvas.text_items,
-                                            self.canvas.shape_items, self.canvas.image_items))
+                                            self.canvas.shape_items, images))
         if not count:
             return
         with teaching_document_operation(self, "history.cleared") as (events, operation):
@@ -13257,7 +13616,8 @@ class ControlPanel(QWidget):
                 self.canvas.all_segments = []
                 self.canvas.text_items = []
                 self.canvas.shape_items = []
-                self.canvas.image_items = []
+                if not self.canvas.preserve_original_images:
+                    self.canvas.image_items = []
                 self.canvas.selected_ids.clear()
                 self.canvas.update()
                 if self.canvas.whiteboard_mode:
@@ -13414,6 +13774,7 @@ class ControlPanel(QWidget):
     def open_settings_panel(self):
         """打开设置面板（懒建）。"""
         self.show_only_sub(None)
+        self._stop_menu_close_animation(hide_overlay=True)
         if self.settings_panel is None:
             self.build_settings_panel()
         self.sync_settings_panel()
@@ -13425,6 +13786,10 @@ class ControlPanel(QWidget):
         # 内容变矮时，adjustSize 还能把它收回去；固定住就永远是第一次那个高度。
         cap = int(screen.height() * 0.88)
         panel.setMaximumHeight(cap)
+        width_cap = max(300, int(screen.width() * 0.92))
+        desired_width = min(width_cap, int(getattr(self, "_settings_want_width", 300)))
+        panel.setMinimumWidth(desired_width)
+        panel.resize(desired_width, panel.height())
         panel.adjustSize()
         # adjustSize 之后还要按内容高度再撑一次。QScrollArea 在 widgetResizable
         # 模式下的 sizeHint 跟里面装了多少东西无关（Qt 给的是一个很小的默认值），
@@ -13498,6 +13863,7 @@ class ControlPanel(QWidget):
         而批注面板里那颗是画的过程中随手就能切的位置——两种需求都真实存在。
         """
         self.settings_panel, layout = self._make_tool_window(tr("settings"))
+        self.settings_panel.setObjectName('SettingsWindow')
 
         scroll = QScrollArea()
         scroll.setObjectName("SettingsScroll")
@@ -13525,6 +13891,7 @@ class ControlPanel(QWidget):
             label.setObjectName("SettingsHint")
             label.setWordWrap(True)
             form.addWidget(label)
+            return label
 
         self.btn_feedback = QPushButton(tr("feedback"))
         self.btn_feedback.clicked.connect(
@@ -13540,6 +13907,28 @@ class ControlPanel(QWidget):
 
         # ---------- 外观 ----------
         section("settings_appearance")
+        language_label = QLabel(tr("interface_language"))
+        form.addWidget(language_label)
+        self.language_combo = QComboBox()
+        self.language_combo.setAccessibleName(tr("interface_language"))
+        self.language_combo.addItem(tr("language_system"), "auto")
+        for code, name in LANGUAGE_NAMES.items():
+            self.language_combo.addItem(name, code)
+        self.language_combo.setCurrentIndex(self.language_combo.findData(self.language))
+        language_label.setBuddy(self.language_combo)
+        self.language_combo.currentIndexChanged.connect(
+            lambda _index: self.set_language_preference(self.language_combo.currentData()))
+        form.addWidget(self.language_combo)
+        self.ui_scale_value_label = QLabel(trf("ui_scale_value", value=self.ui_scale_percent))
+        form.addWidget(self.ui_scale_value_label)
+        self.ui_scale_slider = QSlider(Qt.Orientation.Horizontal)
+        self.ui_scale_slider.setRange(SCALE_MIN, SCALE_MAX)
+        self.ui_scale_slider.setValue(self.ui_scale_percent)
+        self.ui_scale_slider.setAccessibleName(self.ui_scale_value_label.text())
+        self.ui_scale_value_label.setBuddy(self.ui_scale_slider)
+        self.ui_scale_slider.valueChanged.connect(self.set_ui_scale)
+        form.addWidget(self.ui_scale_slider)
+        self.interface_restart_hint = hint(tr("interface_restart_hint"))
         form.addWidget(self.btn_theme)          # 主题按钮从主栏搬到这里
         self.btn_theme.show()
         self.color_scheme_label = QLabel(tr("color_scheme"))
@@ -13575,6 +13964,12 @@ class ControlPanel(QWidget):
         self.ui_opacity_slider.valueChanged.connect(self.set_ui_opacity)
         form.addWidget(self.ui_opacity_slider)
         hint(tr("opacity_hint"))
+
+        self.submenu_animation_checkbox = QCheckBox(tr("submenu_animations"))
+        self.submenu_animation_checkbox.setChecked(self.submenu_animations_enabled)
+        self.submenu_animation_checkbox.toggled.connect(self.set_submenu_animations_enabled)
+        form.addWidget(self.submenu_animation_checkbox)
+        hint(tr("submenu_animations_hint"))
 
         self.radius_value_label = QLabel(trf("radius_value", value=self.ui_radius))
         form.addWidget(self.radius_value_label)
@@ -13638,6 +14033,30 @@ class ControlPanel(QWidget):
         section("settings_document")
         self.document_preferences = DocumentPreferences(self)
         form.addWidget(self.document_preferences)
+        self.never_prompt_recovery_checkbox = QCheckBox(tr("never_prompt_autosave_recovery"))
+        self.never_prompt_recovery_checkbox.setChecked(self.never_prompt_autosave_recovery)
+        self.never_prompt_recovery_checkbox.toggled.connect(self.set_never_prompt_autosave_recovery)
+        form.addWidget(self.never_prompt_recovery_checkbox)
+        hint(tr("never_prompt_autosave_recovery_hint"))
+
+        # ---------- 计算器 ----------
+        section("calculator_settings")
+        self.calculator_history_retention_label = QLabel(tr("calculator_history_retention"))
+        form.addWidget(self.calculator_history_retention_label)
+        self.calculator_history_retention_combo = QComboBox()
+        for key, value in (("calculator_retention_session", "session"),
+                           ("calculator_retention_1d", "1d"),
+                           ("calculator_retention_7d", "7d"),
+                           ("calculator_retention_30d", "30d"),
+                           ("calculator_retention_forever", "forever")):
+            self.calculator_history_retention_combo.addItem(tr(key), value)
+        self.calculator_history_retention_combo.setCurrentIndex(
+            self.calculator_history_retention_combo.findData(self.calculator_history_retention))
+        self.calculator_history_retention_combo.currentIndexChanged.connect(
+            lambda _index: self.set_calculator_history_retention(
+                self.calculator_history_retention_combo.currentData()))
+        form.addWidget(self.calculator_history_retention_combo)
+        hint(tr("calculator_history_retention_hint"))
 
         # ---------- 系统 ----------
         section("settings_system")
@@ -13654,6 +14073,12 @@ class ControlPanel(QWidget):
         self.update_channel_combo.addItem(tr("update_channel_preview"), "preview")
         self.update_channel_combo.currentIndexChanged.connect(self.set_update_channel)
         form.addWidget(self.update_channel_combo)
+        self.update_source_combo = QComboBox()
+        self.update_source_combo.addItem(tr("update_source_github"), "github")
+        self.update_source_combo.addItem(tr("update_source_gitcode"), "gitcode")
+        self.update_source_combo.setAccessibleName(tr("update_source"))
+        self.update_source_combo.currentIndexChanged.connect(self.set_update_source)
+        form.addWidget(self.update_source_combo)
         self.btn_check_update = QPushButton(tr("check_update_now"))
         self.btn_check_update.clicked.connect(self.check_for_updates)
         form.addWidget(self.btn_check_update)
@@ -13701,6 +14126,15 @@ class ControlPanel(QWidget):
         layout.addWidget(scroll)
         # 留着引用：open_settings_panel 要按内容真实高度决定窗口高度。
         self.settings_scroll = scroll
+        form.activate()
+        # QScrollArea 的默认 sizeHint 不包含内部表单的真实宽度；固定 300px 会把
+        # PenDefaultsEditor 等控件横向裁掉，而横向滚动条又被明确隐藏。先记录内容
+        # 所需宽度，打开时再按当前屏幕的逻辑宽度封顶。
+        content_width = max(inner.minimumSizeHint().width(), inner.sizeHint().width())
+        scroll_chrome = 2 * scroll.frameWidth() + scroll.verticalScrollBar().sizeHint().width()
+        # MainFrame 左右各 10px，另给 QScrollArea 的 viewport/layout 取整留 8px。
+        frame_chrome = 28
+        self._settings_want_width = max(300, content_width + scroll_chrome + frame_chrome)
         self.settings_panel.setMinimumWidth(300)
         self.settings_panel.setStyleSheet(self.styleSheet())
         self._apply_color_scheme_controls()
@@ -13729,6 +14163,12 @@ class ControlPanel(QWidget):
 
         self.release_notice.set_theme(self.theme_name)
         self.release_notice.setVisible(self._notice_visible)
+        blocked = self.language_combo.blockSignals(True)
+        self.language_combo.setCurrentIndex(self.language_combo.findData(self.language))
+        self.language_combo.blockSignals(blocked)
+        blocked = self.never_prompt_recovery_checkbox.blockSignals(True)
+        self.never_prompt_recovery_checkbox.setChecked(self.never_prompt_autosave_recovery)
+        self.never_prompt_recovery_checkbox.blockSignals(blocked)
         blocked = self.color_scheme_combo.blockSignals(True)
         self.color_scheme_combo.clear()
         for scheme, key in self.COLOR_SCHEMES.items():
@@ -13751,17 +14191,28 @@ class ControlPanel(QWidget):
         self.pen_defaults_checkbox.blockSignals(True)
         self.pen_defaults_checkbox.setChecked(self.pen_defaults_enabled)
         self.pen_defaults_checkbox.blockSignals(False)
+        blocked = self.submenu_animation_checkbox.blockSignals(True)
+        self.submenu_animation_checkbox.setChecked(self.submenu_animations_enabled)
+        self.submenu_animation_checkbox.blockSignals(blocked)
+        if hasattr(self, "calculator_history_retention_combo"):
+            blocked = self.calculator_history_retention_combo.blockSignals(True)
+            self.calculator_history_retention_combo.setCurrentIndex(
+                self.calculator_history_retention_combo.findData(self.calculator_history_retention))
+            self.calculator_history_retention_combo.blockSignals(blocked)
         # UI模式已统一为图标式，不再需要同步UI模式按钮状态
         mark(self.btn_orient_portrait, self.orientation == "portrait")
         mark(self.btn_orient_landscape, self.orientation == "landscape")
 
         for slider, value in ((self.ui_opacity_slider, self.ui_opacity),
+                              (self.ui_scale_slider, self.ui_scale_percent),
                               (self.ui_radius_slider, self.ui_radius)):
             slider.blockSignals(True)
             slider.setValue(int(value))
             slider.blockSignals(False)
         self.opacity_value_label.setText(trf("opacity_value", value=self.ui_opacity))
         self.radius_value_label.setText(trf("radius_value", value=self.ui_radius))
+        self.ui_scale_value_label.setText(trf("ui_scale_value", value=self.ui_scale_percent))
+        self.ui_scale_slider.setAccessibleName(self.ui_scale_value_label.text())
 
         if cv is not None:
             smart = bool(cv.smart_shapes_enabled)
@@ -13783,6 +14234,8 @@ class ControlPanel(QWidget):
             self.btn_download_update.setEnabled(bool(self._pending_update_release))
         if hasattr(self, "update_channel_combo"):
             self.update_channel_combo.setCurrentIndex(0 if self.update_channel == "stable" else 1)
+        if hasattr(self, "update_source_combo"):
+            self.update_source_combo.setCurrentIndex(self.update_source_combo.findData(self.update_source))
         self.btn_update_toggle.setText(tr("update_check_on") if allowed else tr("update_check_off"))
         mark(self.btn_update_toggle, allowed)
         # 更新检查关着的时候，「立即检查」不可点——避免出现「我明明关了它却联网」
@@ -13862,13 +14315,28 @@ class ControlPanel(QWidget):
         if channel not in ("stable", "preview") or channel == self.update_channel:
             return
         self.update_channel = channel
-        self._pending_update_release = None
-        if hasattr(self, "btn_download_update"):
-            self.btn_download_update.setEnabled(False)
-        self._sync_release_notes()
+        self._remember_available_update(None)
         self._set_update_status("")
         self.save_settings()
         track_event("update_channel_changed", channel=channel)
+
+    def set_update_source(self, index):
+        source = self.update_source_combo.itemData(index)
+        if source not in UPDATE_SOURCES or source == self.update_source:
+            return
+        if getattr(self, "_update_download_active", False) or getattr(self, "_update_flow_busy", False):
+            self.update_source_combo.blockSignals(True)
+            self.update_source_combo.setCurrentIndex(self.update_source_combo.findData(self.update_source))
+            self.update_source_combo.blockSignals(False)
+            return
+        self.update_source = source
+        self._teaching_deferred_update_result = None
+        self._remember_available_update(None)
+        self._release_notes.set_source(source,
+            lambda tag, source=source: fetch_release_notes(tag, source=source))
+        self._set_update_status("")
+        self.save_settings()
+        track_event("update_source_changed", source=source)
 
     def toggle_update_check(self):
         self.update_check_enabled = not self.update_check_enabled
@@ -13891,6 +14359,33 @@ class ControlPanel(QWidget):
         if button is not None:
             button.setEnabled(enabled)
 
+    def schedule_startup_update_check(self):
+        """Begin the default check on the first UI turn, without duplicate requests."""
+        if self._startup_update_check_scheduled:
+            return
+        self._startup_update_check_scheduled = True
+        if (not self.runtime_context.updates or not self.update_check_enabled
+                or getattr(self, '_updates_stopping', False)):
+            self.update_check_timer.stop()
+            return
+        self.update_check_timer.start()
+        QTimer.singleShot(0, self.check_for_updates)
+
+    def _sync_update_indicators(self):
+        available = bool(self._update_available_tag) and self.runtime_context.updates
+        for indicator in self._update_indicators:
+            indicator.set_available(available)
+            indicator.parentWidget().setAccessibleDescription(
+                trf('update_available', value=self._update_available_tag) if available else '')
+
+    def _remember_available_update(self, release):
+        self._pending_update_release = release
+        self._update_available_tag = release.get('tag') if isinstance(release, dict) else release
+        self._sync_update_indicators()
+        if hasattr(self, 'btn_download_update'):
+            self.btn_download_update.setEnabled(bool(release))
+        self._sync_release_notes()
+
     def check_for_updates(self):
         """检查版本；自动检查仅提示新版，下载与安装仍须用户确认。"""
         if not application_runtime(getattr(self, "runtime_context", None)).updates:
@@ -13907,7 +14402,7 @@ class ControlPanel(QWidget):
             return
         self._set_update_check_enabled(False)
         self._set_update_status(tr("update_checking"))
-        worker = UpdateCheckWorker(self.update_channel, self)
+        worker = UpdateCheckWorker(self.update_channel, self, source=getattr(self, "update_source", "github"))
         worker.finished_check.connect(self._on_update_result)
         # 线程对象要留着引用：局部变量出作用域被回收会导致 QThread 未结束就析构
         self._update_worker = worker
@@ -13917,17 +14412,16 @@ class ControlPanel(QWidget):
     def _on_update_result(self, release, error):
         if not application_runtime(getattr(self, "runtime_context", None)).updates:
             return
+        if getattr(self, '_updates_stopping', False):
+            return
         if update_work_is_blocked(self):
             self._teaching_deferred_update_result = (release, error)
             return
         self._set_update_check_enabled(bool(self.update_check_enabled))
         sender = self.sender()
-        if isinstance(sender, UpdateCheckWorker) and sender.channel != self.update_channel:
+        if isinstance(sender, UpdateCheckWorker) and (sender.channel != self.update_channel
+                or sender.source != self.update_source):
             return
-        self._pending_update_release = None
-        if hasattr(self, "btn_download_update"):
-            self.btn_download_update.setEnabled(False)
-        self._sync_release_notes()
         if error == "rate_limited":
             self._set_update_status(tr("update_rate_limited"))
             track_event("update_check_rate_limited")
@@ -13940,37 +14434,31 @@ class ControlPanel(QWidget):
             remote = parse_version(release)
             local = parse_version(APP_VERSION)
             if remote is None or local is None:
-                self._pending_update_release = None
                 self._set_update_status(trf("update_failed", detail="bad_version"))
             elif remote > local:
-                self._pending_update_release = release
-                self._sync_release_notes()
+                self._remember_available_update(release)
                 self._set_update_status(trf("update_available", value=release))
                 if hasattr(self, "btn_download_update"):
                     self.btn_download_update.setEnabled(True)
             else:
-                self._pending_update_release = None
+                self._remember_available_update(None)
                 self._set_update_status(tr("update_current"))
                 if hasattr(self, "btn_download_update"):
                     self.btn_download_update.setEnabled(False)
             return
+        if isinstance(release, dict) and release.get("source", self.update_source) != self.update_source:
+            return
         if not isinstance(release, dict):
-            self._pending_update_release = None
-            if hasattr(self, "btn_download_update"):
-                self.btn_download_update.setEnabled(False)
             self._set_update_status(trf("update_failed", detail="bad_release"))
             return
         tag = release.get("tag")
         remote = parse_version(tag)
         local = parse_version(APP_VERSION)
         if remote is None or local is None:
-            self._pending_update_release = None
-            if hasattr(self, "btn_download_update"):
-                self.btn_download_update.setEnabled(False)
             self._set_update_status(trf("update_failed", detail="bad_version"))
             return
         if remote > local:
-            self._pending_update_release = release
+            self._remember_available_update(release)
             body, notes_error = release_body(release)
             self._release_notes.prime(tag, body, release.get("notes_error") or notes_error)
             self._sync_release_notes()
@@ -13978,9 +14466,7 @@ class ControlPanel(QWidget):
             if hasattr(self, "btn_download_update"):
                 self.btn_download_update.setEnabled(True)
         else:
-            self._pending_update_release = None
-            if hasattr(self, "btn_download_update"):
-                self.btn_download_update.setEnabled(False)
+            self._remember_available_update(None)
             self._set_update_status(tr("update_current"))
         track_event("update_check_done", remote=str(tag), newer=bool(remote > local), channel=self.update_channel)
 
@@ -14046,7 +14532,7 @@ class ControlPanel(QWidget):
                 self._on_update_progress(0, 0)
                 if hasattr(self, "btn_download_update"):
                     self.btn_download_update.setEnabled(False)
-                worker = UpdateDownloadWorker(url, self)
+                worker = UpdateDownloadWorker(url, self, integrity=release.get("integrity"))
                 worker.progress.connect(self._on_update_progress)
                 worker.finished_download.connect(self._on_update_downloaded)
                 self._update_download_worker = worker
@@ -14135,6 +14621,10 @@ class ControlPanel(QWidget):
                 raise ValueError(str(error))
             self._set_update_status(tr("update_verifying"))
             validate_update_zip(path)
+            downloading = getattr(self, "_downloading_release", None)
+            integrity = downloading.get("integrity") if isinstance(downloading, dict) else None
+            if integrity:
+                verify_downloaded_manifest(path, integrity)
             if not getattr(sys, "frozen", False) or not install_layout_supported(APP_DIR):
                 self._set_update_status(tr("update_source_install_unsupported"))
                 return
@@ -14241,6 +14731,44 @@ class ControlPanel(QWidget):
         if persist:
             self.save_settings()
 
+    def set_submenu_animations_enabled(self, enabled, persist=True):
+        self.submenu_animations_enabled = enabled is True
+        if not self.submenu_animations_enabled:
+            stop = getattr(self, "_stop_submenu_animations", None)
+            if stop is not None:
+                stop(hide_overlay=True, snap_open=True)
+        self.sync_settings_panel()
+        if persist:
+            self.save_settings()
+
+    def set_calculator_history_retention(self, value, persist=True):
+        self.calculator_history_retention = normalize_retention(value)
+        widget = getattr(self, "calculator_widget", None)
+        if widget is not None and not self.runtime_context.paths.practice:
+            widget.history.set_retention(self.calculator_history_retention)
+            widget.refresh_history()
+        self.sync_settings_panel()
+        if persist:
+            self.save_settings()
+
+    def set_language_preference(self, value, persist=True):
+        self.language = normalize_language(value)
+        self.sync_settings_panel()
+        if persist:
+            self.save_settings()
+
+    def set_ui_scale(self, value, persist=True):
+        self.ui_scale_percent = normalize_scale(value)
+        self.sync_settings_panel()
+        if persist:
+            self.save_settings()
+
+    def set_never_prompt_autosave_recovery(self, value, persist=True):
+        self.never_prompt_autosave_recovery = value is True
+        self.sync_settings_panel()
+        if persist:
+            self.save_settings()
+
     def set_ui_radius(self, value, persist=True):
         self.ui_radius = max(self.RADIUS_MIN, min(self.RADIUS_MAX, int(value)))
         self.apply_theme()          # 圆角是样式表的一部分，重新下发即生效
@@ -14259,6 +14787,7 @@ class ControlPanel(QWidget):
             getattr(self, "text_panel", None),
             getattr(self, "settings_panel", None),
             getattr(self, "select_panel", None),
+            getattr(self, "_menu_close_overlay", None),
             getattr(self, "menu_panel", None),
             getattr(self, "calc_panel", None),
             getattr(self, "roster_panel", None),
@@ -14332,6 +14861,7 @@ class ControlPanel(QWidget):
 
     def pause_callbacks(self):
         """暂停所有会重新显示界面的心跳和定时器（进入后台隐藏时调用）"""
+        self._stop_submenu_animations(hide_overlay=True, snap_open=False)
         if hasattr(self, 'timer'):
             self.timer.stop()
         if hasattr(self, 'autosave_timer'):
@@ -14527,6 +15057,7 @@ class ControlPanel(QWidget):
             "infinite_whiteboard": self.infinite_whiteboard,
             "autosave_interval_seconds": self.autosave_interval_seconds,
             "page_copy_placement": self.page_copy_placement,
+            "preserve_original_images": self.preserve_original_images,
             "timer_alarm_volume": self.timer_alarm_volume,
             "annotation_screen": self.annotation_screen,
             "pen_defaults_enabled": bool(self.pen_defaults_enabled),
@@ -14564,7 +15095,7 @@ class ControlPanel(QWidget):
             "logo_y": int(self.logo_window.y()) if hasattr(self, 'logo_window') and self.logo_window else 100,
             "toolbar_x": int(self.toolbar_window.x()) if hasattr(self, 'toolbar_window') and self.toolbar_window else 100,
             "toolbar_y": int(self.toolbar_window.y()) if hasattr(self, 'toolbar_window') and self.toolbar_window else 100,
-            "toolbar_detached": bool(getattr(self, "_toolbar_detached", False)),
+            "toolbar_detached": False,  # Compatibility with older config readers.
             "orientation": self.orientation,
             "draw_state": tool,
             "shape_type": cv.shape_type if cv.shape_type in self.SHAPE_TYPES else "LINE",
@@ -14576,8 +15107,23 @@ class ControlPanel(QWidget):
             "ui_mode": self.ui_mode,
             "ui_radius": int(self.ui_radius),
             "ui_opacity": int(self.ui_opacity),
+            "submenu_animations_enabled": bool(self.submenu_animations_enabled),
+            "calculator_history_retention": normalize_retention(self.calculator_history_retention),
+            "calculator_last_mode": (self.calculator_last_mode
+                                     if self.calculator_last_mode in CALCULATOR_MODES else "basic"),
+            "calculator_angle_mode": self.calculator_angle_mode if self.calculator_angle_mode in ("deg", "rad") else "deg",
+            "calculator_x": (int(self.calc_panel.x()) if self.calc_panel is not None
+                             else (int(self._calculator_saved_pos[0]) if self._calculator_saved_pos else None)),
+            "calculator_y": (int(self.calc_panel.y()) if self.calc_panel is not None
+                             else (int(self._calculator_saved_pos[1]) if self._calculator_saved_pos else None)),
+            "calculator_screen": (self.calc_panel.screen().name() if self.calc_panel is not None and self.calc_panel.screen()
+                                  else (self._calculator_saved_screen or "")),
+            "language": self.language,
+            "ui_scale_percent": self.ui_scale_percent,
+            "never_prompt_autosave_recovery": self.never_prompt_autosave_recovery,
             "update_check_enabled": bool(self.update_check_enabled),
             "update_channel": self.update_channel if self.update_channel in ("stable", "preview") else "stable",
+            "update_source": self.update_source if self.update_source in UPDATE_SOURCES else "github",
         }
 
     def save_settings(self):
@@ -14711,6 +15257,13 @@ class ControlPanel(QWidget):
         default_settings = self.collect_settings()
         # Old configurations always select classic, including a reload after a new scheme.
         default_settings["color_scheme"] = "classic"
+        default_settings.update(language="auto", ui_scale_percent=100,
+                                preserve_original_images=True,
+                                never_prompt_autosave_recovery=False,
+                                submenu_animations_enabled=True,
+                                calculator_history_retention="session",
+                                calculator_last_mode="basic",
+                                calculator_angle_mode="deg")
         default_settings.setdefault("marker_alpha_pct", 35)
         default_settings.setdefault("timer_mode", "DOWN")
         default_settings.setdefault("timer_target", 10)
@@ -14723,7 +15276,7 @@ class ControlPanel(QWidget):
 
         try:
             if os.path.exists(CONFIG_FILE):
-                with open(runtime_file_path(CONFIG_FILE), encoding="utf-8") as f:
+                with open(runtime_file_path(CONFIG_FILE), encoding="utf-8-sig") as f:
                     loaded = json.load(f)
                     if isinstance(loaded, dict):
                         settings.update(loaded)
@@ -14738,9 +15291,32 @@ class ControlPanel(QWidget):
         except Exception as e:
             track_event("config_load_error", error=str(e))
 
+        preferences = InterfacePreferences.from_settings(settings)
+        self.language = preferences.language
+        self.ui_scale_percent = preferences.ui_scale_percent
+        self.never_prompt_autosave_recovery = preferences.never_prompt_autosave_recovery
+        submenu_animations = settings.get("submenu_animations_enabled")
+        self.set_submenu_animations_enabled(
+            submenu_animations if isinstance(submenu_animations, bool) else True,
+            persist=False,
+        )
+        self.calculator_history_retention = normalize_retention(
+            settings.get("calculator_history_retention"))
+        calculator_mode = settings.get("calculator_last_mode")
+        self.calculator_last_mode = calculator_mode if calculator_mode in CALCULATOR_MODES else "basic"
+        calculator_angle = settings.get("calculator_angle_mode")
+        self.calculator_angle_mode = calculator_angle if calculator_angle in ("deg", "rad") else "deg"
+        calculator_x, calculator_y = settings.get("calculator_x"), settings.get("calculator_y")
+        valid_x = isinstance(calculator_x, int) and not isinstance(calculator_x, bool)
+        valid_y = isinstance(calculator_y, int) and not isinstance(calculator_y, bool)
+        self._calculator_saved_pos = ((calculator_x if valid_x else 0, calculator_y if valid_y else 0)
+                                      if valid_x or valid_y else None)
+        calculator_screen = settings.get("calculator_screen")
+        self._calculator_saved_screen = calculator_screen if isinstance(calculator_screen, str) else None
         self.set_autosave_interval(settings.get("autosave_interval_seconds", AUTOSAVE_INTERVAL), persist=False)
         self.set_timer_alarm_volume(settings.get("timer_alarm_volume", 100), persist=False)
         self.set_page_copy_placement(settings.get("page_copy_placement", "after"), persist=False)
+        self.set_preserve_original_images(settings.get("preserve_original_images", True), persist=False)
         self.set_annotation_screen(settings.get("annotation_screen", ""), persist=False, apply=False)
         self.notice_state = normalize_notice_state(settings.get("notice_state"))
         self.whiteboard_auto_pen = settings.get("whiteboard_auto_pen") if isinstance(settings.get("whiteboard_auto_pen"), bool) else True
@@ -14894,14 +15470,10 @@ class ControlPanel(QWidget):
                 if hasattr(self, 'logo_window') and self.logo_window:
                     self.logo_window.move(logo_x, logo_y)
                     self._split_position_restored = True
-                    self._toolbar_detached = bool(settings.get("toolbar_detached", False))
-                    toolbar_x, toolbar_y = settings.get("toolbar_x"), settings.get("toolbar_y")
-                    if (self._toolbar_detached and isinstance(toolbar_x, int)
-                            and isinstance(toolbar_y, int)):
-                        self._toolbar_saved_pos = (toolbar_x, toolbar_y)
-                        self.toolbar_window.move(toolbar_x, toolbar_y)
-                    else:
-                        self._toolbar_detached = False
+                    # Older versions persisted accidental touch drags as a split
+                    # layout. Keep the LOGO anchor and rebuild its attached toolbar.
+                    self._toolbar_detached = False
+                    self._toolbar_saved_pos = None
                     self._sync_split_geometry()
 
             # --- 5.5.0 外观设置 ---
@@ -14923,6 +15495,11 @@ class ControlPanel(QWidget):
             # 旧版的 False 表示完全禁用更新请求，尊重既有偏好；新安装默认自动检查。
             if isinstance(update_check, bool):
                 self.update_check_enabled = update_check
+            update_source = settings.get("update_source")
+            if update_source in ("github", "gitcode"):
+                self.update_source = update_source
+                self._release_notes.set_source(update_source,
+                    lambda tag, source=update_source: fetch_release_notes(tag, source=source))
             update_channel = settings.get("update_channel")
             if update_channel in ("stable", "preview"):
                 self.update_channel = update_channel
@@ -15093,7 +15670,7 @@ class ControlPanel(QWidget):
 
     def offer_autosave_restore(self):
         """Ordinary startup recovery never runs in a practice process."""
-        if not self.runtime_context.ordinary_recovery:
+        if not self.runtime_context.ordinary_recovery or self.never_prompt_autosave_recovery:
             return False
         return self._restore_history_operation()
 
@@ -15276,6 +15853,7 @@ class ControlPanel(QWidget):
 
     def grab_screen(self):
         """抓取当前画布所在屏幕（含已画好的批注），抓取前把面板/浮窗藏起来避免入镜。"""
+        self._stop_submenu_animations(hide_overlay=True, snap_open=True)
         if not self.runtime_context.desktop_capture:
             return self.canvas.render_page_pixmap(self.canvas.capture_page(), self.canvas.size())
         select_visible = self.select_panel.isVisible()
@@ -15741,6 +16319,18 @@ class ControlPanel(QWidget):
         if persist:
             self.save_settings()
         return self.autosave_interval_seconds
+
+    def set_preserve_original_images(self, enabled, persist=True):
+        self.preserve_original_images = enabled if isinstance(enabled, bool) else True
+        if self.canvas is not None:
+            self.canvas._exclude_preserved_images_from_selection()
+            self.sync_selection_controls()
+            self.position_selection_panel(self.canvas.selection_bounds())
+            self.canvas.update()
+        self._sync_document_preferences()
+        if persist:
+            self.save_settings()
+        return self.preserve_original_images
 
     def set_page_copy_placement(self, placement, persist=True):
         normalized = placement if placement in COPY_PLACEMENTS else "after"
@@ -16478,90 +17068,216 @@ class ControlPanel(QWidget):
         self.show_only_sub(None)
         if self.calc_panel is None:
             self.calc_panel, layout = self._make_tool_window(tr("calculator"))
-            self._calc_expr = "0"
+            retention = ("session" if self.runtime_context.paths.practice
+                         else self.calculator_history_retention)
+            history_path = runtime_file_path(
+                os.path.join(DATA_DIR, "calculator-history.json"), write=True)
+            history = CalculatorHistoryStore(history_path, retention=retention)
+            self.calculator_widget = CalculatorPanel(
+                history, translate=tr, event_callback=self._calculator_event,
+                angle_mode=self.calculator_angle_mode,
+                initial_mode=self.calculator_last_mode,
+                decimal_separator=',' if i18n.CURRENT in ('fr', 'es', 'de', 'ru') else '.',
+                touch_button_size=TOUCH_MIN_BUTTON,
+            )
+            self.calculator_scroll = QScrollArea()
+            self.calculator_scroll.setWidgetResizable(True)
+            self.calculator_scroll.setFrameShape(QFrame.Shape.NoFrame)
+            self.calculator_scroll.setWidget(self.calculator_widget)
+            self.calculator_widget.setAutoFillBackground(False)
+            self.calculator_scroll.viewport().setAutoFillBackground(False)
+            layout.addWidget(self.calculator_scroll)
+            self.calculator_widget.layout_changed.connect(self._schedule_calculator_fit)
+            self.calculator_widget.submitted.connect(self._calculator_submitted)
+            self.calculator_widget.mode_changed.connect(self._calculator_mode_changed)
+            self.calculator_widget.angle_changed.connect(self._calculator_angle_changed)
+            self.calculator_widget.history_visibility_changed.connect(
+                self._calculator_history_visibility_changed)
+            self.calculator_widget.history_recalled.connect(
+                self._calculator_history_recalled)
+            self.calculator_widget.settings_requested.connect(self.open_calculator_settings)
+            self.calculator_widget.hide_requested.connect(self.calc_panel.hide)
+            self.calculator_widget.expression_edit.textChanged.connect(
+                self._calculator_expression_changed)
+            self.calculator_widget.expression_edit.textEdited.connect(
+                self._calculator_expression_edited)
+            # Compatibility for C12 teaching and existing third-party callers.
+            self.calc_buttons = self.calculator_widget.basic_buttons
+            for code, button in self.calc_buttons.items():
+                try:
+                    button.clicked.disconnect()
+                except TypeError:
+                    pass
+                button.clicked.connect(
+                    lambda _checked=False, value=code: self._calc_input(value))
+            self._calc_display = self.calculator_widget.expression_edit
+            self._calc_expr = self._calc_display.text()
             self._calc_just_evaluated = False
-            self._calc_display = QLabel("0")
-            self._calc_display.setObjectName("TimerDisplay")
-            self._calc_display.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            self._calc_display.setMinimumWidth(180)
-            layout.addWidget(self._calc_display)
-            keys = [
-                ("C", "C"), ("⌫", "B"), ("%", "%"), ("÷", "/"),
-                ("7", "7"), ("8", "8"), ("9", "9"), ("×", "*"),
-                ("4", "4"), ("5", "5"), ("6", "6"), ("−", "-"),
-                ("1", "1"), ("2", "2"), ("3", "3"), ("+", "+"),
-                ("±", "N"), ("0", "0"), (".", "."), ("=", "="),
-            ]
-            grid = QGridLayout(); grid.setSpacing(3)
-            self.calc_buttons = {}
-            for i, (label, code) in enumerate(keys):
-                btn = QPushButton(label)
-                self.calc_buttons[code] = btn
-                btn.setFixedSize(52, TOUCH_MIN_BUTTON)
-                btn.clicked.connect(lambda _=False, c=code: self._calc_input(c))
-                grid.addWidget(btn, i // 4, i % 4)
-            layout.addLayout(grid)
-            copy_btn = QPushButton(tr("copy_result"))
-            copy_btn.clicked.connect(self._calc_copy)
-            layout.addWidget(copy_btn)
-        self.calc_panel.adjustSize()
-        screen = self.screen_geometry(self) or QApplication.primaryScreen().availableGeometry()
-        self.calc_panel.move(screen.center().x() - self.calc_panel.width() // 2,
-                             screen.center().y() - self.calc_panel.height() // 2)
+            self.calc_panel.setMinimumSize(0, 0)
+            self._fit_calculator_window()
+            if not self._restore_calculator_position():
+                screen = self.screen_geometry(self) or QApplication.primaryScreen().availableGeometry()
+                self.calc_panel.move(screen.center().x() - self.calc_panel.width() // 2,
+                                     screen.center().y() - self.calc_panel.height() // 2)
+        else:
+            self.calculator_widget.set_mode(self.calculator_last_mode, emit=False)
+        self._fit_calculator_window()
         self.calc_panel.show()
+        if not getattr(self, '_calculator_screens_connected', False):
+            self._calculator_screens_connected = True
+            self.calc_panel.windowHandle().screenChanged.connect(self._schedule_calculator_fit)
+            QGuiApplication.instance().screenRemoved.connect(self._schedule_calculator_fit)
+            for screen in QGuiApplication.screens():
+                screen.availableGeometryChanged.connect(self._schedule_calculator_fit)
         self.raise_floating(self.calc_panel)
         self.heartbeat_refresh()
         track_event("calculator_opened")
 
+    def open_calculator_settings(self):
+        self.open_settings_panel()
+        target = getattr(self, 'calculator_history_retention_label', None)
+        if target is not None:
+            self.settings_scroll.ensureWidgetVisible(target)
+
+    def _schedule_calculator_fit(self):
+        if getattr(self, '_calculator_fit_pending', False):
+            return
+        self._calculator_fit_pending = True
+        QTimer.singleShot(0, self._fit_calculator_window)
+
+    def _fit_calculator_window(self):
+        self._calculator_fit_pending = False
+        window = self.calc_panel
+        widget = self.calculator_widget
+        if window is None or widget is None:
+            return
+        screen_geometry = self._calculator_available_geometry()
+        if screen_geometry is None:
+            return
+        available = screen_geometry.adjusted(8, 8, -8, -8)
+        # Hidden modes and the history drawer never enlarge the compact page.
+        history_open = widget.history_toggle.isChecked()
+        header_width = sum(max(52, button.fontMetrics().horizontalAdvance(button.text()) + 20)
+                           for button in (*widget.mode_buttons.values(), widget.history_toggle)) + 48
+        compact = max(400, header_width, widget.stack.minimumSizeHint().width() + 28)
+        width = compact
+        if history_open:
+            width = max(760, compact + 310) if available.width() >= max(760, compact + 310) else compact
+        width = min(width, available.width())
+        widget.update_responsive_layout(width - 24)
+        window.resize(max(1, width), window.height())
+        window.layout().activate()
+        widget.stack.layout().invalidate()
+        widget.stack.layout().activate()
+        widget.layout().invalidate()
+        widget.layout().activate()
+        height = widget.sizeHint().height() + 64
+        window.resize(max(1, width), max(1, min(height, available.height())))
+        window.layout().activate()
+        x, y = clamp_rect(window.x(), window.y(), window.width(), window.height(),
+                          (available.x(), available.y(), available.width(), available.height()))
+        window.move(x, y)
+
+    def _calculator_available_geometry(self):
+        window = self.calc_panel
+        screen = QGuiApplication.screenAt(window.frameGeometry().center()) or window.screen() or QGuiApplication.primaryScreen()
+        return screen.availableGeometry() if screen is not None else None
+
+    def _restore_calculator_position(self):
+        saved = self._calculator_saved_pos
+        if not saved or self.calc_panel is None:
+            return False
+        screens = []
+        for screen in QGuiApplication.screens():
+            geometry = screen.availableGeometry()
+            screens.append({
+                "name": screen.name(),
+                "geometry": (geometry.left(), geometry.top(), geometry.width(), geometry.height()),
+            })
+        selected = choose_screen(saved[0], saved[1], screens, self._calculator_saved_screen)
+        if not selected:
+            return False
+        x, y = clamp_rect(saved[0], saved[1], self.calc_panel.width(),
+                          self.calc_panel.height(), selected["geometry"])
+        self.calc_panel.move(x, y)
+        return True
+
+    def _calculator_event(self, name, **payload):
+        track_event(name, **payload)
+
+    def _calculator_expression_changed(self, text):
+        self._calc_expr = str(text)
+
+    def _calculator_submitted(self, mode, expression, result):
+        self._calc_expr = str(result)
+        self._calc_just_evaluated = mode in ("basic", "scientific")
+        if mode == "scientific":
+            self._emit_calculator_teaching_event("calculator.calculated", {
+                "mode": mode, "expression": str(expression), "result": str(result),
+                "display": str(result),
+            })
+
+    def _calculator_mode_changed(self, mode):
+        self.calculator_last_mode = mode if mode in CALCULATOR_MODES else "basic"
+        self._emit_calculator_teaching_event(
+            "calculator.mode_changed", {"mode": self.calculator_last_mode})
+        self.save_settings()
+
+    def _calculator_angle_changed(self, mode):
+        self.calculator_angle_mode = mode if mode in ("deg", "rad") else "deg"
+        self._emit_calculator_teaching_event(
+            "calculator.angle_changed", {"angle": self.calculator_angle_mode})
+        self.save_settings()
+
+    def _calculator_expression_edited(self, expression):
+        if self.calculator_widget is None or self.calculator_widget.mode != "scientific":
+            return
+        self._emit_calculator_teaching_event("calculator.expression_entered", {
+            "expression": str(expression),
+            "preview": self.calculator_widget.preview_label.text(),
+        })
+
+    def _calculator_history_visibility_changed(self, visible):
+        self._emit_calculator_teaching_event(
+            "calculator.history_toggled", {"visible": bool(visible)})
+
+    def _calculator_history_recalled(self, entry_id):
+        if self.calculator_widget is None:
+            return
+        entry = next((item for item in self.calculator_widget.history.entries
+                      if item.id == entry_id), None)
+        if entry is None:
+            return
+        self._emit_calculator_teaching_event("calculator.history_recalled", {
+            "mode": entry.mode, "expression": entry.input, "result": entry.result,
+        })
+
+    def _emit_calculator_teaching_event(self, name, details):
+        bus = getattr(self, "teaching_events", None)
+        if bus is None:
+            return
+        operation = bus.begin_operation(name)
+        if operation is None:
+            return
+        try:
+            bus.emit_result(operation, name, "success", details)
+        finally:
+            bus.discard_operation(operation)
+
     @toolbox_action('calculator.input')
     def _calc_input(self, code):
-        exp = self._calc_expr
-        if code == "C":
-            exp = "0"
-            self._calc_just_evaluated = False
-        elif code == "B":
-            # 退格遇到错误/溢出占位串直接清零，否则会留下半个词（如「错」/「溢」）。
-            if exp in (tr("calc_state_error"), tr("calc_state_overflow")):
-                exp = "0"
-            else:
-                exp = exp[:-1] if len(exp) > 1 else "0"
-            self._calc_just_evaluated = False
-        elif code == "N":
-            # 按下「±」：若刚按下「=」得到结果，应当对结果取负，而不是把结果清成 0 再试图取负。
-            # 旧逻辑里 `if just_evaluated: exp = "0"` 是误抄自数字输入分支的复位，会让
-            # 3+2= 后按 ± 显示 0 而不是 -5。这里去掉那条复位，直接对当前显示取反。
-            if exp.startswith("-"):
-                exp = exp[1:] or "0"
-            else:
-                exp = "-" + exp if exp != "0" else exp
-            self._calc_just_evaluated = False
-        elif code == "=":
-            exp = self._calc_eval(exp)
-            self._calc_just_evaluated = True
-        elif code == "%":
-            try:
-                exp = self._calc_format(float(self._calc_eval(exp)) / 100.0)
-            except Exception:
-                exp = tr("calc_state_error")
-            self._calc_just_evaluated = True
-        elif code in ("+", "-", "*", "/"):
-            if exp in (tr("calc_state_error"), tr("calc_state_overflow")):
-                exp = "0"
-            exp += code
-            self._calc_just_evaluated = False
-        else:
-            if self._calc_just_evaluated or exp in ("0", tr("calc_state_error"), tr("calc_state_overflow")):
-                exp = code
-            else:
-                exp += code
-            self._calc_just_evaluated = False
-        self._calc_expr = exp
-        if self._calc_display:
-            self._calc_display.setText(exp)
+        if self.calc_panel is None or self.calculator_widget is None:
+            self.open_calculator()
+        self.calculator_widget.input_code(str(code))
+        self._calc_expr = self.calculator_widget.expression_edit.text()
+        self._calc_just_evaluated = (
+            str(code) == "=" and not bool(self.calculator_widget.error_label.text()))
 
     def _calc_eval(self, expr):
         try:
-            return self._calc_format(safe_calculate(expr))
+            engine = (self.calculator_widget.engine if self.calculator_widget is not None
+                      else CalculatorEngine(angle_mode=self.calculator_angle_mode))
+            return engine.calculate(str(expr)).display
         except CalculatorError:
             return tr("calc_state_error")
         except Exception:
@@ -16581,8 +17297,8 @@ class ControlPanel(QWidget):
             return tr("calc_state_error")
 
     def _calc_copy(self):
-        QGuiApplication.clipboard().setText(str(self._calc_expr))
-        track_event("calculator_copied", value=str(self._calc_expr))
+        if self.calculator_widget is not None:
+            self.calculator_widget.copy_result()
 
     # --- 随机点名 ---
     def load_roster(self):
@@ -16987,7 +17703,7 @@ class ControlPanel(QWidget):
         if record_undo:
             cv.push_undo()
         cv.image_items.append(item)
-        cv.selected_ids = {item["id"]}
+        cv.selected_ids = set() if cv.preserve_original_images else {item["id"]}
         if finalize:
             if cv.whiteboard_mode:
                 cv.save_current_page()
@@ -17124,10 +17840,28 @@ if __name__ == "__main__":
             track_event("unhandled_exception", error=f"{exc_type.__name__}: {exc}")
 
     sys.excepthook = _log_unhandled
+    initialize_interface_preferences()
+    from single_instance import SingleInstanceGuard
     set_windows_app_user_model_id()
     LOGGER.info("MyScreenDraw %s starting (lang=%s)", APP_VERSION, CURRENT)
 
     app = QApplication(sys.argv)
+    instance_guard = None
+    if "--smoke" not in sys.argv[1:] and "--smoke-ui" not in sys.argv[1:]:
+        try:
+            if _INSTANCE_STARTUP is not None and _INSTANCE_STARTUP.role == "primary":
+                instance_guard = SingleInstanceGuard(lease=_INSTANCE_STARTUP.lease, parent=app)
+                instance_guard.start_primary_server()
+            else:
+                # Non-Windows keeps the existing Qt lock/server fallback.
+                instance_guard = SingleInstanceGuard(parent=app)
+                if not instance_guard.acquire_or_notify():
+                    LOGGER.info("Existing MyScreenDraw instance activated")
+                    sys.exit(0)
+        except RuntimeError:
+            LOGGER.exception("Unable to establish single-instance endpoint")
+            sys.exit(1)
+        app.aboutToQuit.connect(instance_guard.close)
     # The build pipeline uses this bounded path to verify that a frozen bundle can
     # import Qt, create its runtime directories, and exit without opening windows.
     if "--smoke" in sys.argv[1:]:
@@ -17147,6 +17881,8 @@ if __name__ == "__main__":
         LOGGER.exception("窗口创建失败")
         QMessageBox.critical(None, tr("app"), trf("err_window_create", detail=str(exc)))
         sys.exit(1)
+    if instance_guard is not None:
+        instance_guard.activation_requested.connect(pnl.lifecycle.activate_from_external_launch)
     if "--smoke-ui" in sys.argv[1:]:
         # The release pipeline uses this bounded path to construct both production
         # windows without entering the event loop or showing recovery dialogs.
@@ -17193,6 +17929,7 @@ if __name__ == "__main__":
     # Core startup is ready even if the user pauses at the recovery dialog.
     QTimer.singleShot(0, acknowledge_update_startup)
     QTimer.singleShot(0, pnl.begin_update_history_session)
+    pnl.schedule_startup_update_check()
     restart_file = None
     argv = sys.argv[1:]
     if "--restore" in argv:

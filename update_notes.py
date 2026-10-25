@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Local installed-version history and presentation of GitHub Release notes.
+"""Local installed-version history and presentation of provider-scoped Release notes.
 
 History is separate from settings and never infers installations from downloads.
 Network access is injected by the application; widgets do not fetch or own threads.
@@ -50,6 +50,15 @@ def release_body(release):
     return body, None
 
 
+def note_key(tag, source="github"):
+    tag = version_tag(tag)
+    return ("gitcode:" + tag if source == "gitcode" else tag) if tag else None
+
+
+def note_tag(key):
+    return version_tag(key.removeprefix("gitcode:")) if isinstance(key, str) else None
+
+
 class UpdateHistory:
     """Lazy, bounded local record. Read errors never overwrite the damaged file."""
 
@@ -84,8 +93,8 @@ class UpdateHistory:
                 if tag and tag not in seen and isinstance(when, str) and len(when) <= 64:
                     self.installed.append({"tag": tag, "first_seen": when})
                     seen.add(tag)
-            for tag, body in list(data["notes"].items())[:MAX_VERSIONS + 1]:
-                key = version_tag(tag)
+            for tag, body in list(data["notes"].items())[:2 * (MAX_VERSIONS + 1)]:
+                key = note_key(note_tag(tag), "gitcode" if tag.startswith("gitcode:") else "github")
                 text, error = release_body({"body": body})
                 if key and error is None:
                     self.notes[key] = text
@@ -131,12 +140,14 @@ class UpdateHistory:
         self._save()
 
     def _prune_notes(self, candidate):
-        keep = {item["tag"] for item in self.installed} | {candidate}
+        keep = {item["tag"] for item in self.installed}
+        keep |= {"gitcode:" + tag for tag in keep}
+        keep.add(candidate)
         self.notes = {tag: body for tag, body in self.notes.items() if tag in keep}
 
-    def remember_notes(self, tag, body):
+    def remember_notes(self, tag, body, source="github"):
         self.load()
-        tag = version_tag(tag)
+        tag = note_key(tag, source)
         body, error = release_body({"body": body})
         if not tag or error or self.read_error:
             return
@@ -176,16 +187,34 @@ class NotesController(QObject):
         self.history = UpdateHistory(path)
         self.fetch, self.allowed = fetch, allowed
         self.states = {}
+        self.source = "github"
+        self._last_requested = None
         self._worker = None
         self._wanted = None
         self._stopping = False
+
+    def set_source(self, source, fetch):
+        if source not in ("github", "gitcode"):
+            return
+        self.fetch = fetch
+        if source == self.source:
+            return
+        self.source = source
+        tags = list(self.states)
+        self.states.clear()
+        self._wanted = None
+        for tag in tags:
+            self.changed.emit(tag)
+        if self._last_requested:
+            self.request(self._last_requested)
 
     def state(self, tag):
         tag = version_tag(tag)
         if tag in self.states:
             return self.states[tag]
         self.history.load()
-        return (self.history.notes[tag], None) if tag in self.history.notes else (None, None)
+        key = note_key(tag, self.source)
+        return (self.history.notes[key], None) if key in self.history.notes else (None, None)
 
     def prime(self, tag, body, error):
         tag = version_tag(tag)
@@ -195,13 +224,14 @@ class NotesController(QObject):
             body, error = release_body({"body": body})
         self.states[tag] = (body, error)
         if error is None and body is not None:
-            self.history.remember_notes(tag, body)
+            self.history.remember_notes(tag, body, self.source)
         self.changed.emit(tag)
 
     def request(self, tag, *, force=False):
         tag = version_tag(tag)
         if not tag or self._stopping:
             return
+        self._last_requested = tag
         self._wanted = None
         body, error = self.state(tag)
         if not force and (body is not None or error is not None):
@@ -215,12 +245,13 @@ class NotesController(QObject):
         if self._worker is not None:
             # Switching the selector does not spawn unbounded requests. The active
             # response is still cached under its own tag, never under the new one.
-            self._wanted = tag if self._worker.tag != tag else None
+            self._wanted = tag if self._worker.tag != tag or self._worker.source != self.source else None
             return
         self._start(tag)
 
     def _start(self, tag):
         worker = NotesWorker(tag, self.fetch, self)
+        worker.source = self.source
         worker.result.connect(self._received)
         worker.finished.connect(self._finished)
         self._worker = worker
@@ -228,6 +259,11 @@ class NotesController(QObject):
 
     def _received(self, tag, body, error):
         if self._stopping:
+            return
+        worker = self.sender()
+        if isinstance(worker, NotesWorker) and worker.source != self.source:
+            if error is None and body is not None:
+                self.history.remember_notes(tag, body, worker.source)
             return
         if not self.allowed():
             body, error = None, "notes_unavailable"

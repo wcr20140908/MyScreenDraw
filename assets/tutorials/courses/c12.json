@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "id": "c12",
-  "revision": 2,
+  "revision": 3,
   "compat_revision": 1,
   "title_key": "teaching_toolbox_title",
   "chapters": [
@@ -104,6 +104,171 @@
           "id": "done",
           "kind": "information",
           "title_key": "calculator",
+          "body_key": "teaching_toolbox_done",
+          "next": "end_chapter"
+        }
+      ]
+    },
+    {
+      "id": "c12.scientific_calculator",
+      "title_key": "calculator_mode_scientific",
+      "fixture": "toolbox.c12.scientific_calculator",
+      "steps": [
+        {
+          "id": "intro",
+          "kind": "information",
+          "title_key": "calculator_mode_scientific",
+          "body_key": "teaching_scientific_intro",
+          "next": "open"
+        },
+        {
+          "id": "open",
+          "title_key": "calculator_mode_scientific",
+          "body_key": "teaching_calc_open",
+          "target": "tools.calculator",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "calculator.opened",
+            "outcome": "success",
+            "equals": {
+              "visible": true
+            }
+          },
+          "next": "mode"
+        },
+        {
+          "id": "mode",
+          "title_key": "calculator_mode_scientific",
+          "body_key": "teaching_scientific_mode",
+          "target": "calculator.mode_scientific",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "calculator.mode_changed",
+            "outcome": "success",
+            "equals": {
+              "mode": "scientific"
+            }
+          },
+          "next": "angle"
+        },
+        {
+          "id": "angle",
+          "title_key": "calculator_mode_scientific",
+          "body_key": "teaching_scientific_angle",
+          "target": "calculator.angle",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "calculator.angle_changed",
+            "outcome": "success",
+            "equals": {
+              "angle": "deg"
+            }
+          },
+          "next": "expression"
+        },
+        {
+          "id": "expression",
+          "title_key": "calculator_mode_scientific",
+          "body_key": "teaching_scientific_expression",
+          "target": "calculator.expression",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "calculator.expression_entered",
+            "outcome": "success",
+            "equals": {
+              "expression": "sin(30)+√16",
+              "preview": "4.5"
+            }
+          },
+          "next": "calculate"
+        },
+        {
+          "id": "calculate",
+          "title_key": "calculator_mode_scientific",
+          "body_key": "teaching_scientific_calculate",
+          "target": "calculator.scientific_equals",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "calculator.calculated",
+            "outcome": "success",
+            "equals": {
+              "mode": "scientific",
+              "expression": "sin(30)+√16",
+              "result": "4.5",
+              "display": "4.5"
+            }
+          },
+          "next": "ans_expression"
+        },
+        {
+          "id": "ans_expression",
+          "title_key": "calculator_mode_scientific",
+          "body_key": "teaching_scientific_ans_expression",
+          "target": "calculator.expression",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "calculator.expression_entered",
+            "outcome": "success",
+            "equals": {
+              "expression": "Ans×2",
+              "preview": "9"
+            }
+          },
+          "next": "ans_calculate"
+        },
+        {
+          "id": "ans_calculate",
+          "title_key": "calculator_mode_scientific",
+          "body_key": "teaching_scientific_ans_calculate",
+          "target": "calculator.scientific_equals",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "calculator.calculated",
+            "outcome": "success",
+            "equals": {
+              "mode": "scientific",
+              "expression": "Ans×2",
+              "result": "9",
+              "display": "9"
+            }
+          },
+          "next": "history_open"
+        },
+        {
+          "id": "history_open",
+          "title_key": "calculator_history",
+          "body_key": "teaching_scientific_history_open",
+          "target": "calculator.history_toggle",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "calculator.history_toggled",
+            "outcome": "success",
+            "equals": {
+              "visible": true
+            }
+          },
+          "next": "history_restore"
+        },
+        {
+          "id": "history_restore",
+          "title_key": "calculator_history",
+          "body_key": "teaching_scientific_history_restore",
+          "target": "calculator.history_record",
+          "input_policy": "target_only",
+          "wait": {
+            "event": "calculator.history_recalled",
+            "outcome": "success",
+            "equals": {
+              "mode": "scientific",
+              "expression": "sin(30)+√16"
+            }
+          },
+          "next": "done"
+        },
+        {
+          "id": "done",
+          "kind": "information",
+          "title_key": "calculator_mode_scientific",
           "body_key": "teaching_toolbox_done",
           "next": "end_chapter"
         }

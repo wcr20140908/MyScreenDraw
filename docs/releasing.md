@@ -1,6 +1,6 @@
 # 构建与发布 / Building and releasing
 
-**当前工作树为 v6.2.0 正式版（2026-10-18）**。`version.py` 及构建/发布脚本统一使用 6.2.0。本页说明可复查的构建、打包与发布流程。
+**当前工作树为 v6.3.0（2026-10-25）**。`version.py` 及构建/发布脚本统一使用 6.3.0。本页说明可复查的构建、打包与发布流程。
 
 历史状态保留：**v6.0.1 已发布并回下载核验**，其构建门禁、隔离真实包重启、手动迁移及公开附件结果见 [6.0.1 验证记录](release-validation-6.0.1.md)。6.2.0 的下载与校验入口已切换为当前正式 Release。
 
@@ -20,7 +20,7 @@ python -m pip install pytest pytest-subtests
 
 ## 脚本实际做什么
 
-1. 校验 `version.py` 与脚本中的版本门禁一致（当前锁定 `6.2.0`），清理旧构建树并在测试前记录打包源码快照。
+1. 校验 `version.py` 与脚本中的版本门禁一致（当前锁定 `6.3.0`），清理旧构建树并在测试前记录打包源码快照。
 2. 执行离屏 pytest 门禁，排除真实触控层。
 3. 使用 `MyScreenDraw.spec` 生成无控制台、禁用 UPX 的 onedir 包。spec 在依赖分析期间将 System32 放在 PATH 前，避免外部工具的同名系统 DLL（例如不兼容的 ICU）污染产物；分析结束后恢复环境。
 4. 检查许可证、Qt 平台/图片/PDF/SVG 依赖，以 `release_artifact.py check-package --root ...` 拒绝用户数据、截图、源码和运行日志混入，同时要求精确教学资源清单与源码哈希一致；冒烟前后都检查。
@@ -29,7 +29,7 @@ python -m pip install pytest pytest-subtests
 7. 打包 ZIP（排除 `data/`、`exports/`），执行 `release_artifact.py` 归档校验，再比对全部解压文件，并以同样的 offscreen 保护验证 EXE 启动与哈希。
 8. 全部检查通过后，候选 ZIP 提升为正式文件名，同时保存 `.sha256` 和 `build/release-receipts/` 下的验收收据。收据绑定包、EXE 及打包源码；不是数字签名。
 
-成功构建后输出为 `dist/MyScreenDraw/`、`MyScreenDraw-v6.2.0-windows-x64.zip` 和同名 `.zip.sha256`。ZIP 根目录直接包含 `MyScreenDraw.exe`、`_internal/`、许可证和清单；不能额外套一层目录，也不能上传源码 ZIP 冒充便携版。
+成功构建后输出为 `dist/MyScreenDraw/`、`MyScreenDraw-v6.3.0-windows-x64.zip` 和同名 `.zip.sha256`。ZIP 根目录直接包含 `MyScreenDraw.exe`、`_internal/`、许可证和清单；不能额外套一层目录，也不能上传源码 ZIP 冒充便携版。
 
 发布流程要求测试、暂存 EXE、ZIP 完整性与解压文件核验、解压 EXE 启动、源码/提交/收据/校验和一致；上传前后再次只读核验，确保公开附件与发布提交完全一致。
 
@@ -97,3 +97,15 @@ python -m pip install pytest pytest-subtests
 从 GitHub Release 下载实际附件，不要只检查本地构建目录。比对 ZIP SHA-256，在新目录解压验证启动，确认版本显示、EXE 和 `_internal` 完整。Release 首屏和 README 提供便携 ZIP 直链，并明确 GitHub 自动生成的 Source code 附件不能直接运行。
 
 签名策略见 [代码签名说明](code-signing.md)。仅更新文档或创建 commit 不会更新已发布 ZIP；不要声称旧附件包含后来改动。
+
+## 6.3.0 双平台发布
+
+两平台 main 和 v6.3.0 标签必须绑定同一验收提交。build.ps1 保留源码/教学资源/归档/EXE/收据门禁；签名工具只签署已有验收收据对应的字节，不能重新生成校验文件给未验收的包放行。
+
+1. 提交并推送两平台 main，执行 build.ps1 完整验收；私有实屏和安装事务证据留在 .ccgui/ 或 .superpowers/。
+2. 运行 python -B sign_update.py sign --commit <SHA> --key <本地 Ed25519 私钥路径>；私钥应在仓库元数据外部安全备份并保持本地，客户端只带公钥。
+3. 验收后将两平台版本标签绑定同一提交；以进程环境 GITHUB_TOKEN / GITCODE_TOKEN 运行 python -B publish_release.py --commit <SHA>。凭据不得写入脚本、Git remote、日志或发布附件。
+4. 脚本核对收据/签名/两平台提交，创建 GitHub draft 和 GitCode pre，分别上传 ZIP、.sha256、MyScreenDraw-v6.3.0-update.json，回下载核对后才发布。GitCode 使用官方 upload_url 返回的地址与请求头上传，source 类型自动归档不能当作安装包。
+5. 正式发布后匿名重新下载两个平台的三个附件，比对同一 SHA-256；可用 --verify-public 单独复核。若中断，--resume 仅复用同标签、同名称、同说明且附件字节一致的发布，不删除或覆盖不同附件。
+
+客户端使用选中的匿名 API，GitCode 不使用 GitHub 的 releases/latest 路径；6.3.0 起签名描述文件缺失或不符就拒绝候选，不静默回退到旧版本或另一线路。设置/历史说明和下载取消仍须回归。

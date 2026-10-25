@@ -6,7 +6,7 @@ $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location -LiteralPath $root
 $repo = 'wcr20140908/MyScreenDraw'
 $version = (& python -c "from version import VERSION; print(VERSION)").Trim()
-if ($LASTEXITCODE -ne 0 -or $version -ne '6.2.0') { throw 'Unexpected release version' }
+if ($LASTEXITCODE -ne 0 -or $version -ne '6.3.0') { throw 'Unexpected release version' }
 $tag = "v$version"
 $asset = "MyScreenDraw-$tag-windows-x64.zip"
 $assetPath = Join-Path $root $asset
@@ -20,6 +20,9 @@ $verificationJson = python -B release_artifact.py verify --zip $assetPath --vers
 if ($LASTEXITCODE -ne 0) { throw 'Release artifact/source/commit verification failed' }
 $verified = $verificationJson | ConvertFrom-Json
 $hash = $verified.zip_sha256
+$descriptorPath = Join-Path $root "MyScreenDraw-$tag-update.json"
+python -B sign_update.py verify --root $root --commit $Commit
+if ($LASTEXITCODE -ne 0) { throw 'Signed update descriptor verification failed' }
 $token = $env:GITHUB_TOKEN
 if (-not $token) { throw 'GITHUB_TOKEN environment variable not set' }
 $headers = @{
@@ -51,7 +54,7 @@ $payload = @{
 } | ConvertTo-Json -Depth 10
 $release = Invoke-RestMethod -Uri "$api/releases" -Method Post -Headers $headers -Body ([Text.Encoding]::UTF8.GetBytes($payload)) -ContentType 'application/json; charset=utf-8'
 $upload = $release.upload_url -replace '\{.*\}', ''
-foreach ($path in @($assetPath, $checksumPath)) {
+foreach ($path in @($assetPath, $checksumPath, $descriptorPath)) {
     $name = Split-Path -Leaf $path
     $mime = if ($path.EndsWith('.zip')) { 'application/zip' } else { 'text/plain' }
     $uploaded = Invoke-RestMethod -Uri ($upload + '?name=' + [uri]::EscapeDataString($name)) -Method Post -Headers $headers -ContentType $mime -InFile $path

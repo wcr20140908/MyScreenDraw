@@ -22,3 +22,8 @@ PyQt6_sip==13.11.1
 # --- pynput 在 Windows 上的传递依赖 ---
 pywin32==312
 six==1.17.0
+
+# --- 更新描述文件签名验证 ---
+cryptography==50.0.0
+cffi==2.0.0
+pycparser==3.0

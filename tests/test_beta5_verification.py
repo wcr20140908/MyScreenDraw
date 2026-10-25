@@ -115,8 +115,8 @@ class Beta5SplitUiTests(unittest.TestCase):
         avail = self._avail()
         self.assertTrue(avail.contains(tb.frameGeometry()), (tb.frameGeometry(), avail))
         if avail.width() < 900:
-            # 离屏 800px 宽：一行 14 个按钮放不下，必须折成两行而不是被 clamp 到 x=0
-            self.assertEqual(tb._main_rows, 2)
+            # 长翻译可能需要两行以上；关键是继续折行直到整栏进入可用区。
+            self.assertGreaterEqual(tb._main_rows, 2)
         self.assertEqual(logo.height(), tb.height())
         self.assertEqual(logo.width(), toolbar_windows.LOGO_THICKNESS)
         self.assertEqual(tb.y(), logo.y())

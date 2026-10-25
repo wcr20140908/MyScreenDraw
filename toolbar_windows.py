@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 BUTTON_WIDTH = 56
 BUTTON_HEIGHT = 44
 BUTTON_HEIGHT_MIN = 28      # 再矮图标和文字就叠在一起了
-BUTTON_WIDTH_MAX = 76       # 最长的文案（如 Durchsichtig）也不至于把栏撑得太宽
+BUTTON_WIDTH_MAX = 160      # 完整容纳德语等较长文案；横版通过增加行数收进屏幕
 LOGO_THICKNESS = 40         # 竖版 LOGO 的高度 / 横版 LOGO 的宽度
 LOGO_GAP = 2                # LOGO 与工具栏之间的缝
 
@@ -121,7 +121,7 @@ class LogoWindow(QWidget):
             elif event.type() == event.Type.MouseMove:
                 if event.buttons() & Qt.MouseButton.LeftButton and self._drag_offset is not None:
                     delta = event.globalPosition().toPoint() - self._press_pos
-                    if not self._dragging and (abs(delta.x()) > 5 or abs(delta.y()) > 5):
+                    if not self._dragging and delta.manhattanLength() >= QApplication.startDragDistance():
                         self._dragging = True
                         # The drag consumes release, so cancel QPushButton press state now.
                         self.logo_btn.setDown(False)
@@ -196,7 +196,7 @@ class LogoWindow(QWidget):
 
 
 class ToolbarWindow(QWidget):
-    """工具栏独立窗口：显示所有工具按钮，可独立拖动"""
+    """工具栏窗口：显示所有工具按钮，拖动时与 LOGO 整体移动"""
 
     position_changed = pyqtSignal(QPoint)
     # 白板控制按钮的key。翻页条已经挪到右下角的跑道控件，主栏只留白/黑板切换。
@@ -213,6 +213,8 @@ class ToolbarWindow(QWidget):
         self.setWindowIcon(QIcon())
 
         self._drag_offset = None
+        self._press_pos = None
+        self._dragging = False
         self.orientation = "portrait"
         self.icon_buttons = {}
         self._button_width = BUTTON_WIDTH
@@ -257,28 +259,34 @@ class ToolbarWindow(QWidget):
 
     # --- 拖动 ---
     def mousePressEvent(self, event):
-        """鼠标按下：记录拖动起始点"""
         if event.button() == Qt.MouseButton.LeftButton:
-            self._drag_offset = event.globalPosition().toPoint() - self.pos()
+            self._press_pos = event.globalPosition().toPoint()
+            self._drag_offset = self._press_pos - self.pos()
+            self._dragging = False
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        """鼠标移动：拖动窗口"""
         if event.buttons() & Qt.MouseButton.LeftButton and self._drag_offset is not None:
-            target = event.globalPosition().toPoint() - self._drag_offset
-            x, y = clamp_point_into(target.x(), target.y(), self.width(), self.height(),
-                                    _available_rect(self))
-            self.move(x, y)
-            self.position_changed.emit(self.pos())
+            pointer = event.globalPosition().toPoint()
+            if not self._dragging:
+                if (pointer - self._press_pos).manhattanLength() < QApplication.startDragDistance():
+                    super().mouseMoveEvent(event)
+                    return
+                self._dragging = True
+            # The panel clamps the entire LOGO/toolbar pair. Clamping this window
+            # first loses the pointer offset at the top/left screen edges.
+            target = pointer - self._drag_offset
+            self.move(target)
+            self.position_changed.emit(target)
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
-        """鼠标释放：结束拖动"""
         if event.button() == Qt.MouseButton.LeftButton:
             self._drag_offset = None
+            self._press_pos = None
+            self._dragging = False
         super().mouseReleaseEvent(event)
 
-    # --- 布局 ---
     def set_orientation(self, orientation):
         """切换横版/竖版布局"""
         if self.orientation == orientation:
@@ -360,11 +368,12 @@ class ToolbarWindow(QWidget):
                 self._place_buttons()
                 self._fit_to_content()
         else:
-            # 横版一行 14 个按钮约 850px，窄屏（200% 缩放的 1080p 只有 960 逻辑像素）
-            # 放不下就折成两行，比让整栏伸出屏幕右边被 clamp 到 x=0 好。
+            # 长翻译会把单颗按钮撑宽。按需继续增加行数，直到 LOGO 与工具栏的组合
+            # 能放进当前逻辑屏宽；200% 缩放的 1080p 只有 960 个逻辑像素。
             limit = avail.width() - LOGO_THICKNESS - LOGO_GAP
-            if self.width() > limit:
-                self._main_rows = 2
+            visible = max(1, sum(1 for btn in self._main_buttons() if not btn.isHidden()))
+            while self.width() > limit and self._main_rows < visible:
+                self._main_rows += 1
                 self._place_buttons()
                 self._fit_to_content()
         self.clamp_into_screen()
@@ -405,13 +414,11 @@ class ToolbarWindow(QWidget):
     def _measure_button_width(self):
         """按钮宽度由最长文案决定：英文的 "Whiteboard" 比中文长得多，56px 会把字截掉。
 
-        白板入口的文案在「进入白板/退出白板」之间切换，退出文案更长，
-        把它算进去会让进白板时整栏变宽。入口按钮单独放宽，其它按钮保持原宽。
+        白板入口在「进入／退出白板」之间变化；每次状态同步都会重新布局，因此也要
+        纳入测量，避免较长的退出文案被裁掉。
         """
         widest = 0
-        for key, btn in self.icon_buttons.items():
-            if key == "whiteboard":
-                continue
+        for btn in self.icon_buttons.values():
             text = btn.text()
             if not text:
                 continue

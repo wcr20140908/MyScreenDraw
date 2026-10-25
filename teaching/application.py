@@ -1015,6 +1015,9 @@ class ApplicationTeachingHost(QObject):
                             settings = getattr(self.panel, 'settings_panel', None)
                             if settings is not None and not sip.isdeleted(settings):
                                 settings.hide()
+                            calculator = getattr(self.panel, 'calc_panel', None)
+                            if calculator is not None and not sip.isdeleted(calculator):
+                                calculator.hide()
                             self.panel.update_whiteboard_ui()
                     else:
                         self.panel.lifecycle.restore_after_teaching(token)
@@ -1220,6 +1223,7 @@ def run_practice_application(request: PracticeRequest, module: ModuleType) -> in
     context = module.RUNTIME_CONTEXT
     if not context.paths.practice or context.ui_active or context.paths != request.paths:
         return 2
+    module.initialize_interface_preferences()
     app = QApplication.instance() or QApplication([sys.argv[0]])
     app.setQuitOnLastWindowClosed(False)
     socket = QLocalSocket()

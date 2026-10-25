@@ -438,6 +438,7 @@ class AppLifecycleManager:
 
         if recovery_file:
             cmd.extend(['--restore', recovery_file])
+        cmd.extend(['--replace-instance', str(os.getpid())])
 
         # 启动新进程
         try:
@@ -454,6 +455,28 @@ class AppLifecycleManager:
 
         # 新进程启动成功：退出旧进程（不保存，因为已经保存到临时文件）
         self._do_quit(save=False)
+
+    def activate_from_external_launch(self):
+        """Reveal and foreground the existing UI after a duplicate launch."""
+        if self._quit_dialog_showing or self.state == LifecycleState.QUITTING:
+            return
+        if self.state == LifecycleState.HIDDEN:
+            # An explicit new launch means "show the program", even when the UI
+            # had been collapsed before it was sent to the tray.
+            self._state_before_hidden = LifecycleState.SHOWING
+            self.restore_from_background()
+        elif self.state == LifecycleState.COLLAPSED:
+            self.panel.toggle_toolbar_collapsed()
+        else:
+            self.panel.show()
+
+        self.panel.show()
+        self.panel.raise_()
+        self.panel.activateWindow()
+        self.panel._bound_key = None
+        bind = getattr(self.panel, "bind_topmost_stack", None)
+        if bind is not None:
+            bind()
 
     def _quit_app(self):
         """退出软件：显示保存提示"""
@@ -528,6 +551,10 @@ class AppLifecycleManager:
             return
         self._quit_done = True
         self.state = LifecycleState.QUITTING
+        try:
+            self.panel._stop_submenu_animations(hide_overlay=True, snap_open=False)
+        except Exception:
+            pass
         # 停止所有定时器和监听器
         try:
             self.panel.listener.stop()
@@ -548,7 +575,7 @@ class AppLifecycleManager:
         except Exception:
             pass
         for name in (
-            "page_rail", "menu_panel", "select_panel", "settings_panel",
+            "page_rail", "menu_panel", "_menu_close_overlay", "select_panel", "settings_panel",
             "text_panel", "calc_panel", "roster_panel", "mini_timer",
             "toolbar_window", "logo_window", "canvas", "panel",
         ):
@@ -777,6 +804,9 @@ class AppLifecycleManager:
             raise RuntimeError("This panel is already suspended for teaching")
         if QThread.currentThread() != self.panel.thread():
             raise RuntimeError("Teaching suspension must run on the panel's Qt thread")
+        stop_submenu_animations = getattr(self.panel, "_stop_submenu_animations", None)
+        if stop_submenu_animations is not None:
+            stop_submenu_animations(hide_overlay=True, snap_open=True)
         windows = self._owned_windows()
         timers = self._owned_timers(windows)
         if any(timer.thread() != QThread.currentThread() for timer in timers):

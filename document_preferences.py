@@ -1,7 +1,7 @@
 ﻿# SPDX-License-Identifier: GPL-3.0-or-later
 """Document/classroom preferences, independent of the large main UI module."""
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel, QComboBox, QSpinBox, QSlider, QApplication
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel, QComboBox, QSpinBox, QSlider, QCheckBox, QApplication
 from i18n import tr, trf
 from teaching.file_actions import teaching_interval_choice
 
@@ -34,6 +34,12 @@ class DocumentPreferences(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(5)
+        self.preserve_images_checkbox = QCheckBox(tr("preserve_original_images"))
+        layout.addWidget(self.preserve_images_checkbox)
+        self.preserve_images_hint = QLabel(tr("preserve_original_images_hint"))
+        self.preserve_images_hint.setObjectName("SettingsHint")
+        self.preserve_images_hint.setWordWrap(True)
+        layout.addWidget(self.preserve_images_hint)
         self.interval_label = QLabel(tr("autosave_interval"))
         layout.addWidget(self.interval_label)
         self.interval_combo = QComboBox()
@@ -46,6 +52,7 @@ class DocumentPreferences(QWidget):
         self.interval_custom.setSuffix(tr("seconds_suffix"))
         layout.addWidget(self.interval_custom)
         self.interval_hint = QLabel(tr("autosave_interval_hint"))
+        self.interval_hint.setObjectName('SettingsHint')
         self.interval_hint.setWordWrap(True)
         layout.addWidget(self.interval_hint)
         layout.addWidget(QLabel(tr("page_copy_placement")))
@@ -57,6 +64,7 @@ class DocumentPreferences(QWidget):
         self.monitor_combo = QComboBox()
         layout.addWidget(self.monitor_combo)
         monitor_hint = QLabel(tr("annotation_monitor_hint"))
+        monitor_hint.setObjectName('SettingsHint')
         monitor_hint.setWordWrap(True)
         layout.addWidget(monitor_hint)
         self.volume_label = QLabel()
@@ -65,9 +73,11 @@ class DocumentPreferences(QWidget):
         self.volume_slider.setRange(0, 100)
         layout.addWidget(self.volume_slider)
         self.volume_hint = QLabel(tr("timer_volume_hint"))
+        self.volume_hint.setObjectName('SettingsHint')
         self.volume_hint.setWordWrap(True)
         layout.addWidget(self.volume_hint)
         self.sync_from_panel()
+        self.preserve_images_checkbox.toggled.connect(panel.set_preserve_original_images)
         self.interval_combo.currentIndexChanged.connect(self._interval_selected)
         self.interval_custom.valueChanged.connect(self._custom_changed)
         self.copy_combo.currentIndexChanged.connect(lambda _: panel.set_page_copy_placement(self.copy_combo.currentData()))
@@ -106,9 +116,10 @@ class DocumentPreferences(QWidget):
             self.monitor_combo.blockSignals(False)
 
     def sync_from_panel(self):
-        for widget in (self.interval_combo, self.interval_custom, self.copy_combo, self.volume_slider):
+        for widget in (self.preserve_images_checkbox, self.interval_combo, self.interval_custom, self.copy_combo, self.volume_slider):
             widget.blockSignals(True)
         try:
+            self.preserve_images_checkbox.setChecked(self.panel.preserve_original_images)
             seconds = self.panel.autosave_interval_seconds
             index = self.interval_combo.findData(seconds)
             self.interval_combo.setCurrentIndex(index if index >= 0 else self.interval_combo.count() - 1)
@@ -118,6 +129,6 @@ class DocumentPreferences(QWidget):
             self.volume_slider.setValue(self.panel.timer_alarm_volume)
             self.volume_label.setText(trf("timer_alarm_volume", value=self.panel.timer_alarm_volume))
         finally:
-            for widget in (self.interval_combo, self.interval_custom, self.copy_combo, self.volume_slider):
+            for widget in (self.preserve_images_checkbox, self.interval_combo, self.interval_custom, self.copy_combo, self.volume_slider):
                 widget.blockSignals(False)
         self.refresh_screens()

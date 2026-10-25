@@ -55,6 +55,7 @@
     "measurement.c11.instruments": "fixtures/measurement.c11.instruments.msd",
     "measurement.c11.calibration": "fixtures/measurement.c11.calibration.msd",
     "toolbox.c12.calculator": "fixtures/toolbox.c12.calculator.msd",
+    "toolbox.c12.scientific_calculator": "fixtures/toolbox.c12.scientific_calculator.msd",
     "toolbox.c12.roster": "fixtures/toolbox.c12.roster.msd",
     "toolbox.c12.timer": "fixtures/toolbox.c12.timer.msd",
     "toolbox.c12.magnifier": "fixtures/toolbox.c12.magnifier.msd",

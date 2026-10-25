@@ -58,7 +58,7 @@ SUPPORTED = {
     'c09': ('image', 'pdf_pages'),
     'c10': ('formats', 'progress_cancel', 'result'),
     'c11': ('instruments', 'calibration'),
-    'c12': ('calculator', 'roster', 'timer', 'magnifier', 'spotlight'),
+    'c12': ('calculator', 'scientific_calculator', 'roster', 'timer', 'magnifier', 'spotlight'),
     'c13': ('layout_theme', 'monitor_audio', 'lifecycle', 'system'),
 }
 
@@ -84,6 +84,10 @@ def classify(chapter, step):
     if chapter.startswith('c09.'): return 'media'
     if chapter.startswith('c10.'): return 'export'
     if chapter.startswith('c11.'): return 'measure'
+    if chapter == 'c12.scientific_calculator' and name not in (
+            'open', 'mode', 'angle', 'expression', 'calculate', 'ans_expression',
+            'ans_calculate', 'history_open', 'history_restore'):
+        raise ValueError(f'unmapped scientific calculator operation: {name}')
     if chapter.startswith('c12.'): return 'toolbox'
     if chapter.startswith('c13.'): return 'interface'
     if chapter.startswith('c06.'): return 'geometry'
@@ -544,7 +548,61 @@ class ChapterDriver:
             self.drag_canvas(start,end)
         else: self.click_target()
 
+    def execute_scientific_calculator(self, name):
+        from decimal import Decimal
+        from calculator import format_decimal
+        from PyQt6.QtCore import Qt
+        widget = self.panel.calculator_widget
+        if name in ('expression', 'ans_expression'):
+            expression = 'sin(30)+√16' if name == 'expression' else 'Ans×2'
+            edit = self.target()
+            self.h.mouse.click(edit)
+            self.h.mouse.chord(0x11, 0x41, expected=edit.window())
+            self.h.mouse.text(expression, expected=edit.window())
+            self.pump(100)
+            self.h.require('scientific native expression', edit.text() == expression)
+            self.h.require('scientific preview', widget.preview_label.text() ==
+                           ('4.5' if name == 'expression' else '9'))
+        elif name == 'history_restore':
+            listing = self.target()
+            entries = [entry for entry in widget.history.entries
+                       if entry.mode == 'scientific' and entry.input == 'sin(30)+√16'
+                       and format_decimal(Decimal(entry.result)) == '4.5']
+            self.h.require('one first scientific record', len(entries) == 1, len(entries))
+            entry_id = entries[0].id
+            items = [listing.item(index) for index in range(listing.count())
+                     if listing.item(index).data(Qt.ItemDataRole.UserRole) == entry_id]
+            self.h.require('first scientific history row visible', len(items) == 1, len(items))
+            rect = listing.visualItemRect(items[0])
+            self.h.require('first scientific row inside viewport',
+                           listing.viewport().rect().contains(rect.center()))
+            self.h.mouse.click_point(listing.viewport().mapToGlobal(rect.center()))
+            self.pump(100)
+            self.h.require('first scientific record restored',
+                           widget.expression_edit.text() == 'sin(30)+√16'
+                           and widget.mode == 'scientific' and widget.engine.angle_mode == 'deg')
+        else:
+            self.click_target()
+        if name == 'mode':
+            self.h.require('scientific mode selected', widget.mode == 'scientific')
+        elif name == 'angle':
+            self.h.require('scientific DEG selected', widget.engine.angle_mode == 'deg')
+        elif name in ('calculate', 'ans_calculate'):
+            expected = '4.5' if name == 'calculate' else '9'
+            self.h.require('scientific submitted result', widget.expression_edit.text() == expected)
+            entry = widget.history.entries[-1]
+            self.h.require('scientific session record', entry.mode == 'scientific'
+                           and entry.input == ('sin(30)+√16' if name == 'calculate' else 'Ans*2')
+                           and format_decimal(Decimal(entry.result)) == expected)
+        elif name == 'history_open':
+            self.h.require('scientific history shown', widget.history_frame.isVisible())
+        self.h.require('calculator history remains private',
+                       widget.history.retention == 'session' and not widget.history.persistent)
+
     def execute_toolbox(self, chapter, name):
+        if chapter == 'c12.scientific_calculator':
+            self.execute_scientific_calculator(name)
+            return
         if chapter == 'c12.timer' and name == 'pause_up':
             self.until(lambda: self.panel.timer_left > 0, description='real count-up tick')
         if chapter == 'c12.magnifier' and name == 'size': self.h.slider(self.panel.mag_size_slider,320)

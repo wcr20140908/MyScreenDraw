@@ -141,6 +141,35 @@ class QuitRegressionTests(unittest.TestCase):
         self.assertEqual(manager.panel.project_path, "original.msd")
         self.assertTrue(manager.panel.project_dirty)
 
+    def test_successful_restart_waits_for_old_instance_before_restore(self):
+        manager = self.manager()
+        manager.panel.project_path = "original.msd"
+        manager.panel.project_dirty = True
+        manager.panel.save_project.return_value = True
+        with patch("subprocess.Popen") as spawn, patch.object(manager, "_do_quit") as quit_app:
+            manager._restart_app()
+        command = spawn.call_args.args[0]
+        self.assertIn("--replace-instance", command)
+        replace_index = command.index("--replace-instance")
+        self.assertEqual(command[replace_index + 1], str(os.getpid()))
+        self.assertIn("--restore", command)
+        quit_app.assert_called_once_with(save=False)
+
+    def test_external_launch_reveals_hidden_or_collapsed_interface(self):
+        hidden = self.manager(LifecycleState.HIDDEN)
+        hidden._state_before_hidden = LifecycleState.COLLAPSED
+        with patch.object(hidden, "restore_from_background") as restore:
+            hidden.activate_from_external_launch()
+        self.assertEqual(hidden._state_before_hidden, LifecycleState.SHOWING)
+        restore.assert_called_once_with()
+
+        collapsed = self.manager(LifecycleState.COLLAPSED)
+        collapsed.activate_from_external_launch()
+        collapsed.panel.toggle_toolbar_collapsed.assert_called_once_with()
+        collapsed.panel.show.assert_called_once_with()
+        collapsed.panel.raise_.assert_called_once_with()
+        collapsed.panel.activateWindow.assert_called_once_with()
+
     def test_failed_restart_restore_keeps_recovery_file(self):
         import tempfile
         import main

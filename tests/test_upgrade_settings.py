@@ -36,15 +36,17 @@ import pytest
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-FIELDS = tuple("""theme color_scheme pen_color pen_width pen_profiles pen_style calligraphy_angle
+FIELDS = tuple("""infinite_whiteboard custom_color_schemes theme color_scheme pen_color pen_width pen_profiles pen_style calligraphy_angle
 pen_options eraser_type eraser_size marker_color marker_alpha_pct marker_width
 laser_color laser_width magnifier_zoom magnifier_size board_style smart_shapes
 smart_multitouch speed_width timer_mode timer_target panel_x panel_y panel_screen
 logo_x logo_y toolbar_x toolbar_y toolbar_detached orientation draw_state shape_type
 text_font_size drawing_mode ruler_calibrations ui_mode ui_radius ui_opacity
-update_check_enabled update_channel notice_state whiteboard_auto_pen
+update_check_enabled update_channel update_source notice_state whiteboard_auto_pen
 pen_defaults_enabled pen_defaults last_annotate_tool autosave_interval_seconds
-annotation_screen timer_alarm_volume page_copy_placement""".split())
+annotation_screen timer_alarm_volume page_copy_placement preserve_original_images language ui_scale_percent
+    never_prompt_autosave_recovery submenu_animations_enabled calculator_history_retention
+calculator_last_mode calculator_angle_mode calculator_x calculator_y calculator_screen""".split())
 TOOLS = ("PEN", "MARKER", "LASER", "ERASER", "SELECT", "TEXT", "SHAPE")
 
 
@@ -131,8 +133,18 @@ def rich_settings(rig):
     p.set_orientation("landscape")
     p.set_ui_radius(21, persist=False)
     p.set_ui_opacity(73, persist=False)
+    p.set_language_preference("ja", persist=False)
+    p.set_ui_scale(150, persist=False)
+    p.set_never_prompt_autosave_recovery(True, persist=False)
+    p.set_submenu_animations_enabled(False, persist=False)
+    p.calculator_history_retention = '7d'
+    p.calculator_last_mode = 'scientific'
+    p.calculator_angle_mode = 'rad'
+    p._calculator_saved_pos = (37, 43)
+    p._calculator_saved_screen = 'synthetic-calculator-screen'
     p.timer_mode, p.timer_target = "UP", 137
     p.update_check_enabled, p.update_channel = False, "preview"
+    p.update_source = "gitcode"
     for i, style in enumerate(rig.main.PEN_STYLES):
         c.pen_profiles[style] = {"color": QColor.fromHsv(i * 23, 180, 190).name(),
                                  "width": i + 11, "speed_width": bool(i % 2)}
@@ -157,12 +169,16 @@ def rich_settings(rig):
         for key, scale, geometry in (("external-A", 5.25, [0, 0, 1920, 1080]),
                                      ("external-B", 7.5, [-2560, 0, 2560, 1440]))
     }
-    p._toolbar_detached = True
+    p.infinite_whiteboard = False
+    from custom_colors import palette_from_theme
+    p.custom_color_schemes = {"custom_upgrade": {"name": "Upgrade palette", "colors": {
+        mode: palette_from_theme(p.theme_for(mode, "classic")) for mode in ("light", "dark")
+    }}}
     # Coordinates deliberately fit the offscreen display and final orientation.
     p.move(13, 17)
     p.logo_window.move(29, 31)
-    p.toolbar_window.move(43, 107)
-    p._toolbar_saved_pos = (43, 107)
+    p.set_ui_mode("icon", persist=False)
+    p._sync_split_geometry()
     from pen_defaults import capture_current
     p.whiteboard_auto_pen = False
     p.pen_defaults_enabled = True
@@ -172,11 +188,12 @@ def rich_settings(rig):
     p.annotation_screen = "synthetic-disconnected-monitor|serial"
     p.timer_alarm_volume = 31
     p.page_copy_placement = "before"
+    p.preserve_original_images = False
     p.pen_defaults = {key: capture_current(c, key) for key in (*rig.main.PEN_STYLES, "marker", "laser")}
     settings = p.collect_settings()
     assert set(settings) == set(FIELDS), "Update the audit when collect_settings changes"
     for field in FIELDS:
-        if field not in ("ui_mode", "panel_screen"):
+        if field not in ("ui_mode", "panel_screen", "toolbar_detached"):
             assert settings[field] != baseline[field], f"{field} must exercise a nondefault"
     p.save_settings()
     import json
@@ -204,9 +221,15 @@ def test_tool_and_drawing_mode_are_independent(rig, tool, drawing_mode):
 
 
 @pytest.mark.parametrize("orientation", ["portrait", "landscape"])
-def test_detached_positions_fit_screen_without_drift(rig, orientation):
+def test_attached_positions_fit_screen_without_drift(rig, orientation):
     payload = rich_settings(rig)
-    payload["orientation"] = orientation
+    p, _ = rig.fresh()
+    p.set_orientation(orientation)
+    p.logo_window.move(29, 31)
+    p.set_ui_mode("icon", persist=False)
+    p._sync_split_geometry()
+    payload.update({key: p.collect_settings()[key] for key in
+                    ("orientation", "logo_x", "logo_y", "toolbar_x", "toolbar_y", "toolbar_detached")})
     p, _ = rig.load(payload)
     area = p.screen().availableGeometry()
     for window in (p, p.logo_window, p.toolbar_window):
@@ -297,6 +320,21 @@ def test_corrupt_single_field_does_not_abort_healthy_siblings(rig, field, bad):
     assert not differences, f"Corrupt {field} blocked healthy siblings: {differences}"
 
 
+@pytest.mark.parametrize("bad", [None, "false", 0, 1, [], {}])
+def test_submenu_animation_setting_accepts_only_boolean_values(rig, bad):
+    payload = rich_settings(rig)
+    payload["submenu_animations_enabled"] = bad
+    panel, _ = rig.load(payload)
+    assert panel.submenu_animations_enabled is True
+
+
+def test_missing_submenu_animation_setting_defaults_to_enabled(rig):
+    payload = rich_settings(rig)
+    payload.pop("submenu_animations_enabled")
+    panel, _ = rig.load(payload)
+    assert panel.submenu_animations_enabled is True
+
+
 PEN_STYLES = ("pen", "fountain", "brush", "calligraphy", "pencil", "crayon",
               "chalk", "neon", "dashed", "rainbow", "arrow")
 
@@ -365,3 +403,83 @@ def test_legacy_single_screen_calibration_migrates(rig):
     p.save_settings()
     again, _ = rig.load()
     assert again.collect_settings()["ruler_calibrations"] == p.collect_settings()["ruler_calibrations"]
+
+
+def assert_toolbar_attached(panel):
+    from PyQt6.QtCore import QPoint
+    from toolbar_windows import LOGO_GAP
+    logo, toolbar = panel.logo_window, panel.toolbar_window
+    offset = (QPoint(0, logo.height() + LOGO_GAP) if panel.orientation == "portrait"
+              else QPoint(logo.width() + LOGO_GAP, 0))
+    assert toolbar.pos() == logo.pos() + offset
+    assert panel._toolbar_detached is False
+    assert panel._toolbar_saved_pos is None
+    area = logo.screen().availableGeometry()
+    assert area.contains(logo.geometry())
+    assert area.contains(toolbar.geometry())
+
+
+@pytest.mark.parametrize("orientation", ["portrait", "landscape"])
+@pytest.mark.parametrize("legacy_detached", [True, False, "true", None, {}])
+def test_legacy_split_positions_repair_on_startup_and_save(rig, orientation, legacy_detached):
+    panel, _ = rig.fresh()
+    payload = panel.collect_settings()
+    payload.update(orientation=orientation, logo_x=70, logo_y=40,
+                   toolbar_x=650, toolbar_y=500, toolbar_detached=legacy_detached,
+                   ui_radius=17, ui_opacity=73, update_check_enabled=False)
+    panel, _ = rig.load(payload)
+    assert_toolbar_attached(panel)
+    assert (panel.logo_window.x(), panel.logo_window.y()) == (70, 40)
+    assert (panel.ui_radius, panel.ui_opacity, panel.update_check_enabled) == (17, 73, False)
+    panel.save_settings()
+    import json
+    assert json.loads(rig.path.read_text(encoding="utf-8"))["toolbar_detached"] is False
+    again, _ = rig.load()
+    assert_toolbar_attached(again)
+    assert again.logo_window.pos() == panel.logo_window.pos()
+    assert again.toolbar_window.pos() == panel.toolbar_window.pos()
+
+
+@pytest.mark.parametrize("orientation", ["portrait", "landscape"])
+def test_collapse_move_logo_expand_repairs_stale_detachment(rig, orientation):
+    from PyQt6.QtCore import QPoint, Qt
+    from PyQt6.QtTest import QTest
+    panel, _ = rig.fresh()
+    panel.set_orientation(orientation)
+    panel.set_ui_mode("icon", persist=False)
+    panel._toolbar_detached = True
+    panel._toolbar_saved_pos = (650, 500)
+    panel.toolbar_window.move(650, 500)
+    QTest.mouseClick(panel.logo_window.logo_btn, Qt.MouseButton.LeftButton)
+    assert not panel.toolbar_window.isVisible()
+    panel.logo_window.move(QPoint(60, 35))
+    QTest.mouseClick(panel.logo_window.logo_btn, Qt.MouseButton.LeftButton)
+    assert panel.toolbar_window.isVisible()
+    assert_toolbar_attached(panel)
+
+
+@pytest.mark.parametrize("orientation", ["portrait", "landscape"])
+def test_group_drag_position_survives_fresh_start(rig, orientation):
+    from PyQt6.QtCore import QEvent, QPoint, QPointF, Qt
+    from PyQt6.QtGui import QMouseEvent
+    from PyQt6.QtWidgets import QApplication
+    panel, _ = rig.fresh()
+    panel.set_orientation(orientation)
+    panel.set_ui_mode("icon", persist=False)
+    toolbar = panel.toolbar_window
+    start = toolbar.pos() + QPoint(3, 3)
+    end = start + QPoint(90, 60)
+    for kind, point, button, buttons in (
+        (QEvent.Type.MouseButtonPress, start, Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton),
+        (QEvent.Type.MouseMove, end, Qt.MouseButton.NoButton, Qt.MouseButton.LeftButton),
+        (QEvent.Type.MouseButtonRelease, end, Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton),
+    ):
+        event = QMouseEvent(kind, QPointF(toolbar.mapFromGlobal(point)), QPointF(point),
+                            button, buttons, Qt.KeyboardModifier.NoModifier)
+        QApplication.sendEvent(toolbar, event)
+    assert_toolbar_attached(panel)
+    position = panel.logo_window.pos(), panel.toolbar_window.pos()
+    panel.save_settings()
+    again, _ = rig.load()
+    assert_toolbar_attached(again)
+    assert (again.logo_window.pos(), again.toolbar_window.pos()) == position

@@ -1,11 +1,15 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Observe real C12 tool results; no bus means the original application path."""
+from contextlib import nullcontext
 from functools import wraps
 from inspect import signature
 import json
 
 TOOLBOX_EVENTS = frozenset({
     'calculator.opened', 'calculator.input', 'calculator.calculated',
+    'calculator.mode_changed', 'calculator.angle_changed',
+    'calculator.expression_entered', 'calculator.history_toggled',
+    'calculator.history_recalled',
     'roster.opened', 'roster.drawn', 'roster.reset', 'timer.panel_opened',
     'timer.mode_changed', 'timer.running_changed', 'timer.reset', 'timer.finished',
     'magnifier.opened', 'magnifier.zoom_changed', 'magnifier.size_changed',
@@ -138,13 +142,26 @@ def toolbox_action(name):
             before = _snapshot(panel, event)
             if event in ('timer.mode_changed', 'timer.reset'):
                 discard_timer_completion(panel)
+            pending = None
+            def publish():
+                if pending is not None:
+                    bus.emit_result(operation, event, *pending)
+            presenter = (getattr(panel, 'teaching_presenter', None)
+                         if event == 'calculator.opened' and operation is not None else None)
+            # Opening the float hides its source Tools button. Nested Qt layout
+            # work must finish before the presenter checks that old target.
+            scope = (presenter.native_dialog(before_refresh=publish)
+                     if presenter is not None else nullcontext())
             try:
-                result = function(owner, *args, **kwargs)
-                details = _result(panel, event, before, args)
-                if details is not None:
-                    outcome = ('failed' if event.startswith('roster.') and details.get('saved') is False
-                               else 'success')
-                    bus.emit_result(operation, event, outcome, details)
+                with scope:
+                    result = function(owner, *args, **kwargs)
+                    details = _result(panel, event, before, args)
+                    if details is not None:
+                        outcome = ('failed' if event.startswith('roster.') and details.get('saved') is False
+                                   else 'success')
+                        pending = (outcome, details)
+                        if presenter is None:
+                            publish()
                 return result
             finally:
                 bus.discard_operation(operation)
@@ -306,6 +323,20 @@ def toolbox_bindings(panel):
     bindings['magnifier.practice'] = lambda: panel.canvas
     for target, code in (('two', '2'), ('plus', '+'), ('three', '3'), ('equals', '=')):
         bindings['calculator.' + target] = lambda code=code: getattr(panel, 'calc_buttons', {}).get(code)
+    bindings.update({
+        'calculator.mode_scientific': lambda: (getattr(panel, 'calculator_widget', None).mode_buttons.get('scientific')
+                                                if getattr(panel, 'calculator_widget', None) else None),
+        'calculator.angle': lambda: (getattr(panel, 'calculator_widget', None).scientific_buttons.get('angle')
+                                     if getattr(panel, 'calculator_widget', None) else None),
+        'calculator.expression': lambda: (getattr(panel, 'calculator_widget', None).expression_edit
+                                          if getattr(panel, 'calculator_widget', None) else None),
+        'calculator.scientific_equals': lambda: (getattr(panel, 'calculator_widget', None).scientific_buttons.get('equals')
+                                                 if getattr(panel, 'calculator_widget', None) else None),
+        'calculator.history_toggle': lambda: (getattr(panel, 'calculator_widget', None).history_toggle
+                                              if getattr(panel, 'calculator_widget', None) else None),
+        'calculator.history_record': lambda: (getattr(panel, 'calculator_widget', None).history_list
+                                              if getattr(panel, 'calculator_widget', None) else None),
+    })
     for target, attribute in {
         'roster.draw': 'btn_roster_draw', 'roster.reset': 'btn_roster_reset',
         'timer.up': 'btn_timer_up', 'timer.down': 'btn_timer_down',
@@ -320,6 +351,8 @@ def toolbox_bindings(panel):
 TOOLBOX_TARGETS = frozenset({
     'tools.calculator', 'tools.roster', 'tools.timer', 'tools.magnifier', 'tools.spotlight',
     'calculator.two', 'calculator.plus', 'calculator.three', 'calculator.equals',
+    'calculator.mode_scientific', 'calculator.angle', 'calculator.expression',
+    'calculator.scientific_equals', 'calculator.history_toggle', 'calculator.history_record',
     'roster.draw', 'roster.reset', 'timer.up', 'timer.down', 'timer.start_pause', 'timer.reset',
     'magnifier.zoom_in', 'magnifier.size', 'magnifier.refresh', 'magnifier.practice',
 })

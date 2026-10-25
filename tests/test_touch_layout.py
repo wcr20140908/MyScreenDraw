@@ -55,6 +55,9 @@ class PanelTestCase(unittest.TestCase):
                 pass
 
     def setUp(self):
+        # These cases verify final layout geometry. Animation timing and offsets
+        # are covered separately in test_submenu_animation.py.
+        self.panel.set_submenu_animations_enabled(False, persist=False)
         self.panel.set_orientation("portrait")
         self.panel.show_only_sub(None)
 

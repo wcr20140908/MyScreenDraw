@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""All 47 chapters share a private process, real controls and restored parent work."""
+"""All 48 chapters share a private process, real controls and restored parent work."""
 from test_teaching_export_process import (
     BRIDGE as EXPORT_BRIDGE, CHAPTERS as EXPORT_CHAPTERS,
     parent_coordinator, practice_request, run_course_process,
@@ -7,7 +7,8 @@ from test_teaching_export_process import (
 
 CHAPTERS = EXPORT_CHAPTERS + (
     'c11.instruments', 'c11.calibration',
-    'c12.calculator', 'c12.roster', 'c12.timer', 'c12.magnifier', 'c12.spotlight',
+    'c12.calculator', 'c12.scientific_calculator', 'c12.roster', 'c12.timer',
+    'c12.magnifier', 'c12.spotlight',
     'c13.layout_theme', 'c13.monitor_audio', 'c13.lifecycle', 'c13.system',
 )
 BRIDGE = EXPORT_BRIDGE.replace('chapters = ' + repr(EXPORT_CHAPTERS), 'chapters = ' + repr(CHAPTERS))
@@ -73,7 +74,48 @@ BRIDGE = BRIDGE.replace("        elif chapter.startswith('c10.'):", r"""        
             if name == 'open': panel.tool_menu_buttons['open_calculator'].click()
             else:
                 panel.calc_buttons[{'two':'2','plus':'+','three':'3','equals':'='}[name]].click()
-                if name == 'equals': assert panel._calc_display.text() == '5'
+                if name == 'equals':
+                    assert panel._calc_display.text() == '5'
+                    trace['c12_basic_result'] = '5'
+        elif chapter == 'c12.scientific_calculator':
+            widget = panel.calculator_widget
+            if name == 'open': panel.tool_menu_buttons['open_calculator'].click()
+            elif name == 'mode': widget.mode_buttons['scientific'].click()
+            elif name == 'angle':
+                widget.scientific_buttons['angle'].click()
+                assert widget.engine.angle_mode == 'deg'
+                trace['c12_scientific_angle'] = 'deg'
+            elif name == 'expression':
+                widget.expression_edit.setText('sin(30)+√16')
+                widget.expression_edit.textEdited.emit(widget.expression_edit.text())
+            elif name == 'calculate':
+                widget.scientific_buttons['equals'].click()
+                assert widget.expression_edit.text() == '4.5'
+                trace['c12_scientific_result'] = '4.5'
+            elif name == 'ans_expression':
+                widget.expression_edit.setText('Ans×2')
+                widget.expression_edit.textEdited.emit(widget.expression_edit.text())
+            elif name == 'ans_calculate':
+                widget.scientific_buttons['equals'].click()
+                assert widget.expression_edit.text() == '9'
+                trace['c12_scientific_ans'] = '9'
+            elif name == 'history_open': widget.history_toggle.click()
+            elif name == 'history_restore':
+                from decimal import Decimal
+                from calculator import format_decimal
+                entry = next(entry for entry in widget.history.entries
+                             if entry.mode == 'scientific' and entry.input == 'sin(30)+√16'
+                             and format_decimal(Decimal(entry.result)) == '4.5')
+                item = next(widget.history_list.item(i) for i in range(widget.history_list.count())
+                            if widget.history_list.item(i).data(Qt.ItemDataRole.UserRole) == entry.id)
+                widget.history_list.setCurrentItem(item)
+                widget.history_list.itemClicked.emit(item)
+                assert widget.expression_edit.text() == 'sin(30)+√16'
+                assert [(entry.input, format_decimal(Decimal(entry.result)))
+                        for entry in widget.history.entries] == [
+                    ('sin(30)+√16', '4.5'), ('Ans*2', '9')]
+                trace['c12_scientific_restored'] = 'sin(30)+√16'
+            assert widget.history.retention == 'session' and not widget.history.persistent
         elif chapter == 'c12.roster':
             if name == 'open': panel.tool_menu_buttons['open_roster_panel'].click()
             elif name == 'reset': panel.btn_roster_reset.click()
@@ -123,5 +165,10 @@ BRIDGE = BRIDGE.replace("        elif chapter.startswith('c10.'):", r"""        
 
 def test_all_courses_one_process_restores_parent_and_cleans_private_files(parent_coordinator, tmp_path, monkeypatch):
     proof = run_course_process(parent_coordinator, tmp_path, monkeypatch,
-        chapters=CHAPTERS, bridge_source=BRIDGE, expected_steps=400)
+        chapters=CHAPTERS, bridge_source=BRIDGE, expected_steps=411)
     assert proof['c13_paused'] and proof['c13_resumed']
+    assert proof['c12_basic_result'] == '5'
+    assert proof['c12_scientific_angle'] == 'deg'
+    assert proof['c12_scientific_result'] == '4.5'
+    assert proof['c12_scientific_ans'] == '9'
+    assert proof['c12_scientific_restored'] == 'sin(30)+√16'

@@ -48,6 +48,8 @@ data/config.json
 data/config.json.*
 data/roster.json
 data/tutorial_state.json
+data/calculator-history.json
+data/.calculator-history.json.*.tmp
 data/autosave/
 # 兜底：自动保存目前写进 data/autosave/（上一行已挡住），这条防的是将来写盘路径
 # 改动后板书内容直接落在 data/ 下而无人察觉——那是用户的课堂内容，不能进仓库。
@@ -72,3 +74,16 @@ MyScreenDraw-v*.zip
 MyScreenDraw-v*.zip.sha256
 # Private native-test screenshots, fixtures and diagnostics
 .ccgui/
+
+# Local release instructions and credentials; never publish.
+/agent.md
+
+# Local working notes and release probes
+.superpowers/
+/task_plan.md
+/findings.md
+/progress.md
+MyScreenDraw-v*-update.json
+
+# All classroom/runtime content stays local
+/data/
