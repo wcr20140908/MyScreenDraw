@@ -3,13 +3,15 @@ import base64
 import gzip
 import json
 import os
+import stat
 import struct
 import tempfile
+import time
 import unittest
 import uuid
 import zlib
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import persistence
@@ -31,9 +33,78 @@ def project(*, kind=persistence.PROJECT_KIND, image=None):
                                          board_style="WHITE", app_version="6.1.0", kind=kind)
 
 
+class ProjectTemporaryDirectory(tempfile.TemporaryDirectory):
+    """Retry only a transient empty-directory Windows removal failure."""
+    def __init__(self, *, retry_timeout=1.0):
+        super().__init__(prefix="myscreendraw-persistence-")
+        self._owned_name = os.path.abspath(self.name)
+        try:
+            status = self._ordinary_directory_status()
+        except (OSError, ValueError):
+            self._finalizer.detach()
+            raise
+        self._owned_identity = (status.st_dev, status.st_ino)
+        self._owned_parent = Path(self.name).parent.resolve()
+        self._owned_real_path = self._owned_parent / Path(self.name).name
+        self._retry_timeout = retry_timeout
+
+    def _ordinary_directory_status(self):
+        status = os.lstat(self.name)
+        reparse = getattr(status, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        if stat.S_ISLNK(status.st_mode) or not stat.S_ISDIR(status.st_mode) or reparse:
+            raise ValueError("Temporary directory is not an ordinary directory")
+        return status
+
+    def _assert_owned_directory(self):
+        if os.path.abspath(self.name) != self._owned_name:
+            raise ValueError("Temporary directory path changed")
+        try:
+            status = self._ordinary_directory_status()
+        except FileNotFoundError:
+            return False
+        resolved = Path(self.name).resolve()
+        if resolved.parent != self._owned_parent:
+            raise ValueError("Temporary directory escaped its parent")
+        if ((status.st_dev, status.st_ino) != self._owned_identity
+                or resolved != self._owned_real_path):
+            raise ValueError("Temporary directory ownership changed")
+        return True
+
+    def cleanup(self):
+        try:
+            self._assert_owned_directory()
+        except (OSError, ValueError):
+            # A later finalizer must not bypass the ownership check.
+            self._finalizer.detach()
+            raise
+        try:
+            super().cleanup()
+        except OSError as original_error:
+            if getattr(original_error, "winerror", None) != 145:
+                raise
+            deadline = time.monotonic() + self._retry_timeout
+            while True:
+                if not self._assert_owned_directory():
+                    return
+                with os.scandir(self.name) as entries:
+                    if next(entries, None) is not None:
+                        raise original_error
+                try:
+                    os.rmdir(self.name)
+                    return
+                except OSError as error:
+                    if getattr(error, "winerror", None) != 145 or time.monotonic() >= deadline:
+                        raise
+                time.sleep(0.01)
+
+
+def project_test_directory(*, retry_timeout=1.0):
+    return ProjectTemporaryDirectory(retry_timeout=retry_timeout)
+
+
 class ProjectWriterTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
+        self.tmp = project_test_directory()
         self.addCleanup(self.tmp.cleanup)
 
     def path(self, name):
@@ -173,6 +244,113 @@ class ProjectWriterTests(unittest.TestCase):
                 for key in fields:
                     del data["pages"][0][key]
         self.assert_no_temp()
+
+
+class ProjectDirectoryCleanupTests(unittest.TestCase):
+    def test_empty_directory_145_is_retried_and_completely_removed(self):
+        temporary = project_test_directory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        (root / "lesson.msd").write_bytes(b"finished project")
+        native_rmdir = os.rmdir
+        calls = []
+        error = OSError(145, "Directory is not empty", str(root))
+        error.winerror = 145
+
+        def pending_delete_once(path, *args, **kwargs):
+            if os.path.abspath(path) == os.path.abspath(root):
+                calls.append(path)
+                if len(calls) == 1:
+                    self.assertEqual(list(root.iterdir()), [])
+                    raise error
+            return native_rmdir(path, *args, **kwargs)
+
+        with patch.object(os, "rmdir", side_effect=pending_delete_once):
+            temporary.cleanup()
+        self.assertEqual(len(calls), 2)
+        self.assertFalse(root.exists())
+
+    def test_persistent_145_has_deadline_and_is_not_ignored(self):
+        temporary = project_test_directory(retry_timeout=0.03)
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        error = OSError(145, "Directory is not empty", str(root))
+        error.winerror = 145
+        clock = Mock()
+        clock.monotonic.side_effect = [0.0, 0.01, 0.04]
+        with patch(__name__ + ".time", clock), patch.object(os, "rmdir", side_effect=error) as remove:
+            with self.assertRaises(OSError) as raised:
+                temporary.cleanup()
+        self.assertIs(raised.exception, error)
+        self.assertEqual(remove.call_count, 3)
+        clock.sleep.assert_called_once()
+        self.assertTrue(root.is_dir())
+        self.assertEqual(list(root.iterdir()), [])
+
+    def test_new_file_after_recursive_cleanup_is_preserved_and_fails(self):
+        temporary = project_test_directory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        error = OSError(145, "Directory is not empty", str(root))
+        error.winerror = 145
+        unexpected = root / "unexpected-writer.txt"
+
+        def write_during_remove(path, *args, **kwargs):
+            unexpected.write_bytes(b"must not be hidden by cleanup")
+            raise error
+
+        with patch.object(os, "rmdir", side_effect=write_during_remove) as remove:
+            with self.assertRaises(OSError) as raised:
+                temporary.cleanup()
+        self.assertIs(raised.exception, error)
+        self.assertEqual(remove.call_count, 1)
+        self.assertEqual(unexpected.read_bytes(), b"must not be hidden by cleanup")
+
+    def test_permission_error_is_not_retried_or_ignored(self):
+        temporary = project_test_directory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        error = PermissionError(13, "Access denied", str(root))
+        error.winerror = 5
+        with patch.object(tempfile.TemporaryDirectory, "cleanup", side_effect=error) as cleanup:
+            with self.assertRaises(PermissionError) as raised:
+                temporary.cleanup()
+        self.assertIs(raised.exception, error)
+        cleanup.assert_called_once()
+        self.assertTrue(root.is_dir())
+
+    def test_changed_path_does_not_delete_another_directory(self):
+        temporary = project_test_directory()
+        self.addCleanup(temporary.cleanup)
+        other = tempfile.TemporaryDirectory()
+        self.addCleanup(other.cleanup)
+        marker = Path(other.name) / "keep.txt"
+        marker.write_bytes(b"not owned")
+        owned_name = temporary.name
+        temporary.name = other.name
+        try:
+            with self.assertRaisesRegex(ValueError, "path changed"):
+                temporary.cleanup()
+            self.assertEqual(marker.read_bytes(), b"not owned")
+        finally:
+            temporary.name = owned_name
+
+    def test_replaced_directory_identity_is_not_deleted(self):
+        temporary = project_test_directory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        parked = root.with_name(root.name + "-original")
+        self.assertEqual(parked.resolve().parent, root.resolve().parent)
+        os.rename(root, parked)
+        root.mkdir()
+        try:
+            with self.assertRaisesRegex(ValueError, "ownership changed"):
+                temporary.cleanup()
+            self.assertTrue(root.is_dir())
+            self.assertTrue(parked.is_dir())
+        finally:
+            os.rmdir(root)
+            os.rename(parked, root)
 
 
 if __name__ == "__main__":
