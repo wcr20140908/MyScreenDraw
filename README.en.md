@@ -17,7 +17,7 @@ Current version **v6.3.0** — stable release. The UI follows the system languag
 
 6.3.0 provides the same Windows x64 portable ZIP, checksum and signed update descriptor on GitHub and GitCode.
 
-## 6.3.0 features and fixes (October 25, 2026)
+## 6.3.0 features and fixes (October 29, 2026)
 
 - **Two update sources**: choose International (GitHub) or China (GitCode) in Settings. Checks, release notes and downloads use the saved choice. Releases from 6.3.0 require an Ed25519 descriptor verified with the built-in public key; downloaded sizes, hashes and installer metadata are verified locally.
 
@@ -101,7 +101,7 @@ These changes are included in the stable 6.0.0 portable release. The older beta.
 
 **[Download Windows x64 portable v6.3.0 (includes EXE, no installation)](https://github.com/wcr20140908/MyScreenDraw/releases/download/v6.3.0/MyScreenDraw-v6.3.0-windows-x64.zip)**
 
-**[China download on GitCode](https://gitcode.com/wcr20140908/MyScreenDraw/releases/download/v6.3.0/MyScreenDraw-v6.3.0-windows-x64.zip)** · [Release notes](release-notes-v6.3.0.md)
+**[China download on GitCode](https://api.gitcode.com/api/v5/repos/wcr20140908/MyScreenDraw/releases/v6.3.0/attach_files/MyScreenDraw-v6.3.0-windows-x64.zip/download)** · [Release notes](release-notes-v6.3.0.md)
 
 [Release page and notes](https://github.com/wcr20140908/MyScreenDraw/releases/tag/v6.3.0) · [SHA-256 checksum](https://github.com/wcr20140908/MyScreenDraw/releases/download/v6.3.0/MyScreenDraw-v6.3.0-windows-x64.zip.sha256)
 

@@ -11,7 +11,7 @@ import uuid
 from types import ModuleType
 
 from PyQt6 import sip
-from PyQt6.QtCore import QObject, QPoint, QRect, QRectF, QTimer, pyqtSignal
+from PyQt6.QtCore import QCoreApplication, QEvent, QObject, QPoint, QRect, QRectF, QTimer, pyqtSignal
 from PyQt6.QtNetwork import QLocalSocket
 from PyQt6.QtWidgets import QApplication, QMessageBox
 from PyQt6.QtCore import Qt
@@ -1190,6 +1190,8 @@ class ApplicationTeachingHost(QObject):
     def close(self):
         if self._closed:
             return
+        self._dispose_windows = [window for window in QApplication.topLevelWidgets()
+                                 if not sip.isdeleted(window) and self.panel.lifecycle._owns_window(window)]
         self._closed = True
         self._cancel_roaming_gesture()
         failure = None
@@ -1218,6 +1220,19 @@ class ApplicationTeachingHost(QObject):
             raise RuntimeError('private teaching cleanup failed') from failure
 
 
+    def dispose(self):
+        """Destroy private widget trees after the application event loop returns."""
+        self.close()
+        windows = self._dispose_windows
+        self._dispose_windows = []
+        for window in windows:
+            if not sip.isdeleted(window):
+                window.deleteLater()
+        for window in windows:
+            if not sip.isdeleted(window):
+                QCoreApplication.sendPostedEvents(window, QEvent.Type.DeferredDelete)
+
+
 def run_practice_application(request: PracticeRequest, module: ModuleType) -> int:
     """Private startup branch: connect first; never fall through to normal startup."""
     context = module.RUNTIME_CONTEXT
@@ -1243,6 +1258,8 @@ def run_practice_application(request: PracticeRequest, module: ModuleType) -> in
         return app.exec()
     finally:
         child.stop(send=False)
+        if child.host is not None:
+            child.host.dispose()
 
 
 class TeachingCoordinator(QObject):

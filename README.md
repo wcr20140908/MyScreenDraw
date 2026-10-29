@@ -15,7 +15,7 @@ MyScreenDraw 是一个面向**教室触控大屏**的全屏批注 / 白板 / 数
 
 6.3.0 提供 Windows x64 便携包，GitHub 与 GitCode 发布相同 ZIP、校验文件与签名更新描述文件。
 
-### 6.3.0 新功能与修复（2026-10-25）
+### 6.3.0 新功能与修复（2026-10-29）
 
 - **双更新线路**：设置中选择国外线路（GitHub）或国内线路（GitCode），记住选择；检查、说明及下载均使用所选平台。6.3.0 起使用内置公钥验证签名描述文件，下载后在本地核对包大小、哈希与安装清单。
 
@@ -99,7 +99,7 @@ MyScreenDraw 是一个面向**教室触控大屏**的全屏批注 / 白板 / 数
 
 **[下载 Windows x64 便携版 v6.3.0（含 EXE，免安装）](https://github.com/wcr20140908/MyScreenDraw/releases/download/v6.3.0/MyScreenDraw-v6.3.0-windows-x64.zip)**
 
-**[国内线路 GitCode 便携包](https://gitcode.com/wcr20140908/MyScreenDraw/releases/download/v6.3.0/MyScreenDraw-v6.3.0-windows-x64.zip)** · [发布说明](release-notes-v6.3.0.md)
+**[国内线路 GitCode 便携包](https://api.gitcode.com/api/v5/repos/wcr20140908/MyScreenDraw/releases/v6.3.0/attach_files/MyScreenDraw-v6.3.0-windows-x64.zip/download)** · [发布说明](release-notes-v6.3.0.md)
 
 [发布页面与说明](https://github.com/wcr20140908/MyScreenDraw/releases/tag/v6.3.0) · [SHA-256 校验文件](https://github.com/wcr20140908/MyScreenDraw/releases/download/v6.3.0/MyScreenDraw-v6.3.0-windows-x64.zip.sha256)
 

@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import pytest
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
+from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication
 from test_teaching_application import (
     practice_request, application_host, parent_coordinator, Peer,
@@ -27,6 +28,7 @@ def pump(predicate, timeout=1):
     end = time.monotonic() + timeout
     while not predicate() and time.monotonic() < end:
         QApplication.instance().processEvents()
+        QTest.qWait(5)
     return predicate()
 
 
@@ -64,10 +66,19 @@ def test_parent_accepts_progress_already_sent_before_pause(wire_pair, tmp_path):
     child_peer.send('chapter_state', {
         'chapter_id': 'c01.save', 'status': 'completed', 'compat_revision': 1})
     assert broker.request_pause(hidden=True)
-    pump(lambda: broker.last_error is not None or store.chapter_status('c01.save') == 'completed')
+    assert pump(lambda: broker.last_error is not None or store.chapter_status('c01.save') == 'completed',
+                timeout=5), (broker.phase, broker.last_error,
+                             parent_peer.socket.bytesAvailable(), child_peer.socket.bytesToWrite())
     print('CROSSED_PROGRESS', broker.phase, broker.last_error, store.chapter_status('c01.save'))
     assert broker.last_error is None
     assert store.chapter_status('c01.save') == 'completed'
+
+
+def test_progress_crossing_pause_waits_for_delayed_socket_dispatch(wire_pair, tmp_path, monkeypatch):
+    parent_peer, _ = wire_pair
+    native_start = parent_peer._read_timer.start
+    monkeypatch.setattr(parent_peer._read_timer, 'start', lambda interval=0: native_start(1500))
+    test_parent_accepts_progress_already_sent_before_pause(wire_pair, tmp_path)
 
 
 def test_final_progress_is_delivered_before_peer_close(wire_pair):

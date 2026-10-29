@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import threading
+import time
 from unittest.mock import Mock
 import zipfile
 import pytest
@@ -156,7 +157,7 @@ def test_notes_cache_source_scope_and_late_reply(tmp_path):
         controller.request("v6.3.0")
         controller.set_source("gitcode", lambda tag: ("domestic", None))
         first.set()
-        settle(controller)
+        settle(controller, timeout=5)
         assert controller.state("v6.3.0") == ("domestic", None)
         assert controller.history.notes["v6.3.0"] == "foreign"
         assert controller.history.notes["gitcode:v6.3.0"] == "domestic"
@@ -166,6 +167,17 @@ def test_notes_cache_source_scope_and_late_reply(tmp_path):
     finally:
         first.set()
         controller.stop()
+
+
+def test_notes_source_switch_waits_for_both_delayed_workers(tmp_path, monkeypatch):
+    original_run = notes.NotesWorker.run
+
+    def delayed_run(worker):
+        time.sleep(1.6)
+        original_run(worker)
+
+    monkeypatch.setattr(notes.NotesWorker, "run", delayed_run)
+    test_notes_cache_source_scope_and_late_reply(tmp_path)
 
 
 @pytest.mark.parametrize("mutation", ["valid", "version", "hash", "exe"])

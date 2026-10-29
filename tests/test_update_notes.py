@@ -38,8 +38,8 @@ def controller(tmp_path):
     QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
 
-def settle(controller):
-    deadline = time.monotonic() + 3
+def settle(controller, timeout=3):
+    deadline = time.monotonic() + timeout
     while controller._worker is not None and time.monotonic() < deadline:
         QTest.qWait(5)
     assert controller._worker is None, "Notes worker did not drain"
